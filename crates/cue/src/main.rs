@@ -101,6 +101,7 @@ fn main() {
             .unwrap_or_else(|_| PathBuf::from("CUE"));
         let core = Core::new(
             CoreConfig {
+                usage_file: Some(storage_root.join("usage.tsv")),
                 storage_root,
                 ..CoreConfig::default()
             },

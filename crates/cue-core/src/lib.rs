@@ -32,6 +32,8 @@ pub type CoreEventSender = UnboundedSender<CoreEvent>;
 pub struct CoreConfig {
     /// §43 存储根(由编排层解析,如 `%LOCALAPPDATA%\CUE`)。
     pub storage_root: PathBuf,
+    /// §50 usage 持久化文件;None = 纯内存(测试)。
+    pub usage_file: Option<PathBuf>,
     /// §94 Core/UI 请求预算。V1 为固定值,不来自任何 `module.*` 设置。
     pub result_limit: usize,
     /// §54 / §115 `core.hide_on_focus_loss`(V1 固定默认 true)。
@@ -44,6 +46,7 @@ impl Default for CoreConfig {
     fn default() -> Self {
         Self {
             storage_root: PathBuf::from("cue-data"),
+            usage_file: None,
             result_limit: 20,
             hide_on_focus_loss: true,
             default_hotkey: Hotkey::default(),
@@ -74,6 +77,7 @@ impl Core {
         spawner: Arc<dyn TaskSpawner>,
     ) -> Result<Self, ModuleError> {
         let (event_tx, event_rx) = mpsc::unbounded();
+        let usage = UsageStore::new(config.usage_file.clone());
         let mut core = Self {
             config,
             registry,
@@ -82,7 +86,7 @@ impl Core {
             event_rx: Some(event_rx),
             session: None,
             next_session_id: 1,
-            usage: UsageStore::default(),
+            usage,
             visible: false,
             focused: false,
             effects: Vec::new(),

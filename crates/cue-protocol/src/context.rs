@@ -59,7 +59,7 @@ impl ModuleSettings {
 }
 
 /// §50 聚合 usage 统计。V1 不存 event log。
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct UsageStat {
     pub count: u64,
     pub last_used: SystemTime,
