@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/cue",
     "crates/cue-core",
+    "crates/cue-module-app",
     "crates/cue-protocol",
     "crates/cue-ui",
     "crates/cue-windows",
@@ -17,7 +18,10 @@ cue-protocol = { path = "crates/cue-protocol" }
 cue-core = { path = "crates/cue-core" }
 cue-ui = { path = "crates/cue-ui" }
 cue-windows = { path = "crates/cue-windows" }
+cue-module-app = { path = "crates/cue-module-app" }
 
 futures = "0.3"
 gpui = "0.2"
 windows = "0.62"
+windows-future = "0.3"
+pinyin = "0.10"

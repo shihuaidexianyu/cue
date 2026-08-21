@@ -3,13 +3,11 @@
 //! 编排:HostEvent → Core → CoreEffect → cue-ui / cue-windows。
 //! 只有本 crate 同时认识 Core、GPUI 和 Win32。
 
-mod demo_module;
-
 use cue_core::{Core, CoreConfig, CoreEffect, CoreEvent, HostEvent, ModuleRegistry, TaskSpawner};
+use cue_module_app::AppModule;
 use cue_protocol::{Hotkey, Key, Modifiers};
 use cue_ui::LauncherView;
 use cue_windows as win;
-use demo_module::DemoModule;
 use futures::future::BoxFuture;
 use gpui::*;
 use std::path::PathBuf;
@@ -79,6 +77,7 @@ fn parse_hotkey_env() -> Option<Hotkey> {
 }
 
 fn main() {
+    let boot_started = std::time::Instant::now();
     // §113:单实例必须在最早时机——任何状态文件被打开之前。
     // 第二实例:signal_first_instance 已在 acquire 内完成,直接退出。
     let single_instance = match win::single_instance::acquire() {
@@ -92,9 +91,10 @@ fn main() {
         });
 
         let mut registry = ModuleRegistry::new();
+        // §65:AppModule 是 V1 的 required default module。
         registry
-            .register(Box::new(DemoModule::new()))
-            .expect("register demo module");
+            .register(Box::new(AppModule::new()))
+            .expect("register app module");
 
         let storage_root = std::env::var("LOCALAPPDATA")
             .map(|p| PathBuf::from(p).join("CUE"))
@@ -140,6 +140,8 @@ fn main() {
         if let Err(e) = hotkeys.apply(hotkey) {
             eprintln!("[warn] hotkey registration failed: {e}");
         }
+        // §77 冷启动预算(< 500 ms)的常驻探针:进程入口 → 热键就绪。
+        eprintln!("[boot] hotkey ready in {:?}", boot_started.elapsed());
 
         // §54:常驻但默认隐藏——窗口创建时不可见,等待 ShowLauncher 效果。
         let bounds = Bounds::centered(

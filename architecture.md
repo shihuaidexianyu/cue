@@ -1949,12 +1949,36 @@ v0.2 补充两条边界：
 刷新策略：V1 的 App catalog 只在进程启动时构建。
 运行期间安装 / 卸载的应用，重启 CUE 后才反映。
 不做 FileSystemWatcher / PackageCatalog 事件 / registry 监听。
-
-冷启动回退：图标提取已异步（§109），load 不含图标。
-若实测 load P95 仍无法满足 §77 的 < 500 ms，
-V1 退回"加载缓存 catalog → 后台刷新"；
-在此之前保持同步实现，不提前建 background indexer。
 ```
+
+冷启动回退（v0.2 原案）曾约定：若实测 load P95 无法满足 §77 的
+< 500 ms，退回"加载缓存 catalog → 后台刷新"。
+
+**Spike 实测结论（2026-08，debug build）：**
+
+```text
+首次发现（WinRT 冷初始化）≈ 6.7 s；热路径 ≈ 0.55 s
+（Start Menu 0.12 s + Packaged 0.43 s，148 entries）。
+同步 load 必然阻塞热键注册，违反 §77——回退条款触发。
+```
+
+落地决策（取代原回退案）：
+
+```text
+catalog 构建移出 load()，由 AppModule 自有线程一次性完成（§99：
+module 自行约束资源）。load() 只做廉价初始化（图标管线、
+usage 句柄、构建线程 spawn）。
+
+查询侧不设缓存文件、不加新事件：QueryFuture 在 module 内部的
+一次性就绪门（CatalogCell）上挂起等待 catalog 就绪，
+不阻塞 UI 线程；过期完成由 Core 的 QueryTicket 判定丢弃
+（§91/§96），无需取消机制。§109 事件模型不变。
+```
+
+原回退案（catalog 落盘缓存）被否决：V1 无 watcher，缓存的唯一
+收益是进程启动后首秒内的查询；为它引入持久化格式与版本迁移
+不值（§72）。若未来实测后台构建仍频繁慢于可接受阈值，再重新
+评估落盘缓存。
 
 ---
 
