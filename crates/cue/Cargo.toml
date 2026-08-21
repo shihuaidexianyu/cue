@@ -1,0 +1,16 @@
+[package]
+name = "cue"
+version = "0.1.0"
+edition.workspace = true
+
+[[bin]]
+name = "cue"
+path = "src/main.rs"
+
+[dependencies]
+cue-protocol.workspace = true
+cue-core.workspace = true
+cue-ui.workspace = true
+cue-windows.workspace = true
+futures.workspace = true
+gpui.workspace = true

@@ -1,0 +1,23 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/cue",
+    "crates/cue-core",
+    "crates/cue-protocol",
+    "crates/cue-ui",
+    "crates/cue-windows",
+]
+
+[workspace.package]
+edition = "2021"
+
+# §68:crate 统一 cue- 前缀。`cue` 为 binary(composition root)。
+[workspace.dependencies]
+cue-protocol = { path = "crates/cue-protocol" }
+cue-core = { path = "crates/cue-core" }
+cue-ui = { path = "crates/cue-ui" }
+cue-windows = { path = "crates/cue-windows" }
+
+futures = "0.3"
+gpui = "0.2"
+windows = "0.62"

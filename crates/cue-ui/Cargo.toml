@@ -1,0 +1,10 @@
+[package]
+name = "cue-ui"
+version = "0.1.0"
+edition.workspace = true
+
+[dependencies]
+cue-protocol.workspace = true
+cue-core.workspace = true
+futures.workspace = true
+gpui.workspace = true

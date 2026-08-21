@@ -1,0 +1,209 @@
+//! Host window:隐藏顶层窗口,承载 Host 关注的全部 Win32 消息
+//! (WM_HOTKEY、第二实例唤醒、失焦通知、托盘回调),与 GPUI 窗口完全解耦——
+//! 主线程消息循环(GPUI 驱动)会把投递到本窗口的消息分发到我们的 WndProc。
+//!
+//! 不是 message-only 窗口:托盘菜单要求 owner 可设为前台(§116),
+//! message-only 窗口做不到。
+//!
+//! 失焦检测用 `SetWinEventHook(EVENT_SYSTEM_FOREGROUND, WINEVENT_OUTOFCONTEXT)`:
+//! 无需子类化 GPUI 窗口,前台窗口变化且不是 Launcher 时通知 Core(§54)。
+
+use std::sync::atomic::{AtomicIsize, Ordering};
+use windows::core::{w, Error, PCWSTR};
+use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
+use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::UI::Accessibility::{
+    SetWinEventHook, UnhookWinEvent, HWINEVENTHOOK,
+};
+use windows::Win32::UI::WindowsAndMessaging::*;
+
+/// Host 上报给编排层的事件(由 cue binary 翻译成 Core 的 HostEvent,§112)。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HostMsg {
+    HotkeyPressed,
+    /// 第二实例请求 show / focus(§113),或托盘左键/菜单"显示"(§116)。
+    ShowRequested,
+    /// 托盘菜单"退出"(§116):进程唯一的正常退出路径。
+    QuitRequested,
+    /// 前台焦点离开 Launcher 窗口(§54)。
+    FocusLost,
+}
+
+/// 窗口类名。同时是第二实例 `FindWindow` 的定位依据(§113)。
+pub const HOST_WINDOW_CLASS: PCWSTR = w!("CUE.HostWindow");
+
+pub const WM_CUE_SHOW: u32 = WM_APP + 1;
+pub const WM_CUE_FOCUS_LOST: u32 = WM_APP + 2;
+/// 托盘图标回调消息(§116),lparam 为鼠标消息。
+pub const WM_CUE_TRAY: u32 = WM_APP + 3;
+
+static LAUNCHER_HWND: AtomicIsize = AtomicIsize::new(0);
+static HOST_HWND: AtomicIsize = AtomicIsize::new(0);
+
+/// 窗口创建后由编排层告知 Launcher 的 HWND(失焦比较用)。
+pub fn set_launcher_hwnd(hwnd: HWND) {
+    LAUNCHER_HWND.store(hwnd.0 as isize, Ordering::SeqCst);
+}
+
+pub fn launcher_hwnd() -> Option<HWND> {
+    let v = LAUNCHER_HWND.load(Ordering::SeqCst);
+    (v != 0).then(|| HWND(v as *mut core::ffi::c_void))
+}
+
+pub struct HostWindow {
+    hwnd: HWND,
+}
+
+impl HostWindow {
+    /// 在调用线程(必须是带消息循环的主线程)创建隐藏顶层窗口。
+    /// 永不 ShowWindow;顶层是为了托盘菜单的前台 owner 要求(§116)。
+    pub fn create(handler: Box<dyn Fn(HostMsg) + Send>) -> Result<Self, Error> {
+        unsafe {
+            let hinstance = GetModuleHandleW(None)?;
+            let wc = WNDCLASSW {
+                lpfnWndProc: Some(host_wnd_proc),
+                hInstance: hinstance.into(),
+                lpszClassName: HOST_WINDOW_CLASS,
+                ..Default::default()
+            };
+            // 重复注册返回 0,忽略(单实例保证下只会注册一次)。
+            let _ = RegisterClassW(&wc);
+
+            let state = Box::into_raw(Box::new(handler));
+            let hwnd = CreateWindowExW(
+                WINDOW_EX_STYLE::default(),
+                HOST_WINDOW_CLASS,
+                w!("CUE Host"),
+                WINDOW_STYLE::default(),
+                0,
+                0,
+                0,
+                0,
+                None,
+                None,
+                Some(hinstance.into()),
+                Some(state as *const core::ffi::c_void),
+            )?;
+            HOST_HWND.store(hwnd.0 as isize, Ordering::SeqCst);
+            Ok(Self { hwnd })
+        }
+    }
+
+    pub fn hwnd(&self) -> HWND {
+        self.hwnd
+    }
+}
+
+/// §116 退出路径:结束主线程消息循环,GPUI 的 run 随 WM_QUIT 返回,
+/// 进程正常退出(热键随进程释放;托盘图标由编排层先 remove)。
+pub fn request_quit() {
+    unsafe {
+        PostQuitMessage(0);
+    }
+}
+
+type HostHandler = Box<dyn Fn(HostMsg) + Send>;
+
+unsafe extern "system" fn host_wnd_proc(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    unsafe {
+        if msg == WM_NCCREATE {
+            let cs = lparam.0 as *const CREATESTRUCTW;
+            SetWindowLongPtrW(hwnd, GWLP_USERDATA, (*cs).lpCreateParams as isize);
+            return LRESULT(1);
+        }
+        let state = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *const HostHandler;
+        if !state.is_null() {
+            let handler = &*state;
+            match msg {
+                WM_HOTKEY => handler(HostMsg::HotkeyPressed),
+                m if m == WM_CUE_SHOW => handler(HostMsg::ShowRequested),
+                m if m == WM_CUE_FOCUS_LOST => handler(HostMsg::FocusLost),
+                m if m == WM_CUE_TRAY => crate::tray::handle_message(hwnd, lparam, handler),
+                _ => {}
+            }
+        }
+        DefWindowProcW(hwnd, msg, wparam, lparam)
+    }
+}
+
+// ---------------------------------------------------------------------
+// 失焦钩子(§54)
+// ---------------------------------------------------------------------
+
+pub struct FocusHook(HWINEVENTHOOK);
+
+/// 在带消息循环的主线程安装。回调读取 `set_launcher_hwnd` 设置的 HWND;
+/// 前台窗口变为非 Launcher 时向 host window 投递 FocusLost。
+pub fn install_focus_hook() -> Result<FocusHook, Error> {
+    unsafe {
+        let hook = SetWinEventHook(
+            EVENT_SYSTEM_FOREGROUND,
+            EVENT_SYSTEM_FOREGROUND,
+            None,
+            Some(foreground_win_event_proc),
+            0,
+            0,
+            WINEVENT_OUTOFCONTEXT,
+        );
+        if hook.0.is_null() {
+            Err(Error::from_thread())
+        } else {
+            Ok(FocusHook(hook))
+        }
+    }
+}
+
+impl Drop for FocusHook {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = UnhookWinEvent(self.0);
+        }
+    }
+}
+
+unsafe extern "system" fn foreground_win_event_proc(
+    _hook: HWINEVENTHOOK,
+    event: u32,
+    hwnd: HWND,
+    _id_object: i32,
+    _id_child: i32,
+    _thread: u32,
+    _time: u32,
+) {
+    if event != EVENT_SYSTEM_FOREGROUND {
+        return;
+    }
+    let launcher = LAUNCHER_HWND.load(Ordering::SeqCst);
+    if launcher == 0 || hwnd.0 as isize == launcher {
+        return;
+    }
+    // 诊断:只在 Launcher 可见时(即焦点真的从我们手里离开)记录
+    // 新前台窗口是谁。全局前台切换本身不刷屏。
+    let launcher_hwnd = HWND(launcher as *mut core::ffi::c_void);
+    if unsafe { IsWindowVisible(launcher_hwnd) }.as_bool() {
+        let mut pid = 0u32;
+        let mut class = [0u16; 64];
+        unsafe {
+            GetWindowThreadProcessId(hwnd, Some(&mut pid));
+            let n = GetClassNameW(hwnd, &mut class);
+            let class = String::from_utf16_lossy(&class[..n as usize]);
+            eprintln!("[focus] launcher lost foreground -> pid={pid} class={class:?}");
+        }
+    }
+    let host = HOST_HWND.load(Ordering::SeqCst);
+    if host != 0 {
+        unsafe {
+            let _ = PostMessageW(
+                Some(HWND(host as *mut core::ffi::c_void)),
+                WM_CUE_FOCUS_LOST,
+                WPARAM(0),
+                LPARAM(0),
+            );
+        }
+    }
+}
