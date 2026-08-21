@@ -3,7 +3,7 @@
 //! 图标在运行时生成(32×32 纯色圆角方块,无需资源文件管线);
 //! 左键唤起,右键菜单"显示 / 退出"(§116 不为托盘做更多)。
 
-use crate::host::{HostMsg, WM_CUE_TRAY};
+use crate::host::{HostMsg, WM_CUE_TRAY, WM_CUE_TRAY_CMD};
 use std::sync::atomic::{AtomicIsize, Ordering};
 use windows::core::{w, Error};
 use windows::Win32::Foundation::{HWND, LPARAM, POINT, WPARAM};
@@ -15,7 +15,8 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 
 const TRAY_UID: u32 = 1;
 const TRAY_CMD_SHOW: usize = 1;
-const TRAY_CMD_QUIT: usize = 2;
+const TRAY_CMD_SETTINGS: usize = 2;
+const TRAY_CMD_QUIT: usize = 3;
 
 /// 已挂图标的 host hwnd;退出时据此 NIM_DELETE(§116 不留幽灵图标)。
 static TRAY_HOST: AtomicIsize = AtomicIsize::new(0);
@@ -67,17 +68,18 @@ pub fn remove() {
 pub fn handle_message(host: HWND, lparam: LPARAM, handler: &dyn Fn(HostMsg)) {
     match lparam.0 as u32 {
         WM_LBUTTONUP => handler(HostMsg::ShowRequested),
-        WM_RBUTTONUP => unsafe { show_menu(host, handler) },
+        WM_RBUTTONUP => unsafe { show_menu(host) },
         _ => {}
     }
 }
 
-unsafe fn show_menu(host: HWND, handler: &dyn Fn(HostMsg)) {
+unsafe fn show_menu(host: HWND) {
     unsafe {
         let Ok(menu) = CreatePopupMenu() else {
             return;
         };
         let _ = AppendMenuW(menu, MF_STRING, TRAY_CMD_SHOW, w!("显示 CUE"));
+        let _ = AppendMenuW(menu, MF_STRING, TRAY_CMD_SETTINGS, w!("设置"));
         let _ = AppendMenuW(menu, MF_STRING, TRAY_CMD_QUIT, w!("退出 CUE"));
         // MSDN 托盘菜单模式:弹出前把 owner 设为前台,
         // 否则点击别处菜单不收起。owner 需为普通窗口(§116)。
@@ -96,12 +98,20 @@ unsafe fn show_menu(host: HWND, handler: &dyn Fn(HostMsg)) {
         let _ = PostMessageW(Some(host), WM_NULL, WPARAM(0), LPARAM(0));
         let _ = DestroyMenu(menu);
         if cmd.as_bool() {
-            match cmd.0 as usize {
-                TRAY_CMD_SHOW => handler(HostMsg::ShowRequested),
-                TRAY_CMD_QUIT => handler(HostMsg::QuitRequested),
-                _ => {}
-            }
+            // 延迟分发(见 WM_CUE_TRAY_CMD 注释):此刻同步调 handler
+            // 会让刚唤起的窗口在菜单拆除时被抢前台。
+            let _ = PostMessageW(Some(host), WM_CUE_TRAY_CMD, WPARAM(cmd.0 as usize), LPARAM(0));
         }
+    }
+}
+
+/// WM_CUE_TRAY_CMD 的 wParam → HostMsg(host WndProc 侧分发)。
+pub fn msg_from_cmd(cmd: usize) -> Option<HostMsg> {
+    match cmd {
+        TRAY_CMD_SHOW => Some(HostMsg::ShowRequested),
+        TRAY_CMD_SETTINGS => Some(HostMsg::OpenSettings),
+        TRAY_CMD_QUIT => Some(HostMsg::QuitRequested),
+        _ => None,
     }
 }
 
@@ -152,7 +162,7 @@ fn build_icon() -> Result<HICON, Error> {
         bits.extend_from_slice(&xor[y * S * 4..(y + 1) * S * 4]);
     }
     // AND mask:全 0 = 全不透明(角部透明由 XOR 的 alpha 表达)
-    bits.extend_from_slice(&vec![0u8; AND]);
+    bits.extend_from_slice(&[0u8; AND]);
 
     unsafe { CreateIconFromResourceEx(&bits, true, 0x00030000, S as i32, S as i32, LR_DEFAULTCOLOR) }
 }

@@ -222,7 +222,7 @@ fn setup(module: FakeModule) -> (Core, Arc<ManualSpawner>) {
 }
 
 fn drain(core: &mut Core, rx: &mut futures::channel::mpsc::UnboundedReceiver<CoreEvent>) {
-    while let Ok(Some(ev)) = rx.try_next() {
+    while let Ok(ev) = rx.try_recv() {
         core.handle_event(ev);
     }
 }
@@ -501,14 +501,14 @@ fn presentation_invalidated_only_for_visible_items() {
     sink.send(ModuleEvent::PresentationInvalidated {
         items: vec![ItemId(1)],
     });
-    let ev = rx.try_next().unwrap().unwrap();
+    let ev = rx.try_recv().unwrap();
     assert!(core.handle_event(ev));
 
     // 不可见 item → 忽略。
     sink.send(ModuleEvent::PresentationInvalidated {
         items: vec![ItemId(999)],
     });
-    let ev = rx.try_next().unwrap().unwrap();
+    let ev = rx.try_recv().unwrap();
     assert!(!core.handle_event(ev));
 
     // session 关闭后 → 丢弃。
@@ -516,7 +516,7 @@ fn presentation_invalidated_only_for_visible_items() {
     sink.send(ModuleEvent::PresentationInvalidated {
         items: vec![ItemId(0)],
     });
-    let ev = rx.try_next().unwrap().unwrap();
+    let ev = rx.try_recv().unwrap();
     assert!(!core.handle_event(ev));
 }
 
@@ -572,4 +572,122 @@ fn present_delegates_to_active_module() {
     let item = core.session().unwrap().results[0].clone();
     let presentation = core.present(&item).expect("presentation");
     assert_eq!(&*presentation.title, "Alpha");
+}
+
+// ---------------------------------------------------------------------
+// §42 设置事务:validate → try-apply → commit → persist
+// ---------------------------------------------------------------------
+
+fn setup_with_config(module: FakeModule, config: CoreConfig) -> (Core, Arc<ManualSpawner>) {
+    let spawner = ManualSpawner::new();
+    let mut registry = ModuleRegistry::new();
+    registry.register(Box::new(module)).unwrap();
+    let core = Core::new(config, registry, spawner.clone()).unwrap();
+    (core, spawner)
+}
+
+#[test]
+fn hotkey_apply_failure_keeps_old_value() {
+    // try-apply 失败(热键被占用):不 commit,旧值保留(§42/§53)。
+    let mut config = test_config();
+    config.apply_hotkey = Some(Box::new(|_| Err("occupied by another app".to_string())));
+    let (mut core, _spawner) = setup_with_config(FakeModule::new("fake"), config);
+
+    core.open_settings();
+    let before = core.hotkey();
+    let candidate: Hotkey = "ctrl+alt+k".parse().unwrap();
+    let err = core
+        .apply_setting("core.hotkey", SettingValue::Hotkey(candidate))
+        .expect_err("must fail");
+    assert!(err.contains("occupied"));
+    assert_eq!(core.hotkey(), before); // 旧值保留
+    // 错误进入模型,UI 据此展示;再次成功 apply 后错误清除。
+    let model = core.settings_model().unwrap();
+    assert!(model.error.is_some());
+}
+
+#[test]
+fn hotkey_apply_success_commits() {
+    let applied = Arc::new(Mutex::new(Vec::new()));
+    let mut config = test_config();
+    let seen = Arc::clone(&applied);
+    config.apply_hotkey = Some(Box::new(move |h: &Hotkey| {
+        seen.lock().unwrap().push(*h);
+        Ok(())
+    }));
+    let (mut core, _spawner) = setup_with_config(FakeModule::new("fake"), config);
+
+    let candidate: Hotkey = "ctrl+shift+f5".parse().unwrap();
+    core.apply_setting("core.hotkey", SettingValue::Hotkey(candidate))
+        .unwrap();
+    assert_eq!(core.hotkey(), candidate);
+    assert_eq!(applied.lock().unwrap().as_slice(), &[candidate]);
+}
+
+#[test]
+fn apply_setting_validates_type_and_value() {
+    let (mut core, _spawner) = setup(FakeModule::new("fake"));
+
+    // 类型不匹配
+    assert!(core
+        .apply_setting("core.hotkey", SettingValue::Bool(true))
+        .is_err());
+    // 取值不合法:无修饰键
+    let no_mod = Hotkey {
+        modifiers: Modifiers::NONE,
+        key: Key::Space,
+    };
+    assert!(core
+        .apply_setting("core.hotkey", SettingValue::Hotkey(no_mod))
+        .is_err());
+    // 未知 key
+    assert!(core
+        .apply_setting("core.nope", SettingValue::Bool(true))
+        .is_err());
+    // 默认值未被破坏
+    assert_eq!(core.hotkey(), Hotkey::default());
+}
+
+#[test]
+fn settings_view_lifecycle_and_effects() {
+    let (mut core, spawner) = setup(FakeModule::new("fake"));
+    let mut rx = core.take_event_receiver();
+
+    // 打开设置:搜索会话退场,窗口显示 + 聚焦。
+    core.open_session();
+    spawner.poll_all();
+    drain(&mut core, &mut rx);
+    core.take_effects();
+
+    core.open_settings();
+    assert!(core.in_settings());
+    assert!(core.session().is_none());
+    let model = core.settings_model().unwrap();
+    assert_eq!(model.rows.len(), 2); // core.hotkey + core.hide_on_focus_loss
+    assert_eq!(model.selected, 0);
+
+    core.settings_select_next();
+    core.settings_select_next(); // 夹紧在最后一行
+    assert_eq!(core.settings_model().unwrap().selected, 1);
+    core.settings_select_prev();
+    assert_eq!(core.settings_model().unwrap().selected, 0);
+
+    // 热键在设置页 = Esc(关闭设置)。
+    core.hotkey_pressed();
+    assert!(!core.in_settings());
+    assert!(core.take_effects().contains(&CoreEffect::HideLauncher));
+
+    // Bool 切换立即生效并体现在 Core 行为上(§54)。
+    core.open_settings();
+    core.settings_select_next(); // hide_on_focus_loss 行
+    core
+        .apply_setting("core.hide_on_focus_loss", SettingValue::Bool(false))
+        .unwrap();
+    core.dismiss_settings();
+    core.open_session();
+    spawner.poll_all();
+    drain(&mut core, &mut rx);
+    core.take_effects();
+    core.focus_lost(); // 关闭后:失焦不隐藏
+    assert!(core.is_visible());
 }

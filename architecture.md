@@ -1554,6 +1554,23 @@ AppModule.render_settings_gpui(...)
 
 除非未来确实出现无法表达的特殊设置。
 
+v0.2 补充（V1 落地形态）：
+
+```text
+入口：托盘右键菜单"设置"（§116）。设置不是 module session——
+打开时搜索会话静默退场（其未完成的 query 由 §96 ticket 自然失效），
+关闭（Esc / 热键 / 失焦）后回到隐藏态，不恢复搜索输入。
+
+视图：Core 出模型（行 = label + description + 当前值 + kind），
+cue-ui 只渲染。键盘语义：↑↓ 选择，Enter/Space 修改
+（Bool 直接切换；Hotkey 进入捕获态，下一次组合键为候选，
+Esc 取消捕获），Esc 返回。try-apply 失败：错误显示在视图内，
+旧值保留（§42）。
+
+V1 的编辑 UI 只覆盖 Bool 与 Hotkey 两种 kind；Integer / String /
+Enum / Path 出现时按 §39 再加，不提前建表单 framework。
+```
+
 ---
 
 # 42. Apply Policy
@@ -3763,7 +3780,8 @@ V1 决定：
 ```text
 进程运行期间托盘图标始终存在（不提供"隐藏托盘"设置）
 左键点击  → 唤起（等价 §113 的 ShowRequested）
-右键菜单  → 显示 / 退出
+右键菜单  → 显示 / 设置 / 退出
+设置      → 打开 §41 的设置视图（Core 出模型，GPUI 渲染）
 退出      → 删除托盘图标（不留幽灵图标）、注销热键、进程退出
 ```
 

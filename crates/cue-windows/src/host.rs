@@ -23,6 +23,8 @@ pub enum HostMsg {
     HotkeyPressed,
     /// 第二实例请求 show / focus(§113),或托盘左键/菜单"显示"(§116)。
     ShowRequested,
+    /// 托盘菜单"设置"(§41 设置页入口)。
+    OpenSettings,
     /// 托盘菜单"退出"(§116):进程唯一的正常退出路径。
     QuitRequested,
     /// 前台焦点离开 Launcher 窗口(§54)。
@@ -36,6 +38,14 @@ pub const WM_CUE_SHOW: u32 = WM_APP + 1;
 pub const WM_CUE_FOCUS_LOST: u32 = WM_APP + 2;
 /// 托盘图标回调消息(§116),lparam 为鼠标消息。
 pub const WM_CUE_TRAY: u32 = WM_APP + 3;
+/// 托盘菜单命令的延迟分发消息(见 tray::show_menu):wParam 为命令 id。
+/// TrackPopupMenu 返回后菜单窗口仍在拆除,Windows 会把前台还给原前台
+/// 窗口(且这一步发生在我们 PostMessage 的消息被处理之后——实测即
+/// 使延迟一拍,刚 Show+Focus 的 Launcher 仍被抢焦点,FocusLost →
+/// 失焦隐藏)。所以这里再升级成 SetTimer 延迟 ~60ms,等前台仲裁落定。
+pub const WM_CUE_TRAY_CMD: u32 = WM_APP + 4;
+/// 托盘命令的定时器 id 基数:timer id = 基数 + 命令 id(免去全局状态)。
+pub const TRAY_CMD_TIMER_BASE: usize = 0xC0E0;
 
 static LAUNCHER_HWND: AtomicIsize = AtomicIsize::new(0);
 static HOST_HWND: AtomicIsize = AtomicIsize::new(0);
@@ -47,7 +57,7 @@ pub fn set_launcher_hwnd(hwnd: HWND) {
 
 pub fn launcher_hwnd() -> Option<HWND> {
     let v = LAUNCHER_HWND.load(Ordering::SeqCst);
-    (v != 0).then(|| HWND(v as *mut core::ffi::c_void))
+    (v != 0).then_some(HWND(v as *mut core::ffi::c_void))
 }
 
 pub struct HostWindow {
@@ -124,6 +134,19 @@ unsafe extern "system" fn host_wnd_proc(
                 m if m == WM_CUE_SHOW => handler(HostMsg::ShowRequested),
                 m if m == WM_CUE_FOCUS_LOST => handler(HostMsg::FocusLost),
                 m if m == WM_CUE_TRAY => crate::tray::handle_message(hwnd, lparam, handler),
+                m if m == WM_CUE_TRAY_CMD => {
+                    // 命令 id 编进 timer id,WM_TIMER 时再取回分发。
+                    let _ = SetTimer(Some(hwnd), TRAY_CMD_TIMER_BASE + wparam.0, 60, None);
+                }
+                WM_TIMER => {
+                    let id = wparam.0;
+                    if id > TRAY_CMD_TIMER_BASE {
+                        let _ = KillTimer(Some(hwnd), id);
+                        if let Some(msg) = crate::tray::msg_from_cmd(id - TRAY_CMD_TIMER_BASE) {
+                            handler(msg);
+                        }
+                    }
+                }
                 _ => {}
             }
         }

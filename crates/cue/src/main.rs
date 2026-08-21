@@ -5,12 +5,14 @@
 
 use cue_core::{Core, CoreConfig, CoreEffect, CoreEvent, HostEvent, ModuleRegistry, TaskSpawner};
 use cue_module_app::AppModule;
-use cue_protocol::{Hotkey, Key, Modifiers};
+use cue_protocol::Hotkey;
 use cue_ui::LauncherView;
 use cue_windows as win;
 use futures::future::BoxFuture;
 use gpui::*;
+use std::cell::RefCell;
 use std::path::PathBuf;
+use std::rc::Rc;
 use std::sync::Arc;
 
 /// §97:生产环境 TaskSpawner,把 Core 的异步工作挂到 GPUI 后台线程池。
@@ -29,51 +31,11 @@ impl TaskSpawner for GpuiSpawner {
 const WINDOW_WIDTH: i32 = 640;
 const WINDOW_HEIGHT: i32 = 420;
 
-/// 开发期热键覆盖:`CUE_HOTKEY="ctrl+alt+k"`(修饰键 alt/ctrl/shift/win,
-/// 键为单字符或 space/tab/enter/esc/f1..f12)。
-/// §53 默认 Alt+Space 不变;正式配置走 Settings(Phase 6)。
-/// 用途:开发机上 Alt+Space 常被其他 launcher 占用,不覆盖就没法联调。
+/// 开发期热键覆盖:`CUE_HOTKEY="ctrl+alt+k"`(格式同设置值,§53)。
+/// 只影响本次进程的初始注册,不写入 settings.tsv——调试覆盖不应
+/// 变成持久配置。正式修改走托盘 → 设置(§41)。
 fn parse_hotkey_env() -> Option<Hotkey> {
-    let raw = std::env::var("CUE_HOTKEY").ok()?;
-    let mut modifiers = Modifiers::NONE;
-    let mut key = None;
-    for token in raw.split('+').map(|t| t.trim().to_ascii_lowercase()) {
-        match token.as_str() {
-            "alt" => modifiers.alt = true,
-            "ctrl" => modifiers.ctrl = true,
-            "shift" => modifiers.shift = true,
-            "win" | "super" => modifiers.super_key = true,
-            "space" => key = Some(Key::Space),
-            "tab" => key = Some(Key::Tab),
-            "enter" => key = Some(Key::Enter),
-            "esc" => key = Some(Key::Escape),
-            t if t.len() == 1 => key = Some(Key::Char(t.chars().next().unwrap())),
-            t if t.len() >= 2 && t.starts_with('f') => {
-                let n: u32 = t[1..].parse().ok()?;
-                key = Some(match n {
-                    1 => Key::F1,
-                    2 => Key::F2,
-                    3 => Key::F3,
-                    4 => Key::F4,
-                    5 => Key::F5,
-                    6 => Key::F6,
-                    7 => Key::F7,
-                    8 => Key::F8,
-                    9 => Key::F9,
-                    10 => Key::F10,
-                    11 => Key::F11,
-                    12 => Key::F12,
-                    _ => return None,
-                });
-            }
-            _ => return None,
-        }
-    }
-    let key = key?;
-    if modifiers.is_empty() {
-        return None;
-    }
-    Some(Hotkey { modifiers, key })
+    std::env::var("CUE_HOTKEY").ok()?.parse().ok()
 }
 
 fn main() {
@@ -99,9 +61,35 @@ fn main() {
         let storage_root = std::env::var("LOCALAPPDATA")
             .map(|p| PathBuf::from(p).join("CUE"))
             .unwrap_or_else(|_| PathBuf::from("CUE"));
+
+        // §53:apply_hotkey 回调与初始注册共用同一个 HotkeyManager。
+        // Core::new 先于 host window(manager 需要 host hwnd)——
+        // 用共享槽打破构造顺序环;槽只在 UI 线程访问。
+        let hotkey_slot: Rc<RefCell<Option<win::hotkey::HotkeyManager>>> =
+            Rc::new(RefCell::new(None));
+        let apply_hotkey = {
+            let slot = Rc::clone(&hotkey_slot);
+            move |hk: &Hotkey| -> Result<(), String> {
+                match slot.borrow_mut().as_mut() {
+                    Some(m) => {
+                        let r = m.apply(*hk).map_err(|e| e.to_string());
+                        eprintln!("[hotkey] try-apply {hk} -> {}",
+                            if r.is_ok() { "ok" } else { "failed" });
+                        r
+                    }
+                    // manager 未就位只可能发生在窗口创建前,而设置 UI
+                    // 那时还不存在——真走到这里说明接线坏了,宁可事务
+                    // 失败也不静默提交一个未注册的值。
+                    None => Err("hotkey manager not installed".to_string()),
+                }
+            }
+        };
+
         let core = Core::new(
             CoreConfig {
                 usage_file: Some(storage_root.join("usage.tsv")),
+                settings_file: Some(storage_root.join("settings.tsv")),
+                apply_hotkey: Some(Box::new(apply_hotkey)),
                 storage_root,
                 ..CoreConfig::default()
             },
@@ -124,6 +112,7 @@ fn main() {
             let event = match msg {
                 win::host::HostMsg::HotkeyPressed => HostEvent::HotkeyPressed,
                 win::host::HostMsg::ShowRequested => HostEvent::ShowRequested,
+                win::host::HostMsg::OpenSettings => HostEvent::OpenSettings,
                 win::host::HostMsg::FocusLost => HostEvent::FocusLost,
                 win::host::HostMsg::QuitRequested => unreachable!(),
             };
@@ -134,11 +123,17 @@ fn main() {
         // §116:托盘图标是进程存活的唯一常驻可见信号。
         win::tray::add(host.hwnd()).expect("tray icon");
 
-        let mut hotkeys = win::hotkey::HotkeyManager::new(host.hwnd());
-        let hotkey = parse_hotkey_env().unwrap_or(core.config().default_hotkey);
+        // 热键管理器入槽;初始注册 = env 覆盖(仅本次进程)或设置值(§53)。
+        *hotkey_slot.borrow_mut() = Some(win::hotkey::HotkeyManager::new(host.hwnd()));
+        let initial_hotkey = parse_hotkey_env().unwrap_or_else(|| core.hotkey());
+        let registered = hotkey_slot
+            .borrow_mut()
+            .as_mut()
+            .expect("hotkey manager just installed")
+            .apply(initial_hotkey);
         // 热键被其他应用(如另一个 launcher)占用时降级为警告:
-        // Launcher 继续运行,可经第二实例信号唤起,设置落地后可换键。
-        if let Err(e) = hotkeys.apply(hotkey) {
+        // Launcher 继续运行,可经第二实例信号唤起,设置里可换键。
+        if let Err(e) = registered {
             eprintln!("[warn] hotkey registration failed: {e}");
         }
         // §77 冷启动预算(< 500 ms)的常驻探针:进程入口 → 热键就绪。
@@ -203,6 +198,7 @@ fn main() {
             .expect("wire effect handler");
 
         // 进程生命周期资源:guard 随进程退出释放,无回收点。
-        std::mem::forget((host, hotkeys, focus_hook, window_handle, single_instance));
+        // hotkey_slot 被 run 闭包环境与 Core 内回调共同持有,无需 forget。
+        std::mem::forget((host, focus_hook, window_handle, single_instance));
     });
 }

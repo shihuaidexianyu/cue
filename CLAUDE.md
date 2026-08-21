@@ -46,7 +46,7 @@ Planned workspace layout (§68): `crates/{cue, cue-core, cue-protocol, cue-ui, c
 
 Settings and storage:
 
-- Settings namespaces: `core.*` and `module.<module-id>.*`. Modules declare a schema (each `SettingSpec` carries an `apply_policy`, §38); Core renders all settings UI (§41). Settings live only in the Settings Host, never in module storage (§48).
+- Settings namespaces: `core.*` and `module.<module-id>.*`. Modules declare a schema (each `SettingSpec` carries an `apply_policy`, §38); Core renders all settings UI (§41 — entry: tray menu "设置"; Core emits the row model, cue-ui only renders; V1 edit UI covers Bool + Hotkey kinds only). Settings live only in the Settings Host, never in module storage (§48). Persisted as `<storage_root>/settings.tsv` (header-versioned, whole-file rewrite, tmp+rename; corrupt lines skipped).
 - **Settings changes are transactional** (§42): validate → try-apply (`Module::try_apply_settings`, or the `apply_hotkey` host callback for `core.hotkey`) → commit in-memory → persist. Failure: no commit, UI restores the old value. `RestartApplication` class: validate → commit → persist → mark `restart_required`.
 - Usage store is **aggregated** (§50): `UsageStat { count, last_used }` keyed by `(ModuleId, ItemKey, ActionId)` — no unbounded event log. `item_key` is a stable launch identity (§51): AUMID for packaged apps, canonical exe + normalized args for Win32. Persisted as `<storage_root>/usage.tsv` (header-versioned, whole-file rewrite on each record — bounded and crash-safe); corrupt lines are skipped, never panic.
 - Module storage root: `%LOCALAPPDATA%\CUE\` with `modules/<id>/{data,state,cache}` — data (durable user data), state (recoverable), cache (freely deletable) (§43–47).

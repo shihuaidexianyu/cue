@@ -20,7 +20,7 @@ pub use context::{
     ModuleLogger, ModuleSettings, ModuleStorage, StorageScope, UsageRead, UsageReader, UsageStat,
 };
 pub use error::ModuleError;
-pub use hotkey::{Hotkey, Key, Modifiers};
+pub use hotkey::{Hotkey, HotkeyParseError, Key, Modifiers};
 pub use item::{ItemId, ModuleItem};
 pub use launcher_module::{
     ActivationFuture, LauncherDescriptor, LauncherModule, QueryContext, QueryFuture, QueryResponse,

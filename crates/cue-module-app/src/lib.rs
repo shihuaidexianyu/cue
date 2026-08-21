@@ -46,6 +46,12 @@ impl AppModule {
     }
 }
 
+impl Default for AppModule {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// §28:Score = StringMatch + UsageBonus + RecencyBonus(+ AliasBonus,
 /// V1 无 aliases UI,恒 0)。具体公式属于本模块。
 fn usage_bonus(usage: Option<&UsageReader>, entry: &AppEntry) -> i32 {

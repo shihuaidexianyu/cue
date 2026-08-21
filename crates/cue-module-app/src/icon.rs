@@ -67,7 +67,7 @@ impl IconPipeline {
 
     /// present() 热路径(§105 < 1 ms,无 IO):命中返回缓存图标;
     /// 未命中登记 Pending 并投递提取请求,本帧返回 None(§108 留空槽位)。
-    pub fn get_or_queue(&self, item_id: ItemId, key: &str, exe: &PathBuf) -> Option<ResultIcon> {
+    pub fn get_or_queue(&self, item_id: ItemId, key: &str, exe: &Path) -> Option<ResultIcon> {
         let mut cache = self.cache.lock().unwrap();
         match cache.get(key) {
             // IconImage 内 rgba 是 Arc<[u8]>,clone 保持指针不变——
@@ -80,7 +80,7 @@ impl IconPipeline {
                     let _ = tx.send(Request {
                         item_id,
                         key: key.to_string(),
-                        exe: exe.clone(),
+                        exe: exe.to_path_buf(),
                     });
                 }
                 None

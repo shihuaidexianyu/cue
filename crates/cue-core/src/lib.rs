@@ -10,6 +10,7 @@ mod effects;
 mod event;
 mod registry;
 mod session;
+mod settings;
 mod spawner;
 mod usage;
 
@@ -17,6 +18,9 @@ pub use effects::CoreEffect;
 pub use event::{ActivationTicket, CoreEvent, HostEvent, QueryTicket};
 pub use registry::{ModuleRegistry, RegistryError};
 pub use session::{SessionId, SessionState};
+pub use settings::{
+    ApplyHotkey, SettingsHost, SettingsModel, SettingsRow, SettingsViewState, KEY_HOTKEY,
+};
 pub use spawner::TaskSpawner;
 pub use usage::UsageStore;
 
@@ -34,12 +38,13 @@ pub struct CoreConfig {
     pub storage_root: PathBuf,
     /// §50 usage 持久化文件;None = 纯内存(测试)。
     pub usage_file: Option<PathBuf>,
+    /// §48 设置持久化文件;None = 纯内存(测试)。
+    pub settings_file: Option<PathBuf>,
     /// §94 Core/UI 请求预算。V1 为固定值,不来自任何 `module.*` 设置。
     pub result_limit: usize,
-    /// §54 / §115 `core.hide_on_focus_loss`(V1 固定默认 true)。
-    pub hide_on_focus_loss: bool,
-    /// §53 默认 Alt+Space。
-    pub default_hotkey: Hotkey,
+    /// §53 core.hotkey 的同步 try-apply 回调(唯一同步例外,§112)。
+    /// None(测试)时热键 try-apply 视为通过。
+    pub apply_hotkey: Option<ApplyHotkey>,
 }
 
 impl Default for CoreConfig {
@@ -47,9 +52,9 @@ impl Default for CoreConfig {
         Self {
             storage_root: PathBuf::from("cue-data"),
             usage_file: None,
+            settings_file: None,
             result_limit: 20,
-            hide_on_focus_loss: true,
-            default_hotkey: Hotkey::default(),
+            apply_hotkey: None,
         }
     }
 }
@@ -63,6 +68,10 @@ pub struct Core {
     session: Option<SessionState>,
     next_session_id: u64,
     usage: UsageStore,
+    /// §5.6 Settings Host:设置的唯一所有者(§48)。
+    settings: SettingsHost,
+    /// §41 设置视图状态;Some 时 UI 渲染设置页而非搜索页。
+    settings_view: Option<SettingsViewState>,
     /// 窗口可见 / 聚焦状态(§53 toggle 的依据),由 host/UI 事件维护。
     visible: bool,
     focused: bool,
@@ -72,13 +81,20 @@ pub struct Core {
 
 impl Core {
     pub fn new(
-        config: CoreConfig,
+        mut config: CoreConfig,
         registry: ModuleRegistry,
         spawner: Arc<dyn TaskSpawner>,
     ) -> Result<Self, ModuleError> {
         let (event_tx, event_rx) = mpsc::unbounded();
         let usage = UsageStore::new(config.usage_file.clone());
+        // Settings Host 必须先于 load_modules:ModuleContext 的设置快照
+        // 依赖它(§48 设置只存在这里)。apply_hotkey 的所有权移交 host。
+        let settings = SettingsHost::new(
+            config.settings_file.clone(),
+            config.apply_hotkey.take(),
+        );
         let mut core = Self {
+            settings,
             config,
             registry,
             spawner,
@@ -87,6 +103,7 @@ impl Core {
             session: None,
             next_session_id: 1,
             usage,
+            settings_view: None,
             visible: false,
             focused: false,
             effects: Vec::new(),
@@ -97,6 +114,15 @@ impl Core {
 
     fn load_modules(&mut self) -> Result<(), ModuleError> {
         for id in self.registry.ids() {
+            // 先收编 schema(§38),再 build_context——load 时的
+            // ModuleSettings 快照才能带上该模块自己的默认值与持久化值。
+            let schema = self
+                .registry
+                .module(&id)
+                .map(|m| m.settings_schema())
+                .unwrap_or_default();
+            self.settings.register_module_specs(&id, schema);
+
             let epoch = self.registry.epoch(&id).unwrap_or(0);
             let ctx = self.build_context(&id, epoch);
             let module = self
@@ -126,7 +152,7 @@ impl Core {
         ModuleContext {
             module_id: id.clone(),
             storage,
-            settings: ModuleSettings::default(),
+            settings: self.settings.values_for_module(id),
             usage: self.usage.reader_for(id),
             logger: Arc::new(StderrLogger {
                 module: id.as_str().to_string(),
@@ -186,8 +212,11 @@ impl Core {
     }
 
     /// §53 toggle:隐藏 → 打开;可见且聚焦 → 关闭;可见未聚焦 → 聚焦。
+    /// 设置页开着时,热键等价 Esc(关闭设置)。
     pub fn hotkey_pressed(&mut self) {
-        if !self.visible {
+        if self.settings_view.is_some() {
+            self.dismiss_settings();
+        } else if !self.visible {
             self.open_session();
         } else if self.focused {
             self.close_session();
@@ -199,7 +228,10 @@ impl Core {
 
     /// §113:第二实例请求 show / focus。
     pub fn show_requested(&mut self) {
-        if !self.visible {
+        if self.settings_view.is_some() {
+            self.focused = true;
+            self.effects.push(CoreEffect::FocusInput);
+        } else if !self.visible {
             self.open_session();
         } else {
             self.focused = true;
@@ -209,13 +241,136 @@ impl Core {
 
     pub fn focus_lost(&mut self) {
         self.focused = false;
-        if self.visible && self.config.hide_on_focus_loss {
-            self.close_session();
+        if self.visible && self.settings.hide_on_focus_loss() {
+            if self.settings_view.is_some() {
+                self.dismiss_settings();
+            } else {
+                self.close_session();
+            }
         }
     }
 
     pub fn focus_gained(&mut self) {
         self.focused = true;
+    }
+
+    // ------------------------------------------------------------------
+    // §41 Settings UI 的 Core 侧:出模型、收变更,永不渲染。
+    // ------------------------------------------------------------------
+
+    /// 打开设置视图(托盘菜单入口,§116)。设置不是 module session:
+    /// 搜索会话静默退场(其未完成的 query 由 §96 ticket 自然失效)。
+    pub fn open_settings(&mut self) {
+        if self.settings_view.is_some() {
+            return;
+        }
+        self.session = None;
+        self.settings_view = Some(SettingsViewState::default());
+        if !self.visible {
+            self.visible = true;
+            self.effects.push(CoreEffect::ShowLauncher);
+        }
+        self.focused = true;
+        self.effects.push(CoreEffect::FocusInput);
+    }
+
+    pub fn dismiss_settings(&mut self) {
+        if self.settings_view.take().is_some() {
+            self.visible = false;
+            self.focused = false;
+            self.effects.push(CoreEffect::HideLauncher);
+        }
+    }
+
+    pub fn in_settings(&self) -> bool {
+        self.settings_view.is_some()
+    }
+
+    pub fn settings_model(&self) -> Option<SettingsModel> {
+        self.settings_view
+            .as_ref()
+            .map(|view| self.settings.model(view))
+    }
+
+    pub fn settings_select_next(&mut self) {
+        if let Some(view) = self.settings_view.as_mut() {
+            let max = self.settings.row_count().saturating_sub(1);
+            view.selected = (view.selected + 1).min(max);
+        }
+    }
+
+    pub fn settings_select_prev(&mut self) {
+        if let Some(view) = self.settings_view.as_mut() {
+            view.selected = view.selected.saturating_sub(1);
+        }
+    }
+
+    /// 当前生效的热键(§53;编排层启动注册时读取)。
+    pub fn hotkey(&self) -> Hotkey {
+        self.settings.hotkey()
+    }
+
+    /// §42 事务入口:校验 → try-apply → commit → persist。
+    /// 失败不 commit、返回错误;UI 展示错误并保留旧值显示。
+    pub fn apply_setting(&mut self, key: &str, candidate: SettingValue) -> Result<(), String> {
+        let result = self.apply_setting_inner(key, candidate);
+        if let Some(view) = self.settings_view.as_mut() {
+            view.error = match &result {
+                Ok(()) => None,
+                Err(msg) => Some(msg.as_str().into()),
+            };
+        }
+        result
+    }
+
+    fn apply_setting_inner(&mut self, key: &str, candidate: SettingValue) -> Result<(), String> {
+        // 第一步:规格存在性 + 类型/取值校验。
+        let Some(spec) = self.settings.spec(key) else {
+            return Err(format!("unknown setting: {key}"));
+        };
+        if !kind_matches(spec.kind, &candidate) {
+            return Err(format!("type mismatch for {key}: expected {:?}", spec.kind));
+        }
+        if let SettingValue::Hotkey(h) = &candidate {
+            if h.modifiers.is_empty() {
+                return Err("热键至少需要一个修饰键".into());
+            }
+        }
+        let policy = spec.apply_policy;
+        match policy {
+            ApplyPolicy::Immediate => {
+                // 第二步:try-apply(core.* 由所有者执行;module.* 经 registry)。
+                if key == KEY_HOTKEY {
+                    let SettingValue::Hotkey(h) = &candidate else {
+                        return Err("type mismatch".into());
+                    };
+                    self.settings.try_apply_hotkey(h)?;
+                } else if key.starts_with("module.") {
+                    let mut cs = SettingsChangeSet::default();
+                    cs.changes
+                        .push((SettingKey(Arc::from(key)), candidate.clone()));
+                    let Some(id) = module_id_of(key) else {
+                        return Err(format!("malformed module setting key: {key}"));
+                    };
+                    let module = self
+                        .registry
+                        .module_mut(&id)
+                        .ok_or_else(|| format!("module {id} not loaded"))?;
+                    module.try_apply_settings(cs).map_err(|e| e.to_string())?;
+                }
+                // 第三、四步:commit + persist(host 内为原子的一对)。
+                self.settings.commit(key, candidate);
+            }
+            ApplyPolicy::RestartApplication => {
+                self.settings.commit(key, candidate);
+                self.settings.mark_restart_required();
+            }
+            ApplyPolicy::ReloadModule => {
+                // §42 允许 V1 只实现 Immediate 与 RestartApplication。
+                return Err("V1 不支持 ReloadModule 策略(§42)".into());
+            }
+        }
+        Ok(())
     }
 
     // ------------------------------------------------------------------
@@ -477,6 +632,7 @@ impl Core {
             HostEvent::HotkeyPressed => self.hotkey_pressed(),
             HostEvent::ShowRequested => self.show_requested(),
             HostEvent::FocusLost => self.focus_lost(),
+            HostEvent::OpenSettings => self.open_settings(),
         }
     }
 
@@ -548,6 +704,26 @@ fn route(registry: &ModuleRegistry, input: &str) -> (ModuleId, String) {
         .cloned()
         .expect("registry has no default module");
     (default, input.to_string())
+}
+
+/// §42 校验:kind 与值类型必须匹配。
+fn kind_matches(kind: SettingKind, v: &SettingValue) -> bool {
+    matches!(
+        (kind, v),
+        (SettingKind::Bool, SettingValue::Bool(_))
+            | (SettingKind::Integer, SettingValue::Integer(_))
+            | (SettingKind::String, SettingValue::String(_))
+            | (SettingKind::Enum, SettingValue::Enum(_))
+            | (SettingKind::Path, SettingValue::Path(_))
+            | (SettingKind::Hotkey, SettingValue::Hotkey(_))
+    )
+}
+
+/// `module.<id>.<rest>` → ModuleId。
+fn module_id_of(key: &str) -> Option<ModuleId> {
+    let rest = key.strip_prefix("module.")?;
+    let (id, _) = rest.split_once('.')?;
+    Some(ModuleId::new(id))
 }
 
 /// §109:sink 在 load 时绑定 (ModuleId, ModuleEpoch)。
