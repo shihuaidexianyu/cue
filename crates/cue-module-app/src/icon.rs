@@ -11,7 +11,7 @@
 use crate::com::ComGuard;
 use cue_protocol::{IconImage, ItemId, ModuleEvent, ModuleEventSink, ResultIcon};
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex};
@@ -133,7 +133,7 @@ fn worker_loop(
 }
 
 /// 提取 exe 的 256px 系统图标并降采样到 96px RGBA。
-fn extract_icon(exe: &PathBuf) -> Option<IconImage> {
+fn extract_icon(exe: &Path) -> Option<IconImage> {
     unsafe {
         let wide: Vec<u16> = exe
             .to_string_lossy()
@@ -207,11 +207,140 @@ fn hicon_to_rgba(hicon: HICON, size: u32) -> Option<IconImage> {
             for px in out.chunks_exact_mut(4) {
                 px.swap(0, 2); // BGRA → RGBA
             }
+            normalize_bbox(&mut out, size);
             rgba = Some(IconImage::new(Arc::from(out), size, size));
         }
         SelectObject(hdc, old);
         let _ = DeleteObject(dib.into());
         let _ = DeleteDC(hdc);
         rgba
+    }
+}
+
+/// 老式应用的 JUMBO image list 单元是"原尺寸贴在左上角的 256px
+/// 大图"(shell 不上采样),直接缩放会得到缩在角落的小图标。
+/// 用 alpha 包围盒检测这种异常:内容宽或高不足画布一半时,
+/// 裁出内容双线性放大并居中。正常图标(包围盒 ≈ 全画布)不动,
+/// 避免把自带留边的图标放大得大小不一。
+fn normalize_bbox(rgba: &mut Vec<u8>, size: u32) {
+    let s = size as usize;
+    let (mut min_x, mut min_y, mut max_x, mut max_y) = (s, s, 0usize, 0usize);
+    for y in 0..s {
+        for x in 0..s {
+            if rgba[(y * s + x) * 4 + 3] > 16 {
+                min_x = min_x.min(x);
+                min_y = min_y.min(y);
+                max_x = max_x.max(x);
+                max_y = max_y.max(y);
+            }
+        }
+    }
+    if max_x < min_x || max_y < min_y {
+        return; // 全透明:无可归一化
+    }
+    let (bw, bh) = (max_x - min_x + 1, max_y - min_y + 1);
+    if bw * 2 >= s && bh * 2 >= s {
+        return; // 内容 ≥ 半画布:正常图标
+    }
+    // 等比放大到尽量填满画布,居中
+    let scale = (s as f32 / bw as f32).min(s as f32 / bh as f32);
+    let (dw, dh) = ((bw as f32 * scale) as usize, (bh as f32 * scale) as usize);
+    let (ox, oy) = ((s - dw) / 2, (s - dh) / 2);
+    let src = rgba.clone();
+    let mut dst = vec![0u8; s * s * 4];
+    for dy in 0..dh {
+        for dx in 0..dw {
+            // 目标像素中心映射回源内容坐标(双线性)
+            let fx = (dx as f32 + 0.5) / scale - 0.5;
+            let fy = (dy as f32 + 0.5) / scale - 0.5;
+            let (x0, y0) = (fx.floor().max(0.0) as usize, fy.floor().max(0.0) as usize);
+            let (x1, y1) = ((x0 + 1).min(bw - 1), (y0 + 1).min(bh - 1));
+            let (tx, ty) = (fx.fract().max(0.0), fy.fract().max(0.0));
+            let mut px = [0f32; 4];
+            for (sy, wy) in [(y0, 1.0 - ty), (y1, ty)] {
+                for (sx, wx) in [(x0, 1.0 - tx), (x1, tx)] {
+                    let i = ((min_y + sy) * s + (min_x + sx)) * 4;
+                    let w = wx * wy;
+                    for c in 0..4 {
+                        px[c] += src[i + c] as f32 * w;
+                    }
+                }
+            }
+            let d = ((oy + dy) * s + (ox + dx)) * 4;
+            for c in 0..4 {
+                dst[d + c] = px[c].round() as u8;
+            }
+        }
+    }
+    *rgba = dst;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{catalog, packaged, start_menu};
+    use cue_protocol::{LogLevel, ModuleLog};
+    use std::path::Path;
+
+    struct TestLog;
+    impl ModuleLog for TestLog {
+        fn log(&self, _level: LogLevel, _message: &str) {}
+    }
+
+    /// 离线审计(诊断工具,非常规测试):对全量 catalog 跑提取管线,
+    /// 按 alpha 分布分类并落 PNG 样本到 target/icon-audit/。
+    /// 运行:cargo test -p cue-module-app icon_audit -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn icon_audit() {
+        let logger: cue_protocol::ModuleLogger = std::sync::Arc::new(TestLog);
+        let mut entries = start_menu::discover(&logger);
+        entries.extend(packaged::discover(&logger));
+        catalog::dedup(&mut entries);
+
+        let mut ok = 0u32;
+        let mut zero_alpha: Vec<String> = Vec::new();
+        let mut partial: Vec<(String, u32)> = Vec::new();
+        let mut extract_failed = 0u32;
+        for e in &entries {
+            let crate::catalog::LaunchTarget::Win32 { exe, .. } = &e.target else {
+                continue;
+            };
+            let Some(icon) = extract_icon(exe) else {
+                extract_failed += 1;
+                continue;
+            };
+            let total = icon.rgba.len() / 4;
+            let transparent = icon
+                .rgba
+                .chunks_exact(4)
+                .filter(|px| px[3] == 0)
+                .count();
+            if transparent == total {
+                zero_alpha.push(format!("{} -> {}", e.name, exe.display()));
+            } else if transparent * 100 / total > 95 {
+                partial.push((format!("{} -> {}", e.name, exe.display()), transparent as u32));
+            } else {
+                ok += 1;
+            }
+        }
+        println!("== icon audit: {ok} ok, {} all-alpha-zero, {} >95% transparent, {extract_failed} extract failed ==",
+            zero_alpha.len(), partial.len());
+        for s in &zero_alpha {
+            println!("ZERO-ALPHA: {s}");
+        }
+        for (s, n) in &partial {
+            println!("MOSTLY-TRANSPARENT({n}): {s}");
+        }
+        // 把 mostly-transparent 样本落 PNG 便于肉眼确认(target/ 下,免进 git)
+        let out_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/icon-audit");
+        std::fs::create_dir_all(&out_dir).unwrap();
+        for (i, (s, _)) in partial.iter().take(9).enumerate() {
+            let exe = s.rsplit("-> ").next().unwrap();
+            let icon = extract_icon(Path::new(exe)).unwrap();
+            let rgba: Vec<u8> = icon.rgba.to_vec();
+            let img = image::RgbaImage::from_raw(icon.width, icon.height, rgba).unwrap();
+            img.save(out_dir.join(format!("tiny-{i}.png"))).unwrap();
+        }
     }
 }

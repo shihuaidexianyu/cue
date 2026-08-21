@@ -1273,6 +1273,7 @@ version = "0.1.0"
 dependencies = [
  "cue-protocol",
  "futures",
+ "image",
  "pinyin",
  "windows 0.62.2",
  "windows-future 0.3.2",

@@ -9,6 +9,9 @@ futures.workspace = true
 pinyin.workspace = true
 windows-future.workspace = true
 
+[dev-dependencies]
+image = "0.25"
+
 [dependencies.windows]
 workspace = true
 features = [
