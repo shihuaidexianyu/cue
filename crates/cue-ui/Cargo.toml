@@ -8,3 +8,6 @@ cue-protocol.workspace = true
 cue-core.workspace = true
 futures.workspace = true
 gpui.workspace = true
+# 与 gpui 0.2.2 同源锁定(RenderImage::new 的 Frame/SmallVec 类型匹配)
+image = "0.25"
+smallvec = "1"
