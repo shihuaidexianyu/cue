@@ -36,14 +36,12 @@ impl AppEntry {
         let (full, initials) = pinyin_index::keys(name);
         let item_key: Arc<str> = match &target {
             LaunchTarget::Packaged { aumid } => aumid.clone(),
-            LaunchTarget::Win32 { exe, args, .. } => {
-                format!(
-                    "{}\u{1f}{}",
-                    exe.to_string_lossy().to_lowercase(),
-                    normalize_args(args)
-                )
-                .into()
-            }
+            LaunchTarget::Win32 { exe, args, .. } => format!(
+                "{}\u{1f}{}",
+                exe.to_string_lossy().to_lowercase(),
+                normalize_args(args)
+            )
+            .into(),
         };
         Self {
             name: name.into(),

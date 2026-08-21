@@ -89,10 +89,7 @@ impl Core {
         let usage = UsageStore::new(config.usage_file.clone());
         // Settings Host 必须先于 load_modules:ModuleContext 的设置快照
         // 依赖它(§48 设置只存在这里)。apply_hotkey 的所有权移交 host。
-        let settings = SettingsHost::new(
-            config.settings_file.clone(),
-            config.apply_hotkey.take(),
-        );
+        let settings = SettingsHost::new(config.settings_file.clone(), config.apply_hotkey.take());
         let mut core = Self {
             settings,
             config,
@@ -135,11 +132,7 @@ impl Core {
     }
 
     fn build_context(&self, id: &ModuleId, epoch: u64) -> ModuleContext {
-        let module_root = self
-            .config
-            .storage_root
-            .join("modules")
-            .join(id.as_str());
+        let module_root = self.config.storage_root.join("modules").join(id.as_str());
         let storage = ModuleStorage {
             data: module_root.join("data"),
             state: module_root.join("state"),
@@ -167,9 +160,7 @@ impl Core {
 
     /// 取走事件队列消费端(只能取一次)。由 UI 线程的泵消费(§96)。
     pub fn take_event_receiver(&mut self) -> UnboundedReceiver<CoreEvent> {
-        self.event_rx
-            .take()
-            .expect("event receiver already taken")
+        self.event_rx.take().expect("event receiver already taken")
     }
 
     /// 事件队列生产端,供编排层接入 host 事件(§112)。
@@ -419,7 +410,13 @@ impl Core {
     pub fn paste(&mut self, text: &str) {
         let cleaned: String = text
             .chars()
-            .map(|c| if c == '\n' || c == '\r' || c == '\t' { ' ' } else { c })
+            .map(|c| {
+                if c == '\n' || c == '\r' || c == '\t' {
+                    ' '
+                } else {
+                    c
+                }
+            })
             .collect();
         self.push_text(cleaned.trim());
     }
@@ -575,7 +572,11 @@ impl Core {
         true
     }
 
-    fn on_activation_completed(&mut self, ticket: &ActivationTicket, outcome: ModuleOutcome) -> bool {
+    fn on_activation_completed(
+        &mut self,
+        ticket: &ActivationTicket,
+        outcome: ModuleOutcome,
+    ) -> bool {
         // §103:usage 总是记录(激活真实发生过)。
         if let Some(req) = &outcome.usage {
             self.usage.record(&ticket.module_id, req);

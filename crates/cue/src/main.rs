@@ -73,8 +73,10 @@ fn main() {
                 match slot.borrow_mut().as_mut() {
                     Some(m) => {
                         let r = m.apply(*hk).map_err(|e| e.to_string());
-                        eprintln!("[hotkey] try-apply {hk} -> {}",
-                            if r.is_ok() { "ok" } else { "failed" });
+                        eprintln!(
+                            "[hotkey] try-apply {hk} -> {}",
+                            if r.is_ok() { "ok" } else { "failed" }
+                        );
                         r
                     }
                     // manager 未就位只可能发生在窗口创建前,而设置 UI

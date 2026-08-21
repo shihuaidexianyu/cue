@@ -39,10 +39,7 @@ pub fn find_main_window_hwnd() -> Option<HWND> {
             pid: std::process::id(),
             result: HWND::default(),
         };
-        let _ = EnumWindows(
-            Some(enum_proc),
-            LPARAM(&mut search as *mut Search as isize),
-        );
+        let _ = EnumWindows(Some(enum_proc), LPARAM(&mut search as *mut Search as isize));
         (!search.result.0.is_null()).then_some(search.result)
     }
 }
@@ -65,7 +62,11 @@ pub fn show_and_focus(hwnd: HWND) {
         if !fg.as_bool() {
             // 前台抢占被拒:窗口可见但未聚焦,失焦钩子很快会触发隐藏。
             // 诊断留下证据(热键路径理论上不会被拒)。
-            eprintln!("[focus] SetForegroundWindow denied (pos_ok={} err={:?})", pos.is_ok(), windows::core::Error::from_thread());
+            eprintln!(
+                "[focus] SetForegroundWindow denied (pos_ok={} err={:?})",
+                pos.is_ok(),
+                windows::core::Error::from_thread()
+            );
         }
         let _ = shown;
     }

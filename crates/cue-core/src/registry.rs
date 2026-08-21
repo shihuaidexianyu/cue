@@ -72,13 +72,8 @@ impl ModuleRegistry {
             self.default_module = Some(id.clone());
         }
         let epoch = self.alloc_epoch();
-        self.modules.insert(
-            id.clone(),
-            ModuleSlot {
-                module,
-                epoch,
-            },
-        );
+        self.modules
+            .insert(id.clone(), ModuleSlot { module, epoch });
         self.order.push(id);
         Ok(())
     }

@@ -12,12 +12,18 @@ pub fn discover(logger: &ModuleLogger) -> Vec<AppEntry> {
     let _com = ComGuard::new();
     match discover_inner() {
         Ok(entries) => {
-            logger.log(LogLevel::Info, &format!("packaged: {} entries", entries.len()));
+            logger.log(
+                LogLevel::Info,
+                &format!("packaged: {} entries", entries.len()),
+            );
             entries
         }
         Err(e) => {
             // WinRT 可用性属于环境事实,不构成 load 失败(§63)。
-            logger.log(LogLevel::Warn, &format!("packaged discovery unavailable: {e}"));
+            logger.log(
+                LogLevel::Warn,
+                &format!("packaged discovery unavailable: {e}"),
+            );
             Vec::new()
         }
     }

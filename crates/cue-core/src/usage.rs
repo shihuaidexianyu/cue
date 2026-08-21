@@ -210,12 +210,20 @@ mod tests {
     fn render_parse_roundtrip() {
         let mut map = HashMap::new();
         map.insert(
-            (ModuleId::from_static("app"), "C:\\Apps\\x.exe\u{1f}".to_string(), ActionId::PRIMARY),
+            (
+                ModuleId::from_static("app"),
+                "C:\\Apps\\x.exe\u{1f}".to_string(),
+                ActionId::PRIMARY,
+            ),
             stat(7, 1_700_000_000),
         );
         map.insert(
             // 需要转义的 key:制表符、换行、反斜杠
-            (ModuleId::from_static("file"), "a\tb\nc\\d".to_string(), ActionId(3)),
+            (
+                ModuleId::from_static("file"),
+                "a\tb\nc\\d".to_string(),
+                ActionId(3),
+            ),
             stat(1, 42),
         );
         let parsed = parse(&render(&map)).unwrap();
@@ -224,11 +232,16 @@ mod tests {
 
     #[test]
     fn parse_skips_bad_lines() {
-        let text = "cue-usage-v1\napp\t0\t5\t100\tok\napp\t0\tNaN\t100\tbad\napp\t0\t1\nbad-escape\t\\x\n";
+        let text =
+            "cue-usage-v1\napp\t0\t5\t100\tok\napp\t0\tNaN\t100\tbad\napp\t0\t1\nbad-escape\t\\x\n";
         let map = parse(text).unwrap();
         assert_eq!(map.len(), 1);
         assert_eq!(
-            map.get(&(ModuleId::from_static("app"), "ok".to_string(), ActionId::PRIMARY)),
+            map.get(&(
+                ModuleId::from_static("app"),
+                "ok".to_string(),
+                ActionId::PRIMARY
+            )),
             Some(&stat(5, 100))
         );
     }

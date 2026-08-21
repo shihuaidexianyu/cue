@@ -211,9 +211,10 @@ impl LauncherModule for AppModule {
             .into(),
         );
         p.icon = match &entry.target {
-            LaunchTarget::Win32 { exe, .. } => self.icons.as_ref().and_then(|icons| {
-                icons.get_or_queue(item.id(), &entry.icon_key(), exe)
-            }),
+            LaunchTarget::Win32 { exe, .. } => self
+                .icons
+                .as_ref()
+                .and_then(|icons| icons.get_or_queue(item.id(), &entry.icon_key(), exe)),
             // §109:packaged logo 走 WinRT 资源,V1 用 SystemIcon 兜底。
             LaunchTarget::Packaged { .. } => Some(ResultIcon::SystemIcon(SystemIconId::App)),
         };

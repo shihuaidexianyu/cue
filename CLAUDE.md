@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Repository status
 
-This repo is currently **spec-only**: the sole content is `architecture.md`, the authoritative Product & Architecture Specification (v0.2, written in Chinese) for **CUE**, a lightweight Windows launcher. No code, no Cargo workspace, and no commits exist yet. Read `architecture.md` before writing any code — it is the source of truth; this file only summarizes its binding decisions (§ references point into `architecture.md`).
+**V1 complete** (phases 1–4 + 6 of §88 done; FileModule deferred to V1.x by design). The Cargo workspace exists at the repo root with crates under `crates/` (`cue`, `cue-core`, `cue-protocol`, `cue-ui`, `cue-windows`, `cue-module-app`). `architecture.md` remains the authoritative Product & Architecture Specification (v0.2, written in Chinese) for **CUE**, a lightweight Windows launcher — it is the source of truth; this file only summarizes its binding decisions (§ references point into `architecture.md`). V1 performance budgets verified per §114 (results recorded at the end of §114).
 
 - **Target platform:** Windows
 - **Stack:** Rust + GPUI (Zed's UI framework) + Windows API
@@ -12,14 +12,15 @@ This repo is currently **spec-only**: the sole content is `architecture.md`, the
 
 ## Commands
 
-No workspace exists yet. Once scaffolded (Cargo workspace at repo root, crates under `crates/`, all named `cue-*`), the standard workflow is:
+Cargo workspace at repo root, crates under `crates/`, all named `cue-*`:
 
-- Build: `cargo build`
+- Build: `cargo build` (release: `cargo build --release`)
 - Run the launcher: `cargo run -p cue`
 - Test everything: `cargo test`
 - Test one crate: `cargo test -p cue-module-app`
 - Run a single test: `cargo test -p cue-module-app <test_name>` (add `-- --nocapture` for output)
 - Lint / format: `cargo clippy --all-targets` / `cargo fmt`
+- Note: a running `cue.exe` locks the binary — `Stop-Process -Name cue` before rebuilding.
 
 ## Architecture
 
@@ -42,7 +43,7 @@ Binding contracts (§86 is the canonical interface):
 - Async model (§91–106): Core is a single-threaded state machine on the UI thread. North star (§91): **Core never cancels async work; it judges result validity via `QueryTicket { session_id, module_id, module_epoch, generation }`** — modules bound their own resource use (Everything: dedicated IPC thread + latest-wins slot, §99). `generation` is Core bookkeeping and is *not* echoed by modules: `QueryResponse` carries only `items`; the ticket is captured by Core's spawn wrapper and completions re-enter through one event queue (§96). Input change clears results + selection immediately — stale results must never be activatable (§102). Activation outcomes: usage is always recorded, but session disposition applies only if the originating session is still current (§103). Futures are `Send + 'static`, created without blocking/IO, polled by an injected `TaskSpawner` (GPUI in production, manual pump in tests). No debounce, no loading state, **no `catch_unwind` panic boundary** (§104 — §63 discipline instead).
 - Presentation (§13–17, §108–109): protocol types use `Arc<str>`, never GPUI's `SharedString` (§71). `ResultIcon` is a protocol-owned `Raster` bitmap: RGBA8, row-major, sRGB, straight alpha, `len == w*h*4`, single 96px size (UI downscales and converts at texture upload). UI caches GPU textures by `Arc` pointer — a module must reuse the same `Arc<IconImage>` per cached icon. Result Row is one fixed grid with optional slots (icon gutter always reserved) — no second layout. Modules push `ModuleEvent::PresentationInvalidated { items }` via `ModuleContext.events` (sink bound to `ModuleEpoch` at load; stale-epoch events dropped) when async resources (icons) arrive; Core re-runs `present()` on the visible rows.
 
-Planned workspace layout (§68): `crates/{cue, cue-core, cue-protocol, cue-ui, cue-windows, cue-module-app}` (+ `cue-module-file` in V1.x). The `cue-` prefix avoids collisions with Rust's `core` and the official `windows` crate.
+Workspace layout (§68): `crates/{cue, cue-core, cue-protocol, cue-ui, cue-windows, cue-module-app}` (+ `cue-module-file` in V1.x). The `cue-` prefix avoids collisions with Rust's `core` and the official `windows` crate.
 
 Settings and storage:
 

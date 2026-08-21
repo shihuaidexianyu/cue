@@ -12,9 +12,7 @@ use std::sync::atomic::{AtomicIsize, Ordering};
 use windows::core::{w, Error, PCWSTR};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows::Win32::UI::Accessibility::{
-    SetWinEventHook, UnhookWinEvent, HWINEVENTHOOK,
-};
+use windows::Win32::UI::Accessibility::{SetWinEventHook, UnhookWinEvent, HWINEVENTHOOK};
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 /// Host 上报给编排层的事件(由 cue binary 翻译成 Core 的 HostEvent,§112)。

@@ -17,8 +17,8 @@ use windows::core::{w, Error};
 use windows::Win32::Foundation::HWND;
 use windows::Win32::UI::Input::Ime::ImmAssociateContext;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    ActivateKeyboardLayout, GetKeyboardLayout, LoadKeyboardLayoutW,
-    ACTIVATE_KEYBOARD_LAYOUT_FLAGS, HKL, KLF_ACTIVATE,
+    ActivateKeyboardLayout, GetKeyboardLayout, LoadKeyboardLayoutW, ACTIVATE_KEYBOARD_LAYOUT_FLAGS,
+    HKL, KLF_ACTIVATE,
 };
 use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId};
 

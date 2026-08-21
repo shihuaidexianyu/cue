@@ -182,8 +182,9 @@ impl LauncherModule for FakeModule {
     fn activate(&mut self, item: &ModuleItem, action: ActionId) -> ActivationFuture {
         if let Some(rx) = self.pending_activations.lock().unwrap().pop_front() {
             return Box::pin(async move {
-                rx.await
-                    .unwrap_or_else(|_| ModuleOutcome::failed(ModuleError::Internal("dropped".into())))
+                rx.await.unwrap_or_else(|_| {
+                    ModuleOutcome::failed(ModuleError::Internal("dropped".into()))
+                })
             });
         }
         let title = item
@@ -601,7 +602,7 @@ fn hotkey_apply_failure_keeps_old_value() {
         .expect_err("must fail");
     assert!(err.contains("occupied"));
     assert_eq!(core.hotkey(), before); // 旧值保留
-    // 错误进入模型,UI 据此展示;再次成功 apply 后错误清除。
+                                       // 错误进入模型,UI 据此展示;再次成功 apply 后错误清除。
     let model = core.settings_model().unwrap();
     assert!(model.error.is_some());
 }
@@ -680,8 +681,7 @@ fn settings_view_lifecycle_and_effects() {
     // Bool 切换立即生效并体现在 Core 行为上(§54)。
     core.open_settings();
     core.settings_select_next(); // hide_on_focus_loss 行
-    core
-        .apply_setting("core.hide_on_focus_loss", SettingValue::Bool(false))
+    core.apply_setting("core.hide_on_focus_loss", SettingValue::Bool(false))
         .unwrap();
     core.dismiss_settings();
     core.open_session();

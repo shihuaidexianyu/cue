@@ -175,7 +175,12 @@ impl std::fmt::Display for Hotkey {
         if m.super_key {
             parts.push("win");
         }
-        write!(f, "{}{}", parts.join("+") + if parts.is_empty() { "" } else { "+" }, self.key.name())
+        write!(
+            f,
+            "{}{}",
+            parts.join("+") + if parts.is_empty() { "" } else { "+" },
+            self.key.name()
+        )
     }
 }
 
@@ -207,7 +212,8 @@ impl std::str::FromStr for Hotkey {
                         return Err(HotkeyParseError(format!("multiple keys in hotkey: {raw}")));
                     }
                     key = Some(
-                        Key::parse(t).ok_or_else(|| HotkeyParseError(format!("unknown key: {t}")))?,
+                        Key::parse(t)
+                            .ok_or_else(|| HotkeyParseError(format!("unknown key: {t}")))?,
                     );
                 }
             }

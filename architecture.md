@@ -3737,6 +3737,19 @@ Memory：
   （§79：< 100 MB）
 ```
 
+**V1 实测（2026-08-21,release 构建,Windows 11,注入输入 E2E）**：
+
+```text
+Cold start：113–125 ms（稳态;新二进制首跑受 Defender 扫描影响 ~2.2 s,
+  属环境噪声)✅ < 500 ms
+Hotkey latency：92–98 ms(稳态 N=10,含注入与轮询开销数 ms;
+  进程内首次唤起 406 ms —— 首帧 GPU/渲染器初始化,属已知待优化项,
+  可考虑启动时离屏预热一帧)✅ < 100 ms
+Search latency：P50 = 0.38 ms / P95 = 0.52 ms(N=13,视图侧
+  input→rows 上界,含事件泵与 present,比 §114 定义略宽)✅
+Memory：63.1 MB(Private Working Set,idle 60 s)✅ < 100 MB
+```
+
 ---
 
 # 115. UX 不变量

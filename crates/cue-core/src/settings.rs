@@ -341,10 +341,7 @@ mod tests {
         let file = dir.join("settings.tsv");
 
         let mut host = SettingsHost::new(Some(file.clone()), None);
-        host.commit(
-            KEY_HIDE_ON_FOCUS_LOSS,
-            SettingValue::Bool(false),
-        );
+        host.commit(KEY_HIDE_ON_FOCUS_LOSS, SettingValue::Bool(false));
         drop(host);
 
         let host = SettingsHost::new(Some(file.clone()), None);

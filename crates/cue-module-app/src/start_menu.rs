@@ -5,9 +5,7 @@ use crate::com::ComGuard;
 use cue_protocol::{LogLevel, ModuleLogger};
 use std::path::{Path, PathBuf};
 use windows::core::{Interface, PCWSTR};
-use windows::Win32::System::Com::{
-    CoCreateInstance, IPersistFile, CLSCTX_INPROC_SERVER, STGM,
-};
+use windows::Win32::System::Com::{CoCreateInstance, IPersistFile, CLSCTX_INPROC_SERVER, STGM};
 use windows::Win32::UI::Shell::{IShellLinkW, ShellLink};
 
 /// 枚举两个 Start Menu 根,解析全部 .lnk,返回未去重的 entry。
@@ -79,8 +77,7 @@ fn resolve(lnk: &Path) -> Option<(String, LaunchTarget)> {
         .chain(Some(0))
         .collect();
     unsafe {
-        let link: IShellLinkW =
-            CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER).ok()?;
+        let link: IShellLinkW = CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER).ok()?;
         let persist: IPersistFile = link.cast().ok()?;
         persist.Load(PCWSTR(wide.as_ptr()), STGM(0)).ok()?;
 

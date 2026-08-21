@@ -9,8 +9,8 @@ use std::path::Path;
 use windows::core::PCWSTR;
 use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_ALL};
 use windows::Win32::UI::Shell::{
-    ApplicationActivationManager, IApplicationActivationManager, ShellExecuteExW,
-    ACTIVATEOPTIONS, SHELLEXECUTEINFOW,
+    ApplicationActivationManager, IApplicationActivationManager, ShellExecuteExW, ACTIVATEOPTIONS,
+    SHELLEXECUTEINFOW,
 };
 use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 
@@ -29,11 +29,7 @@ fn to_wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(Some(0)).collect()
 }
 
-fn launch_win32(
-    exe: &Path,
-    args: &str,
-    working_dir: Option<&Path>,
-) -> Result<(), ModuleError> {
+fn launch_win32(exe: &Path, args: &str, working_dir: Option<&Path>) -> Result<(), ModuleError> {
     let exe_w = to_wide(&exe.to_string_lossy());
     let args_w = (!args.is_empty()).then(|| to_wide(args));
     let dir_w = working_dir.map(|d| to_wide(&d.to_string_lossy()));
@@ -64,12 +60,8 @@ fn launch_packaged(aumid: &str) -> Result<(), ModuleError> {
         let mgr: IApplicationActivationManager =
             CoCreateInstance(&ApplicationActivationManager, None, CLSCTX_ALL)
                 .map_err(|e| ModuleError::ActivationFailed(format!("activation manager: {e}")))?;
-        mgr.ActivateApplication(
-            PCWSTR(aumid_w.as_ptr()),
-            PCWSTR::null(),
-            ACTIVATEOPTIONS(0),
-        )
-        .map_err(|e| ModuleError::ActivationFailed(format!("{aumid}: {e}")))?;
+        mgr.ActivateApplication(PCWSTR(aumid_w.as_ptr()), PCWSTR::null(), ACTIVATEOPTIONS(0))
+            .map_err(|e| ModuleError::ActivationFailed(format!("{aumid}: {e}")))?;
     }
     Ok(())
 }

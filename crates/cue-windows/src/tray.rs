@@ -100,7 +100,12 @@ unsafe fn show_menu(host: HWND) {
         if cmd.as_bool() {
             // 延迟分发(见 WM_CUE_TRAY_CMD 注释):此刻同步调 handler
             // 会让刚唤起的窗口在菜单拆除时被抢前台。
-            let _ = PostMessageW(Some(host), WM_CUE_TRAY_CMD, WPARAM(cmd.0 as usize), LPARAM(0));
+            let _ = PostMessageW(
+                Some(host),
+                WM_CUE_TRAY_CMD,
+                WPARAM(cmd.0 as usize),
+                LPARAM(0),
+            );
         }
     }
 }
@@ -164,5 +169,7 @@ fn build_icon() -> Result<HICON, Error> {
     // AND mask:全 0 = 全不透明(角部透明由 XOR 的 alpha 表达)
     bits.extend_from_slice(&[0u8; AND]);
 
-    unsafe { CreateIconFromResourceEx(&bits, true, 0x00030000, S as i32, S as i32, LR_DEFAULTCOLOR) }
+    unsafe {
+        CreateIconFromResourceEx(&bits, true, 0x00030000, S as i32, S as i32, LR_DEFAULTCOLOR)
+    }
 }

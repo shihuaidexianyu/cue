@@ -10,8 +10,8 @@ use cue_protocol::{
     ResultPresentation, SettingKind, SettingValue, SystemIconId,
 };
 use futures::StreamExt;
-use gpui::*;
 use gpui::prelude::FluentBuilder;
+use gpui::*;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -70,6 +70,10 @@ pub struct LauncherView {
     /// §41 设置页的热键捕获态(视图本地):true 时下一次按键组合
     /// 成为 core.hotkey 候选。
     capturing_hotkey: bool,
+    /// §114 测量探针(§79):文本输入的时刻;下一次结果行非空时
+    /// 打印 input→rows 时延(InputChanged → ResultState 提交的视图侧
+    /// 上界,含事件泵与 present)。
+    perf_input_at: Option<std::time::Instant>,
 }
 
 impl LauncherView {
@@ -104,6 +108,7 @@ impl LauncherView {
             effect_handler: None,
             icon_textures: HashMap::new(),
             capturing_hotkey: false,
+            perf_input_at: None,
         }
     }
 
@@ -119,6 +124,10 @@ impl LauncherView {
     fn after_core_change(&mut self, changed: bool, cx: &mut Context<Self>) {
         if changed {
             self.refresh_snapshot();
+            // §114 探针:结果行首次非空即输入→结果可见的上界。
+            if let Some(t0) = self.perf_input_at.take_if(|_| !self.rows.is_empty()) {
+                eprintln!("[perf] input->rows in {:?}", t0.elapsed());
+            }
         }
         for effect in self.core.take_effects() {
             if effect == CoreEffect::FocusInput {
@@ -169,16 +178,21 @@ impl LauncherView {
             "enter" => self.core.activate_selected(),
             "up" => self.core.select_prev(),
             "down" => self.core.select_next(),
-            "backspace" => self.core.backspace(),
+            "backspace" => {
+                self.perf_input_at = Some(std::time::Instant::now());
+                self.core.backspace();
+            }
             "v" if modifiers.control && !modifiers.alt => {
                 // §115:允许粘贴 Unicode(IME 禁用只针对 composition)。
                 if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
+                    self.perf_input_at = Some(std::time::Instant::now());
                     self.core.paste(&text);
                 }
             }
             _ => {
                 if !modifiers.control && !modifiers.alt {
                     if let Some(text) = keystroke.key_char.clone() {
+                        self.perf_input_at = Some(std::time::Instant::now());
                         self.core.push_text(&text);
                     }
                 }
@@ -245,11 +259,8 @@ impl LauncherView {
     // ------------------------------------------------------------------
 
     fn render_input(&self) -> Div {
-
         let content: Div = if self.input.is_empty() {
-            div()
-                .text_color(rgb(0x6a6a75))
-                .child("Type to search")
+            div().text_color(rgb(0x6a6a75)).child("Type to search")
         } else {
             div().child(format!("{}▍", self.input))
         };
@@ -414,12 +425,7 @@ impl LauncherView {
             .overflow_hidden()
             .child(div().text_sm().child(row.title.to_string()));
         if !subtitle.is_empty() {
-            text_col = text_col.child(
-                div()
-                    .text_xs()
-                    .text_color(rgb(0x9a9aa3))
-                    .child(subtitle),
-            );
+            text_col = text_col.child(div().text_xs().text_color(rgb(0x9a9aa3)).child(subtitle));
         }
 
         let mut container = div()

@@ -65,9 +65,7 @@ impl HotkeyManager {
 fn to_win32(hotkey: &Hotkey) -> Result<(HOT_KEY_MODIFIERS, u32), HotkeyError> {
     let m = &hotkey.modifiers;
     if m.is_empty() {
-        return Err(HotkeyError(
-            "hotkey requires at least one modifier".into(),
-        ));
+        return Err(HotkeyError("hotkey requires at least one modifier".into()));
     }
     let mut modifiers = HOT_KEY_MODIFIERS(0);
     if m.alt {
