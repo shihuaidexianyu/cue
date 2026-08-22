@@ -37,3 +37,15 @@ Compress-Archive -Path "$stage\*" -DestinationPath $zip -Force
 Write-Host ""
 Write-Host "packed: $zip"
 Write-Host "  cue.exe: $([Math]::Round((Get-Item "$stage\cue.exe").Length / 1MB, 1)) MB"
+
+# Inno Setup 向导安装包:检测到 ISCC 就出,没有就跳过(zip 不受影响)。
+$iscc = @("$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe",
+          "C:\Program Files (x86)\Inno Setup 6\ISCC.exe") |
+    Where-Object { Test-Path $_ } | Select-Object -First 1
+if ($iscc) {
+    & $iscc "/DAppVersion=$ver" "$PSScriptRoot\setup.iss"
+    if ($LASTEXITCODE -ne 0) { throw "ISCC compile failed" }
+    Write-Host "  setup: $root\dist\CUE-Setup-$ver.exe"
+} else {
+    Write-Host "  Inno Setup (ISCC.exe) 未安装,跳过 setup.exe(仅出 zip)"
+}
