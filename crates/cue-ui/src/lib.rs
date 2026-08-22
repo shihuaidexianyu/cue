@@ -210,6 +210,13 @@ impl LauncherView {
                     self.core.paste(&text);
                 }
             }
+            // GPUI 把 VK_SPACE 列为 immutable 命名键("space"),不生成
+            // key_char——必须在 fallback 之前显式插入,否则空格被吞
+            // ("b github" 变成 "bgithub",触发词永远吃不到词边界)。
+            "space" if !modifiers.control && !modifiers.alt => {
+                self.perf_input_at = Some(std::time::Instant::now());
+                self.core.push_text(" ");
+            }
             _ => {
                 if !modifiers.control && !modifiers.alt {
                     if let Some(text) = keystroke.key_char.clone() {
