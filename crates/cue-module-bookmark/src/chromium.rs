@@ -1,8 +1,11 @@
-//! Chromium 系书签数据源(§117):`<User Data>/<profile>/Bookmarks` JSON。
+//! Chromium 系书签数据源(§117):
+//! `<User Data>/<profile>/{Bookmarks,AccountBookmarks}` JSON。
 //!
 //! 对齐 Flow Launcher BrowserBookmark 插件的发现方式:枚举 User Data
-//! 下所有含 `Bookmarks` 文件的 profile 目录(Default / Profile N ……),
-//! 递归遍历 `roots`(`folder`/`workspace` 容器、Opera `custom_root`)。
+//! 下所有 profile 目录(Default / Profile N ……)的 `Bookmarks`(本地
+//! 书签)与 `AccountBookmarks`(账号书签——登录 Google 账号后 Chrome
+//! 改写它而不再维护 `Bookmarks`,两者 JSON 同构、可同时存在),递归
+//! 遍历 `roots`(`folder`/`workspace` 容器、Opera `custom_root`)。
 //! JSON 无锁,浏览器运行中可直接读;Firefox(places.sqlite)不在
 //! V1.x 范围(§117 依赖决策)。
 
@@ -69,7 +72,7 @@ impl Browser {
 
 const BROWSERS: [Browser; 2] = [Browser::Edge, Browser::Chrome];
 
-/// 一个 profile 的书签文件。(browser, profile 显示名, Bookmarks 路径);
+/// 一个 profile 的一个书签文件。(browser, profile 显示名, 文件路径);
 /// "Default" profile 的显示名为空(Flow 同款:默认 profile 不标注)。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BookmarkFile {
@@ -78,41 +81,58 @@ pub struct BookmarkFile {
     pub path: PathBuf,
 }
 
-/// 枚举所有已安装浏览器的所有 profile 的 Bookmarks 文件。
+/// 每个 profile 目录下的书签文件名:本地书签 + 账号书签。同一 URL
+/// 若两边都有,按 §30"宁可重复"原则各出一行(item_key 相同,usage
+/// 自然合并)。
+const BOOKMARK_FILE_NAMES: [&str; 2] = ["Bookmarks", "AccountBookmarks"];
+
+/// 枚举所有已安装浏览器的所有 profile 的书签文件。
 /// 纯 readdir/stat,亚毫秒级;每次查询都可安全重跑(§117 刷新策略)。
 pub fn discover_files() -> Vec<BookmarkFile> {
     let mut out = Vec::new();
     for browser in BROWSERS {
-        let Some(user_data) = browser.user_data() else {
-            continue;
-        };
-        let Ok(entries) = std::fs::read_dir(&user_data) else {
-            continue; // 浏览器未安装
-        };
-        for entry in entries.flatten() {
-            let dir = entry.path();
-            if !dir.is_dir() {
-                continue;
-            }
-            let bookmarks = dir.join("Bookmarks");
-            if !bookmarks.is_file() {
-                continue; // "System Profile" 等目录无此文件
-            }
-            let name = entry.file_name().to_string_lossy().into_owned();
-            let profile = if name == "Default" {
-                String::new()
-            } else {
-                name
-            };
-            out.push(BookmarkFile {
-                browser,
-                profile,
-                path: bookmarks,
-            });
+        if let Some(user_data) = browser.user_data() {
+            scan_user_data(browser, &user_data, &mut out);
         }
     }
-    out.sort_by(|a, b| a.browser.cmp(&b.browser).then(a.profile.cmp(&b.profile)));
+    out.sort_by(|a, b| {
+        a.browser
+            .cmp(&b.browser)
+            .then(a.profile.cmp(&b.profile))
+            .then(a.path.cmp(&b.path))
+    });
     out
+}
+
+/// 扫描一个 User Data 目录:每个 profile 的每个书签文件产出一条
+/// ("System Profile" 等目录没有这些文件,自然跳过)。测试可直接喂
+/// 临时目录。
+fn scan_user_data(browser: Browser, user_data: &std::path::Path, out: &mut Vec<BookmarkFile>) {
+    let Ok(entries) = std::fs::read_dir(user_data) else {
+        return; // 浏览器未安装
+    };
+    for entry in entries.flatten() {
+        let dir = entry.path();
+        if !dir.is_dir() {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let profile = if name == "Default" {
+            String::new()
+        } else {
+            name
+        };
+        for file_name in BOOKMARK_FILE_NAMES {
+            let path = dir.join(file_name);
+            if path.is_file() {
+                out.push(BookmarkFile {
+                    browser,
+                    profile: profile.clone(),
+                    path,
+                });
+            }
+        }
+    }
 }
 
 /// 从 URL 取域名(展示/搜索键):去 scheme,截到第一个 `/ : ?`。
@@ -165,6 +185,45 @@ fn walk(node: &serde_json::Value, out: &mut Vec<(String, String)>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 发现:Default 只有账号书签(登录 Google 账号的 Chrome 现状)、
+    /// Profile 1 两者都有、System Profile 啥也没有。
+    #[test]
+    fn discovers_local_and_account_bookmarks_per_profile() {
+        let tmp = std::env::temp_dir().join(format!("cue-bm-disc-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let default = tmp.join("Default");
+        std::fs::create_dir_all(&default).unwrap();
+        std::fs::write(default.join("AccountBookmarks"), "{}").unwrap();
+        let p1 = tmp.join("Profile 1");
+        std::fs::create_dir_all(&p1).unwrap();
+        std::fs::write(p1.join("Bookmarks"), "{}").unwrap();
+        std::fs::write(p1.join("AccountBookmarks"), "{}").unwrap();
+        std::fs::create_dir_all(tmp.join("System Profile")).unwrap();
+
+        let mut out = Vec::new();
+        scan_user_data(Browser::Chrome, &tmp, &mut out);
+        out.sort_by(|a, b| a.profile.cmp(&b.profile).then(a.path.cmp(&b.path)));
+
+        let paths: Vec<(&str, &str)> = out
+            .iter()
+            .map(|f| {
+                (
+                    f.profile.as_str(),
+                    f.path.file_name().unwrap().to_str().unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            paths,
+            [
+                ("", "AccountBookmarks"),
+                ("Profile 1", "AccountBookmarks"),
+                ("Profile 1", "Bookmarks"),
+            ]
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
 
     const FIXTURE: &str = r##"{
         "roots": {

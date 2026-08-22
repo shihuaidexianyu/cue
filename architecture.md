@@ -3862,8 +3862,11 @@ trigger    = b（词边界规则见 §5.2:b<空白> 或裸 b 才命中,不吞 ba
 ## 数据源与刷新
 
 ```text
-数据源 = <User Data>/<profile>/Bookmarks(JSON,无锁,浏览器运行中可读)
-发现   = 枚举 User Data 下所有含 Bookmarks 文件的 profile 目录
+数据源 = <User Data>/<profile>/{Bookmarks, AccountBookmarks}
+         (JSON,无锁,浏览器运行中可读;Bookmarks = 本地书签,
+         AccountBookmarks = 账号书签——登录 Google 账号后 Chrome
+         只写后者、本地 Bookmarks 停更,两者同构、可并存,都收)
+发现   = 枚举 User Data 下所有 profile 目录的这两个文件
 解析   = 递归 roots;凡带 children 数组的对象即容器(folder /
          bookmark_bar / other / synced / workspace / custom_root
          一视同仁),type == "url" 才是书签;坏 JSON / 缺字段跳过(§63)

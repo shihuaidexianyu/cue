@@ -2,7 +2,7 @@
 //!
 //! Chromium 系(Edge/Chrome)书签搜索:触发词 `b`(§5.2 词边界规则:
 //! 字母触发的模块只吃 `b<空格>` 或裸 `b`,不吞 `baidu`)。数据源是
-//! `<User Data>/<profile>/Bookmarks` JSON(无锁,浏览器运行中可读);
+//! `<User Data>/<profile>/{Bookmarks,AccountBookmarks}` JSON(无锁,浏览器运行中可读);
 //! 刷新走 mtime 指纹,无 watcher(§56 精神)。打开从哪来回哪开——
 //! 来源浏览器 exe 带 URL 启动(exe 缺失退回系统默认浏览器)。
 //! Firefox(places.sqlite)不在范围——§117 依赖决策:不为它引入 rusqlite。
