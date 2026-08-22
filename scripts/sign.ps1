@@ -1,4 +1,4 @@
-# CUE 代码签名。
+﻿# CUE 代码签名。
 # 用法:
 #   签名(dev 自签名):  powershell -ExecutionPolicy Bypass -File scripts\sign.ps1 -SelfSignedDev
 #   签名(已有证书):   ... sign.ps1 -Thumbprint <sha1>        (CurrentUser\My 或 LocalMachine\My)

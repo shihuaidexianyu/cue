@@ -1,4 +1,4 @@
-# CUE 安装(每用户,无需管理员):
+﻿# CUE 安装(每用户,无需管理员):
 #   %LOCALAPPDATA%\Programs\CUE\cue.exe  +  开始菜单快捷方式
 # 开机自启默认关闭;装好后在 托盘 → 设置 → 开机自启 里打开(§42 事务写 Run 键)。
 $ErrorActionPreference = "Stop"

@@ -1,4 +1,4 @@
-# CUE 打包:release 构建 → dist  staging → zip。
+﻿# CUE 打包:release 构建 → dist  staging → zip。
 # 用法: powershell -ExecutionPolicy Bypass -File scripts\package.ps1 [-Sign]
 #   -Sign  先用 scripts\sign.ps1 给 exe 签名(自签名 dev 证书见 sign.ps1)
 param(

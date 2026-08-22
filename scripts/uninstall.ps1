@@ -1,4 +1,4 @@
-# CUE 卸载:停进程 → 删 Run 键/快捷方式/安装目录。
+﻿# CUE 卸载:停进程 → 删 Run 键/快捷方式/安装目录。
 # 默认保留数据目录 %LOCALAPPDATA%\CUE(设置、使用统计);-Purge 一并删除。
 param(
     [switch]$Purge
