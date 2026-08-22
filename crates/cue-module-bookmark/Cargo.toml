@@ -1,0 +1,22 @@
+[package]
+name = "cue-module-bookmark"
+version = "0.1.0"
+edition.workspace = true
+
+[dependencies]
+cue-protocol.workspace = true
+pinyin.workspace = true
+serde_json.workspace = true
+
+[dependencies.windows]
+workspace = true
+features = [
+    "Win32_Foundation",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Controls",
+    "Win32_System_Com",
+    "Win32_System_Registry",
+    "Win32_Storage_FileSystem",
+    "Win32_Graphics_Gdi",
+]

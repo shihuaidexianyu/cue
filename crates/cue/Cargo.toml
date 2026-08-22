@@ -13,5 +13,6 @@ cue-core.workspace = true
 cue-ui.workspace = true
 cue-windows.workspace = true
 cue-module-app.workspace = true
+cue-module-bookmark.workspace = true
 futures.workspace = true
 gpui.workspace = true

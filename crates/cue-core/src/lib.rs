@@ -710,8 +710,8 @@ impl Core {
 fn route(registry: &ModuleRegistry, input: &str) -> (ModuleId, String) {
     for (id, descriptor) in registry.launcher_descriptors() {
         if let Some(trigger) = &descriptor.trigger {
-            if let Some(rest) = input.strip_prefix(trigger.as_str()) {
-                return (id.clone(), rest.to_string());
+            if let Some(query) = match_trigger(input, trigger) {
+                return (id.clone(), query);
             }
         }
     }
@@ -720,6 +720,23 @@ fn route(registry: &ModuleRegistry, input: &str) -> (ModuleId, String) {
         .cloned()
         .expect("registry has no default module");
     (default, input.to_string())
+}
+
+/// §5.2 触发词匹配规则:以字母/数字结尾的触发词(`b`、`ext`)要求
+/// 词边界——trigger 之后必须是空白或输入结束,否则 `baidu` 会被 `b`
+/// 吞掉;边界空白不进查询(`b  github` 的查询是 `github`)。以标点
+/// 结尾的触发词(`/`)逐字前缀匹配,查询原样传递。
+fn match_trigger(input: &str, trigger: &str) -> Option<String> {
+    let rest = input.strip_prefix(trigger)?;
+    let wordy = trigger.chars().last().is_some_and(char::is_alphanumeric);
+    if wordy {
+        match rest.chars().next() {
+            None => return Some(String::new()),
+            Some(c) if c.is_whitespace() => return Some(rest.trim_start().to_string()),
+            Some(_) => return None,
+        }
+    }
+    Some(rest.to_string())
 }
 
 /// §42 校验:kind 与值类型必须匹配。
@@ -767,5 +784,35 @@ struct StderrLogger {
 impl ModuleLog for StderrLogger {
     fn log(&self, level: LogLevel, message: &str) {
         eprintln!("[{level:?}] [{}] {message}", self.module);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::match_trigger;
+
+    #[test]
+    fn wordy_trigger_requires_boundary() {
+        // 词边界命中:EOI 与空白
+        assert_eq!(match_trigger("b", "b"), Some(String::new()));
+        assert_eq!(match_trigger("b github", "b"), Some("github".to_string()));
+        // 边界空白 trim,不进查询
+        assert_eq!(match_trigger("b   github", "b"), Some("github".to_string()));
+        // 无边界不命中:baidu 不能被 b 吞掉
+        assert_eq!(match_trigger("baidu", "b"), None);
+        assert_eq!(match_trigger("ext:pdf", "ext"), None);
+        // 多字符词触发词同规则
+        assert_eq!(match_trigger("ext pdf", "ext"), Some("pdf".to_string()));
+    }
+
+    #[test]
+    fn punctuation_trigger_matches_verbatim() {
+        assert_eq!(match_trigger("/", "/"), Some(String::new()));
+        assert_eq!(
+            match_trigger("/etc/hosts", "/"),
+            Some("etc/hosts".to_string())
+        );
+        // 标点触发词不要求边界,也不 trim
+        assert_eq!(match_trigger("/  x", "/"), Some("  x".to_string()));
     }
 }

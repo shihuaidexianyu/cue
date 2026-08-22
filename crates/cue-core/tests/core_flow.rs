@@ -60,9 +60,13 @@ enum QueryPlan {
 
 struct FakeModule {
     descriptor: ModuleDescriptor,
+    trigger: Option<String>,
+    is_default: bool,
     plans: Mutex<VecDeque<QueryPlan>>,
     pending_activations: Mutex<VecDeque<oneshot::Receiver<ModuleOutcome>>>,
     sink: Arc<Mutex<Option<ModuleEventSink>>>,
+    /// 收到的查询原文(路由断言用)。
+    queries: Arc<Mutex<Vec<String>>>,
 }
 
 impl FakeModule {
@@ -73,10 +77,25 @@ impl FakeModule {
                 name: "Fake",
                 version: "0.1.0",
             },
+            trigger: None,
+            is_default: true,
             plans: Mutex::new(VecDeque::new()),
             pending_activations: Mutex::new(VecDeque::new()),
             sink: Arc::new(Mutex::new(None)),
+            queries: Arc::new(Mutex::new(Vec::new())),
         }
+    }
+
+    fn with_trigger(id: &'static str, trigger: &str) -> Self {
+        Self {
+            trigger: Some(trigger.to_string()),
+            is_default: false,
+            ..Self::new(id)
+        }
+    }
+
+    fn queries_handle(&self) -> Arc<Mutex<Vec<String>>> {
+        Arc::clone(&self.queries)
     }
 
     fn push_ready(&self, titles: &[&str]) {
@@ -148,12 +167,13 @@ impl Module for FakeModule {
 impl LauncherModule for FakeModule {
     fn launcher_descriptor(&self) -> LauncherDescriptor {
         LauncherDescriptor {
-            trigger: None,
-            is_default: true,
+            trigger: self.trigger.clone(),
+            is_default: self.is_default,
         }
     }
 
-    fn query(&mut self, _ctx: QueryContext) -> QueryFuture {
+    fn query(&mut self, ctx: QueryContext) -> QueryFuture {
+        self.queries.lock().unwrap().push(ctx.query.clone());
         match self.plans.lock().unwrap().pop_front() {
             Some(QueryPlan::Ready(items)) => Box::pin(async move { Ok(QueryResponse { items }) }),
             Some(QueryPlan::Pending(rx)) => Box::pin(async move {
@@ -215,9 +235,15 @@ fn test_config() -> CoreConfig {
 }
 
 fn setup(module: FakeModule) -> (Core, Arc<ManualSpawner>) {
+    setup_many(vec![module])
+}
+
+fn setup_many(modules: Vec<FakeModule>) -> (Core, Arc<ManualSpawner>) {
     let spawner = ManualSpawner::new();
     let mut registry = ModuleRegistry::new();
-    registry.register(Box::new(module)).unwrap();
+    for m in modules {
+        registry.register(Box::new(m)).unwrap();
+    }
     let core = Core::new(test_config(), registry, spawner.clone()).unwrap();
     (core, spawner)
 }
@@ -234,6 +260,33 @@ fn results(core: &Core) -> usize {
 
 fn selected(core: &Core) -> Option<usize> {
     core.session().and_then(|s| s.selected)
+}
+
+// ---------------------------------------------------------------------
+// §5.2 路由:字母触发词的词边界规则
+// ---------------------------------------------------------------------
+
+#[test]
+fn alphanumeric_trigger_requires_word_boundary() {
+    let default_mod = FakeModule::new("default");
+    let default_queries = default_mod.queries_handle();
+    let bm = FakeModule::with_trigger("bm", "b");
+    let bm_queries = bm.queries_handle();
+    let (mut core, _spawner) = setup_many(vec![default_mod, bm]);
+    let mut rx = core.take_event_receiver();
+
+    core.open_session();
+    core.input_changed("baidu".into()); // 无词边界:必须留给 default
+    core.input_changed("b gh".into()); // 边界命中:路由给 bm,查询去掉空白
+    core.input_changed("b".into()); // EOI 也是边界:空查询
+    drain(&mut core, &mut rx);
+
+    assert_eq!(
+        default_queries.lock().unwrap().as_slice(),
+        ["", "baidu"],
+        "baidu 不能被触发词 b 吞掉"
+    );
+    assert_eq!(bm_queries.lock().unwrap().as_slice(), ["gh", ""]);
 }
 
 // ---------------------------------------------------------------------

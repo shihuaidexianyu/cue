@@ -1252,6 +1252,7 @@ version = "0.1.0"
 dependencies = [
  "cue-core",
  "cue-module-app",
+ "cue-module-bookmark",
  "cue-protocol",
  "cue-ui",
  "cue-windows",
@@ -1277,6 +1278,16 @@ dependencies = [
  "pinyin",
  "windows 0.62.2",
  "windows-future 0.3.2",
+]
+
+[[package]]
+name = "cue-module-bookmark"
+version = "0.1.0"
+dependencies = [
+ "cue-protocol",
+ "pinyin",
+ "serde_json",
+ "windows 0.62.2",
 ]
 
 [[package]]
