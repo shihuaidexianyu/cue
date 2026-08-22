@@ -180,7 +180,15 @@ fn hicon_to_rgba(hicon: HICON, size: u32) -> Option<IconImage> {
             ..Default::default()
         };
         let mut bits: *mut core::ffi::c_void = std::ptr::null_mut();
-        let dib = CreateDIBSection(Some(hdc), &bmi, DIB_RGB_COLORS, &mut bits, None, 0).ok()?;
+        // 失败路径必须先 DeleteDC——CreateCompatibleDC 已成功,
+        // 直接 `?` 返回会泄漏这个 GDI DC。
+        let dib = match CreateDIBSection(Some(hdc), &bmi, DIB_RGB_COLORS, &mut bits, None, 0) {
+            Ok(dib) => dib,
+            Err(_) => {
+                let _ = DeleteDC(hdc);
+                return None;
+            }
+        };
         if bits.is_null() {
             let _ = DeleteObject(dib.into());
             let _ = DeleteDC(hdc);

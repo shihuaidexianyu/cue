@@ -44,6 +44,11 @@ impl HotkeyManager {
 
     /// 注册新热键并替换旧热键。失败时旧注册不动。
     pub fn apply(&mut self, hotkey: Hotkey) -> Result<(), HotkeyError> {
+        // 与当前注册一致 = 用户确认现值,直接成功——系统会把同一
+        // 组合的重复注册(即使是我们自己持有的)判为占用失败。
+        if self.active.map(|(h, _)| h) == Some(hotkey) {
+            return Ok(());
+        }
         let (modifiers, vk) = to_win32(&hotkey)?;
         let id = self.next_id;
         unsafe {
@@ -111,13 +116,63 @@ fn to_win32(hotkey: &Hotkey) -> Result<(HOT_KEY_MODIFIERS, u32), HotkeyError> {
         Key::F12 => VK_F12.0 as u32,
         Key::Char(c) => {
             let c = c.to_ascii_uppercase();
-            if c.is_ascii_alphanumeric() || c.is_ascii_punctuation() {
+            if c.is_ascii_alphanumeric() {
                 // ASCII 字母(大写)与数字的 VK 码等于其码点。
                 c as u32
             } else {
-                return Err(HotkeyError(format!("unsupported hotkey char: {c:?}")));
+                // 标点符号必须映射到 VK_OEM_*;直接用码点会错位
+                // (如 ','=44 撞上 VK_SNAPSHOT)。映射名按 US 布局
+                // 命名,其他键盘布局上物理键位可能不同——接受的妥协。
+                let vk = match c {
+                    ';' => VK_OEM_1,
+                    '/' => VK_OEM_2,
+                    '`' => VK_OEM_3,
+                    '[' => VK_OEM_4,
+                    '\\' => VK_OEM_5,
+                    ']' => VK_OEM_6,
+                    '\'' => VK_OEM_7,
+                    '-' => VK_OEM_MINUS,
+                    '=' => VK_OEM_PLUS,
+                    ',' => VK_OEM_COMMA,
+                    '.' => VK_OEM_PERIOD,
+                    _ => return Err(HotkeyError(format!("unsupported hotkey char: {c:?}"))),
+                };
+                vk.0 as u32
             }
         }
     };
     Ok((modifiers, vk))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn vk_of(c: char) -> Result<u32, HotkeyError> {
+        to_win32(&Hotkey {
+            modifiers: cue_protocol::Modifiers::ALT,
+            key: Key::Char(c),
+        })
+        .map(|(_, vk)| vk)
+    }
+
+    #[test]
+    fn punctuation_maps_to_oem_vk() {
+        assert_eq!(vk_of(',').unwrap(), VK_OEM_COMMA.0 as u32);
+        assert_eq!(vk_of('.').unwrap(), VK_OEM_PERIOD.0 as u32);
+        assert_eq!(vk_of(';').unwrap(), VK_OEM_1.0 as u32);
+        assert_eq!(vk_of('/').unwrap(), VK_OEM_2.0 as u32);
+        assert_eq!(vk_of('-').unwrap(), VK_OEM_MINUS.0 as u32);
+        // 码点直接当 VK 会撞上 VK_SNAPSHOT 等键位,回归断言。
+        assert_ne!(vk_of(',').unwrap(), ',' as u32);
+    }
+
+    #[test]
+    fn letters_digits_still_identity() {
+        assert_eq!(vk_of('k').unwrap(), 'K' as u32);
+        assert_eq!(vk_of('7').unwrap(), '7' as u32);
+        // Shift 组合字符无法映射到单键 VK,拒绝。
+        assert!(vk_of('!').is_err());
+        assert!(vk_of('@').is_err());
+    }
 }

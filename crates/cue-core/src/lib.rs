@@ -418,7 +418,8 @@ impl Core {
                 }
             })
             .collect();
-        self.push_text(cleaned.trim());
+        // 不 trim:前导/尾随空格可能是用户有意粘贴的(接在已有输入后)。
+        self.push_text(&cleaned);
     }
 
     pub fn select_next(&mut self) {

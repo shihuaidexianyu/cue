@@ -19,6 +19,11 @@ use std::sync::Arc;
 /// `Arc<[u8]>`,指针即缓存 key,同一张图只转换/上传一次。
 type TextureCache = HashMap<usize, Arc<RenderImage>>;
 
+/// 视口内可见结果行数:窗口 420px - 内边距 12 - 输入行 36 - 分隔线 1,
+/// ÷ 行高 44px。结果可多于可见行数(result_limit=20),超出的行由
+/// 选择驱动的滚动窗口覆盖(键盘 launcher 不需要真滚动条)。
+const VISIBLE_ROWS: usize = 8;
+
 /// §14 契约:协议侧是 RGBA8 直线 alpha;GPUI atlas 存 BGRA(见 gpui
 /// 解码路径的逐像素 swap),上传时转换。契约违约(len != w*h*4)时
 /// 放弃本张图标而非 panic(§63)。
@@ -74,6 +79,9 @@ pub struct LauncherView {
     /// 打印 input→rows 时延(InputChanged → ResultState 提交的视图侧
     /// 上界,含事件泵与 present)。
     perf_input_at: Option<std::time::Instant>,
+    /// 结果滚动窗口起点:渲染只取 [scroll_offset, +VISIBLE_ROWS) 切片,
+    /// 选中项变化时在 refresh_snapshot 里滚入视口。
+    scroll_offset: usize,
 }
 
 impl LauncherView {
@@ -109,6 +117,7 @@ impl LauncherView {
             icon_textures: HashMap::new(),
             capturing_hotkey: false,
             perf_input_at: None,
+            scroll_offset: 0,
         }
     }
 
@@ -147,6 +156,7 @@ impl LauncherView {
             self.rows.clear();
             self.selected = None;
             self.error = None;
+            self.scroll_offset = 0;
             return;
         };
         self.input = session.raw_input.clone();
@@ -157,6 +167,17 @@ impl LauncherView {
             .iter()
             .filter_map(|item| self.core.present(item))
             .collect();
+        // 选中项滚入视口(新非空结果选中第 0 行,自然归零)。
+        match self.selected {
+            Some(sel) if sel < self.scroll_offset => self.scroll_offset = sel,
+            Some(sel) if sel >= self.scroll_offset + VISIBLE_ROWS => {
+                self.scroll_offset = sel + 1 - VISIBLE_ROWS;
+            }
+            _ => {}
+        }
+        self.scroll_offset = self
+            .scroll_offset
+            .min(self.rows.len().saturating_sub(VISIBLE_ROWS));
     }
 
     // ------------------------------------------------------------------
@@ -478,7 +499,13 @@ impl Render for LauncherView {
         }
 
         let mut list = div().flex().flex_col();
-        for (i, row) in self.rows.iter().enumerate() {
+        for (i, row) in self
+            .rows
+            .iter()
+            .enumerate()
+            .skip(self.scroll_offset)
+            .take(VISIBLE_ROWS)
+        {
             list = list.child(Self::render_row(
                 row,
                 self.selected == Some(i),
@@ -490,23 +517,34 @@ impl Render for LauncherView {
         let body: Div = if let Some(model) = self.core.settings_model() {
             // §41:设置模式整体替换搜索区(输入行也不再显示,见下方 chrome)。
             self.render_settings(&model)
-        } else if let Some(error) = &self.error {
-            div()
-                .py(px(12.0))
-                .flex()
-                .justify_center()
-                .text_color(rgb(0xe06c75))
-                .child(format!("Error: {error}"))
-        } else if self.rows.is_empty() {
-            // §58:没有结果时的空态。
-            div()
-                .py(px(12.0))
-                .flex()
-                .justify_center()
-                .text_color(rgb(0x6a6a75))
-                .child("No results")
         } else {
-            list
+            let mut col = div().flex().flex_col();
+            if let Some(error) = &self.error {
+                // §115:激活失败 session 保持打开——错误做成横幅叠加在
+                // 结果列表上方,用户仍可 ↑↓ 选择其他项重试。
+                col = col.child(
+                    div()
+                        .px(px(6.0))
+                        .py(px(4.0))
+                        .text_xs()
+                        .text_color(rgb(0xe06c75))
+                        .child(format!("Error: {error}")),
+                );
+            }
+            if self.rows.is_empty() {
+                // §58:没有结果时的空态。
+                col = col.child(
+                    div()
+                        .py(px(12.0))
+                        .flex()
+                        .justify_center()
+                        .text_color(rgb(0x6a6a75))
+                        .child("No results"),
+                );
+            } else {
+                col = col.child(list);
+            }
+            col
         };
 
         let mut chrome = div()

@@ -18,7 +18,9 @@ pub fn fuzzy_score(query: &str, key: &str) -> Option<i32> {
     let mut qi = 0;
     let mut prev_matched = false;
     for (i, &c) in k.iter().enumerate() {
-        if qi < q.len() && c == q[qi] {
+        // 键允许携带原始大小写(驼峰边界需要它),比较时归一到
+        // ASCII 小写;调用方保证 query 已小写。
+        if qi < q.len() && c.to_ascii_lowercase() == q[qi] {
             score += 10;
             if prev_matched {
                 score += 6; // 连续命中
@@ -81,5 +83,18 @@ mod tests {
         let short = fuzzy_score("no", "no").unwrap();
         let long = fuzzy_score("no", "notepad plus plus").unwrap();
         assert!(short > long);
+    }
+
+    #[test]
+    fn camel_boundary_bonus() {
+        // 原始大小写键:命中落在驼峰大写字母上触发词首加分(+4)。
+        let camel = fuzzy_score("vc", "VisualStudioCode").unwrap();
+        let flat = fuzzy_score("vc", "visualstudiocode").unwrap();
+        assert_eq!(camel - flat, 4);
+    }
+
+    #[test]
+    fn mixed_case_key_matches_lowercase_query() {
+        assert!(fuzzy_score("vscode", "VisualStudioCode").is_some());
     }
 }

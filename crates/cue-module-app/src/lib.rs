@@ -85,7 +85,9 @@ fn search(
     let mut scored: Vec<(i32, &AppEntry)> = entries
         .iter()
         .filter_map(|e| {
-            let keys: [&str; 3] = [&e.name_lower, &e.pinyin_full, &e.pinyin_initials];
+            // name 传原始大小写:驼峰边界(VSCode 的 S/C)是词首加分
+            // 信号;字符比较在 matcher 内做 ascii 小写归一。
+            let keys: [&str; 3] = [&e.name, &e.pinyin_full, &e.pinyin_initials];
             matcher::best_score(&q, &keys).map(|s| (s + usage_bonus(usage, e), e))
         })
         .collect();
