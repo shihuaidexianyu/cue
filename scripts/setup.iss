@@ -43,7 +43,7 @@ Name: "autostart"; Description: "开机自动启动"; Flags: unchecked
 Source: "..\target\release\cue.exe"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
-; 直接落在 开始菜单\Programs\CUE.lnk(与旧 install.ps1 同位置,AppModule 照样搜到)。
+; 直接落在 开始菜单\Programs\CUE.lnk(AppModule 扫开始菜单,装完即可被 CUE 自己搜到)。
 Name: "{autoprograms}\CUE"; Filename: "{app}\cue.exe"; Comment: "CUE —— 轻量启动器 (Alt+Space)"
 
 [Registry]
@@ -54,5 +54,5 @@ Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueName: 
 [Run]
 Filename: "{app}\cue.exe"; Description: "运行 CUE"; Flags: nowait postinstall skipifsilent
 
-; 注:数据目录 %LOCALAPPDATA%\CUE(设置/使用统计)卸载时默认保留,
-; 与旧 uninstall.ps1 的策略一致(Inno 卸载器本来就不会碰它)。
+; 注:数据目录 %LOCALAPPDATA%\CUE(设置/使用统计)卸载时保留——
+; Inno 卸载器只清程序与快捷方式,不碰用户数据。

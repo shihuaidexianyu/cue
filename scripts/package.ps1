@@ -1,6 +1,6 @@
-﻿# CUE 打包:release 构建 → dist  staging → zip。
+﻿# CUE 打包:release 构建 → Inno Setup 编译 dist\CUE-Setup-<ver>.exe。
 # 用法: powershell -ExecutionPolicy Bypass -File scripts\package.ps1 [-Sign]
-#   -Sign  先用 scripts\sign.ps1 给 exe 签名(自签名 dev 证书见 sign.ps1)
+#   -Sign  用 scripts\sign.ps1 给 cue.exe 与 setup.exe 签名(自签名 dev 证书见 sign.ps1)
 param(
     [switch]$Sign
 )
@@ -23,29 +23,20 @@ if ($Sign) {
     if ($LASTEXITCODE -ne 0) { throw "sign failed" }
 }
 
-$stage = "$root\dist\CUE"
-Remove-Item $stage -Recurse -Force -ErrorAction SilentlyContinue
-New-Item -ItemType Directory -Force $stage | Out-Null
-Copy-Item "$root\target\release\cue.exe" "$stage\cue.exe"
-foreach ($f in @("install.ps1", "uninstall.ps1", "install.cmd", "uninstall.cmd", "README.txt")) {
-    Copy-Item "$PSScriptRoot\$f" "$stage\$f"
-}
-
-$zip = "$root\dist\CUE-$ver-win-x64.zip"
-Remove-Item $zip -Force -ErrorAction SilentlyContinue
-Compress-Archive -Path "$stage\*" -DestinationPath $zip -Force
-Write-Host ""
-Write-Host "packed: $zip"
-Write-Host "  cue.exe: $([Math]::Round((Get-Item "$stage\cue.exe").Length / 1MB, 1)) MB"
-
-# Inno Setup 向导安装包:检测到 ISCC 就出,没有就跳过(zip 不受影响)。
+# 唯一分发形态:Inno Setup 向导安装包(没有 zip/绿色包)。
 $iscc = @("$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe",
           "C:\Program Files (x86)\Inno Setup 6\ISCC.exe") |
     Where-Object { Test-Path $_ } | Select-Object -First 1
-if ($iscc) {
-    & $iscc "/DAppVersion=$ver" "$PSScriptRoot\setup.iss"
-    if ($LASTEXITCODE -ne 0) { throw "ISCC compile failed" }
-    Write-Host "  setup: $root\dist\CUE-Setup-$ver.exe"
-} else {
-    Write-Host "  Inno Setup (ISCC.exe) 未安装,跳过 setup.exe(仅出 zip)"
+if (-not $iscc) { throw "Inno Setup 6 (ISCC.exe) 未安装——setup.exe 是唯一产物,先装 Inno" }
+& $iscc "/DAppVersion=$ver" "$PSScriptRoot\setup.iss"
+if ($LASTEXITCODE -ne 0) { throw "ISCC compile failed" }
+$setup = "$root\dist\CUE-Setup-$ver.exe"
+
+if ($Sign) {
+    & "$PSScriptRoot\sign.ps1" -ExePath $setup -SelfSignedDev
+    if ($LASTEXITCODE -ne 0) { throw "sign setup failed" }
 }
+
+Write-Host ""
+Write-Host "packed: $setup"
+Write-Host "  size: $([Math]::Round((Get-Item $setup).Length / 1MB, 1)) MB"
