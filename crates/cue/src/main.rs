@@ -1,3 +1,7 @@
+// release 用 GUI 子系统:双击/开始菜单/自启不再给进程挂控制台窗口。
+// debug 保留控制台(cargo run 可见 [boot]/[perf] 探针);release 下
+// 探针仍可由父进程重定向 stderr 捕获(§114 E2E 正是这么测的)。
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 //! cue —— Launcher 可执行文件,唯一的 composition root(§70、§112)。
 //!
 //! 编排:HostEvent → Core → CoreEffect → cue-ui / cue-windows。
