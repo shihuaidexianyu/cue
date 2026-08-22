@@ -21,6 +21,7 @@ Cargo workspace at repo root, crates under `crates/`, all named `cue-*`:
 - Run a single test: `cargo test -p cue-module-app <test_name>` (add `-- --nocapture` for output)
 - Lint / format: `cargo clippy --all-targets` / `cargo fmt`
 - Note: a running `cue.exe` locks the binary — `Stop-Process -Name cue` before rebuilding.
+- Package for distribution: `scripts/package.ps1` (release build → `dist/CUE-<ver>-win-x64.zip` with per-user `install.ps1`/`uninstall.ps1`; `-Sign` runs `scripts/sign.ps1` first — self-signed dev cert only proves integrity, public distribution needs an OV cert). `core.start_on_boot` (§36) is the in-app autostart toggle — host callback writes the HKCU Run key, same §53/§112 sync-exception pattern as `apply_hotkey`.
 
 ## Architecture
 
