@@ -4,7 +4,7 @@
 //! (raw window handle),把 GPUI 版本漂移关在门外。
 
 use windows::core::{Error, BOOL};
-use windows::Win32::Foundation::{HWND, LPARAM};
+use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
 use windows::Win32::Graphics::Gdi::{InvalidateRect, UpdateWindow};
 use windows::Win32::UI::WindowsAndMessaging::*;
 
@@ -109,6 +109,24 @@ pub fn focus(hwnd: HWND) -> Result<(), Error> {
             Ok(())
         } else {
             Err(Error::from_thread())
+        }
+    }
+}
+
+/// 给 Launcher 窗口挂品牌图标(alt-tab / 任务栏 / 窗口标题区)。
+/// 资源缺失(测试宿主等)时静默跳过,沿用系统默认。
+pub fn set_brand_icon(hwnd: HWND) {
+    let (small, big) = unsafe { (GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CXICON)) };
+    for (id, size) in [(ICON_SMALL, small), (ICON_BIG, big)] {
+        if let Some(h) = crate::icon::brand_icon(size, size) {
+            unsafe {
+                SendMessageW(
+                    hwnd,
+                    WM_SETICON,
+                    Some(WPARAM(id as usize)),
+                    Some(LPARAM(h.0 as isize)),
+                );
+            }
         }
     }
 }

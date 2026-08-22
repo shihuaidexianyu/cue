@@ -16,3 +16,6 @@ cue-module-app.workspace = true
 cue-module-bookmark.workspace = true
 futures.workspace = true
 gpui.workspace = true
+
+[build-dependencies]
+embed-resource = "3"

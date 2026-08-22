@@ -22,6 +22,7 @@ Cargo workspace at repo root, crates under `crates/`, all named `cue-*`:
 - Lint / format: `cargo clippy --all-targets` / `cargo fmt`
 - Note: a running `cue.exe` locks the binary — `Stop-Process -Name cue` before rebuilding.
 - Package for distribution: `scripts/package.ps1` (release build → `dist/CUE-<ver>-win-x64.zip` with per-user `install.ps1`/`uninstall.ps1`; `-Sign` runs `scripts/sign.ps1` first — self-signed dev cert only proves integrity, public distribution needs an OV cert). `core.start_on_boot` (§36) is the in-app autostart toggle — host callback writes the HKCU Run key, same §53/§112 sync-exception pattern as `apply_hotkey`.
+- Brand icon: `assets/cue.svg` → `assets/cue.ico` via `scripts/icon.ps1` (Edge headless rasterization, no third-party tools; re-run when the SVG changes). Embedded into cue.exe by `crates/cue/build.rs` (embed-resource, resource id 1); tray + launcher window load it through `cue-windows::icon`, installer shortcut inherits the exe icon.
 
 ## Architecture
 

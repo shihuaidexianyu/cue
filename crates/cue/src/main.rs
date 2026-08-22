@@ -188,6 +188,7 @@ fn main() {
         // HWND 发现(按进程枚举,避开 GPUI 内部 API 漂移)。
         let hwnd = win::window::find_main_window_hwnd().expect("launcher hwnd");
         win::host::set_launcher_hwnd(hwnd);
+        win::window::set_brand_icon(hwnd); // alt-tab / 任务栏图标(资源 id 1)
         let focus_hook = win::host::install_focus_hook().expect("focus hook");
 
         // §112:CoreEffect → Win32 执行。FocusInput 的视图侧焦点

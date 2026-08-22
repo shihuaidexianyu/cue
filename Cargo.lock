@@ -1256,6 +1256,7 @@ dependencies = [
  "cue-protocol",
  "cue-ui",
  "cue-windows",
+ "embed-resource",
  "futures",
  "gpui",
 ]

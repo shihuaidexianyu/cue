@@ -1,0 +1,3 @@
+// 品牌图标资源。id 1 与 cue-windows::icon::BRAND_ICON_ID 一致;
+// 路径相对本 crate 目录(build.rs 以包根为 cwd 调 rc.exe)。
+1 ICON "..\\..\\assets\\cue.ico"

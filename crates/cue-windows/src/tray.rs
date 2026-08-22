@@ -1,7 +1,8 @@
 //! §116 托盘图标:进程存活的唯一常驻可见信号,V1 唯一的退出路径。
 //!
-//! 图标在运行时生成(32×32 纯色圆角方块,无需资源文件管线);
-//! 左键唤起,右键菜单"显示 / 退出"(§116 不为托盘做更多)。
+//! 图标优先用 exe 内嵌的品牌资源(crate::icon,assets/cue.ico);
+//! 资源缺失时退回运行时生成的 32×32 圆角方块。左键唤起,右键菜单
+//! "显示 / 设置 / 退出"(§116 不为托盘做更多)。
 
 use crate::host::{HostMsg, WM_CUE_TRAY, WM_CUE_TRAY_CMD};
 use std::sync::atomic::{AtomicIsize, Ordering};
@@ -22,7 +23,13 @@ const TRAY_CMD_QUIT: usize = 3;
 static TRAY_HOST: AtomicIsize = AtomicIsize::new(0);
 
 pub fn add(host: HWND) -> Result<(), Error> {
-    let icon = build_icon()?;
+    // 托盘槽位要小图标(SM_CXSMICON,通常 16);多尺寸 ICO 资源
+    // 由系统挑最近条目。资源缺失退回生成的占位图标。
+    let small = unsafe { GetSystemMetrics(SM_CXSMICON) };
+    let icon = match crate::icon::brand_icon(small, small) {
+        Some(h) => h,
+        None => build_icon()?,
+    };
     let mut tip = [0u16; 128];
     for (i, c) in "CUE".encode_utf16().enumerate() {
         tip[i] = c;
