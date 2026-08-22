@@ -14,16 +14,21 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-/// §53 / §112 唯一同步例外:core.hotkey 的 try-apply 由 Core 直接调用
+/// §53 / §112 同步例外:core.hotkey 的 try-apply 由 Core 直接调用
 /// Host 注入的这个函数(先注册新的,成功再注销旧的)。是函数,不是
 /// HostPlatform trait(§110)。Core 是 UI 线程单线程状态机(§91),
 /// 回调只在 UI 线程被调用,不要求 Send。
 pub type ApplyHotkey = Box<dyn FnMut(&Hotkey) -> Result<(), String>>;
 
+/// core.start_on_boot 的 try-apply 回调(写登录启动项),与 ApplyHotkey
+/// 同一模式:Host 注入、UI 线程调用、失败不 commit。
+pub type ApplyStartOnBoot = Box<dyn FnMut(bool) -> Result<(), String>>;
+
 const HEADER: &str = "cue-settings-v1";
 
 pub const KEY_HOTKEY: &str = "core.hotkey";
 pub const KEY_HIDE_ON_FOCUS_LOSS: &str = "core.hide_on_focus_loss";
+pub const KEY_START_ON_BOOT: &str = "core.start_on_boot";
 
 /// §41 给 UI 的渲染模型:Core 出模型,cue-ui 只渲染——
 /// Module 永远不画 GPUI(禁止 `render_settings_gpui`)。
@@ -60,19 +65,25 @@ pub struct SettingsHost {
     values: HashMap<String, SettingValue>,
     file: Option<PathBuf>,
     apply_hotkey: Option<ApplyHotkey>,
+    apply_start_on_boot: Option<ApplyStartOnBoot>,
     restart_required: bool,
 }
 
 impl SettingsHost {
-    pub fn new(file: Option<PathBuf>, apply_hotkey: Option<ApplyHotkey>) -> Self {
+    pub fn new(
+        file: Option<PathBuf>,
+        apply_hotkey: Option<ApplyHotkey>,
+        apply_start_on_boot: Option<ApplyStartOnBoot>,
+    ) -> Self {
         let mut host = Self {
             specs: Vec::new(),
             values: HashMap::new(),
             file,
             apply_hotkey,
+            apply_start_on_boot,
             restart_required: false,
         };
-        // §36 core.*:V1 只有两项,都是 Immediate。
+        // §36 core.*:V1 三项,都是 Immediate。
         host.register_specs(core_specs());
         host
     }
@@ -124,6 +135,13 @@ impl SettingsHost {
         }
     }
 
+    pub fn start_on_boot(&self) -> bool {
+        match self.values.get(KEY_START_ON_BOOT) {
+            Some(SettingValue::Bool(b)) => *b,
+            _ => false,
+        }
+    }
+
     /// 模块设置快照(§49 ModuleContext.settings):短 key(去掉
     /// `module.<id>.` 前缀)——模块知道自己的 id,不需要全限定名。
     pub fn values_for_module(&self, module_id: &ModuleId) -> ModuleSettings {
@@ -144,6 +162,14 @@ impl SettingsHost {
         match self.apply_hotkey.as_mut() {
             Some(f) => f(hotkey),
             // 无回调(测试环境):try-apply 视为通过。
+            None => Ok(()),
+        }
+    }
+
+    /// core.start_on_boot try-apply:写登录启动项,失败不 commit。
+    pub fn try_apply_start_on_boot(&mut self, on: bool) -> Result<(), String> {
+        match self.apply_start_on_boot.as_mut() {
+            Some(f) => f(on),
             None => Ok(()),
         }
     }
@@ -249,6 +275,14 @@ fn core_specs() -> Vec<SettingSpec> {
             default: SettingValue::Bool(true),
             apply_policy: ApplyPolicy::Immediate,
         },
+        SettingSpec {
+            key: SettingKey(Arc::from(KEY_START_ON_BOOT)),
+            label: "开机自启".into(),
+            description: Some("登录 Windows 时自动启动 CUE(写入当前用户的 Run 注册表项)".into()),
+            kind: SettingKind::Bool,
+            default: SettingValue::Bool(false),
+            apply_policy: ApplyPolicy::Immediate,
+        },
     ]
 }
 
@@ -316,7 +350,7 @@ mod tests {
         )
         .unwrap();
 
-        let host = SettingsHost::new(Some(file.clone()), None);
+        let host = SettingsHost::new(Some(file.clone()), None, None);
         assert_eq!(host.hotkey(), Hotkey::from_str("ctrl+alt+k").unwrap());
         assert!(!host.hide_on_focus_loss());
         let _ = std::fs::remove_dir_all(&dir);
@@ -329,7 +363,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(&file, "garbage\ncore.hotkey\tnot-a-hotkey\nbadline\n").unwrap();
 
-        let host = SettingsHost::new(Some(file.clone()), None);
+        let host = SettingsHost::new(Some(file.clone()), None, None);
         assert_eq!(host.hotkey(), Hotkey::default());
         assert!(host.hide_on_focus_loss());
         let _ = std::fs::remove_dir_all(&dir);
@@ -340,11 +374,11 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("cue-settings-test3-{}", std::process::id()));
         let file = dir.join("settings.tsv");
 
-        let mut host = SettingsHost::new(Some(file.clone()), None);
+        let mut host = SettingsHost::new(Some(file.clone()), None, None);
         host.commit(KEY_HIDE_ON_FOCUS_LOSS, SettingValue::Bool(false));
         drop(host);
 
-        let host = SettingsHost::new(Some(file.clone()), None);
+        let host = SettingsHost::new(Some(file.clone()), None, None);
         assert!(!host.hide_on_focus_loss());
         assert_eq!(host.hotkey(), Hotkey::default()); // 未动的保持默认
         let _ = std::fs::remove_dir_all(&dir);

@@ -3684,7 +3684,7 @@ cue-ui 不知道 Module 的存在
 cue-windows 不知道 Core 内部状态
 ```
 
-唯一的同步例外：§53 热键的 try-apply 是设置事务的一部分，必须同步——Core 持有注入的 `apply_hotkey` 回调直接调用，失败不 commit（§42）。这是一个函数，不是 HostPlatform trait（§110）。
+唯一的同步例外：core.* 设置里需要 Host 副作用的 try-apply（§53 热键注册、core.start_on_boot 登录启动项）是设置事务的一部分，必须同步——Core 持有注入的 `apply_hotkey` / `apply_start_on_boot` 回调直接调用，失败不 commit（§42）。这是函数，不是 HostPlatform trait（§110）。
 
 Windows Host 需要的 GPUI HWND（§107 IME、§54 窗口规则）由 launcher 在窗口创建后从 cue-ui 取得并交给 cue-windows。
 
@@ -3749,6 +3749,12 @@ Search latency：P50 = 0.38 ms / P95 = 0.52 ms(N=13,视图侧
   input→rows 上界,含事件泵与 present,比 §114 定义略宽)✅
 Memory：63.1 MB(Private Working Set,idle 60 s)✅ < 100 MB
 ```
+
+**首唤预热落地（2026-08-22）**：启动后 700 ms 空闲点离屏显示 + 强制一帧
+（SWP_NOACTIVATE，不抢前台、不开会话;会话一旦开过则跳过），把 DirectX /
+DirectWrite / 字形缓存的惰性初始化移出唤起路径。复测（直发 WM_HOTKEY 到
+host 窗口、剔除注入管线噪声，该路径当时被本机另一占键应用拖慢到 ~230 ms，
+属环境干扰）：**首次唤起 22 ms、稳态 15 ms**,406 ms 尖峰消除。
 
 ---
 

@@ -19,7 +19,8 @@ pub use event::{ActivationTicket, CoreEvent, HostEvent, QueryTicket};
 pub use registry::{ModuleRegistry, RegistryError};
 pub use session::{SessionId, SessionState};
 pub use settings::{
-    ApplyHotkey, SettingsHost, SettingsModel, SettingsRow, SettingsViewState, KEY_HOTKEY,
+    ApplyHotkey, ApplyStartOnBoot, SettingsHost, SettingsModel, SettingsRow, SettingsViewState,
+    KEY_HOTKEY, KEY_START_ON_BOOT,
 };
 pub use spawner::TaskSpawner;
 pub use usage::UsageStore;
@@ -42,9 +43,12 @@ pub struct CoreConfig {
     pub settings_file: Option<PathBuf>,
     /// §94 Core/UI 请求预算。V1 为固定值,不来自任何 `module.*` 设置。
     pub result_limit: usize,
-    /// §53 core.hotkey 的同步 try-apply 回调(唯一同步例外,§112)。
+    /// §53 core.hotkey 的同步 try-apply 回调(同步例外,§112)。
     /// None(测试)时热键 try-apply 视为通过。
     pub apply_hotkey: Option<ApplyHotkey>,
+    /// core.start_on_boot 的同步 try-apply 回调(写登录启动项,同 §53 模式)。
+    /// None(测试)时 try-apply 视为通过。
+    pub apply_start_on_boot: Option<ApplyStartOnBoot>,
 }
 
 impl Default for CoreConfig {
@@ -55,6 +59,7 @@ impl Default for CoreConfig {
             settings_file: None,
             result_limit: 20,
             apply_hotkey: None,
+            apply_start_on_boot: None,
         }
     }
 }
@@ -88,8 +93,12 @@ impl Core {
         let (event_tx, event_rx) = mpsc::unbounded();
         let usage = UsageStore::new(config.usage_file.clone());
         // Settings Host 必须先于 load_modules:ModuleContext 的设置快照
-        // 依赖它(§48 设置只存在这里)。apply_hotkey 的所有权移交 host。
-        let settings = SettingsHost::new(config.settings_file.clone(), config.apply_hotkey.take());
+        // 依赖它(§48 设置只存在这里)。apply_* 回调的所有权移交 host。
+        let settings = SettingsHost::new(
+            config.settings_file.clone(),
+            config.apply_hotkey.take(),
+            config.apply_start_on_boot.take(),
+        );
         let mut core = Self {
             settings,
             config,
@@ -336,6 +345,11 @@ impl Core {
                         return Err("type mismatch".into());
                     };
                     self.settings.try_apply_hotkey(h)?;
+                } else if key == KEY_START_ON_BOOT {
+                    let SettingValue::Bool(on) = &candidate else {
+                        return Err("type mismatch".into());
+                    };
+                    self.settings.try_apply_start_on_boot(*on)?;
                 } else if key.starts_with("module.") {
                     let mut cs = SettingsChangeSet::default();
                     cs.changes

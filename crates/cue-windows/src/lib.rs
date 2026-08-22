@@ -4,6 +4,7 @@
 //! 本 crate 不依赖 cue-core:Host 事件通过 [`host::HostMsg`] 上报,
 //! 由编排层(cue binary)翻译成 Core 的 HostEvent(§112)。
 
+pub mod autostart;
 pub mod host;
 pub mod hotkey;
 pub mod ime;

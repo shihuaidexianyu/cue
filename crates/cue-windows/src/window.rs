@@ -5,6 +5,7 @@
 
 use windows::core::{Error, BOOL};
 use windows::Win32::Foundation::{HWND, LPARAM};
+use windows::Win32::Graphics::Gdi::{InvalidateRect, UpdateWindow};
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 /// 枚举本进程的顶层窗口,返回 GPUI 主窗口的 HWND。
@@ -74,6 +75,30 @@ pub fn show_and_focus(hwnd: HWND) {
 
 pub fn hide(hwnd: HWND) {
     unsafe {
+        let _ = ShowWindow(hwnd, SW_HIDE);
+    }
+}
+
+/// 渲染预热(§114):boot 后离屏显示并强制同步一帧,把 DirectX /
+/// DirectWrite 管线、字体与字形缓存的惰性初始化从首次唤起路径挪走
+/// (实测首唤 406 ms vs 稳态 ~95 ms)。GPUI 在 WM_PAINT 里完成整帧
+/// 渲染,所以 InvalidateRect + UpdateWindow 即可驱动预热。
+///
+/// 只动窗口、不碰 Core 会话与 IME;SWP_NOACTIVATE 保证不抢前台。
+/// 调用方负责只在会话从未打开过时调用(开了就已经真实渲染过了)。
+pub fn render_warmup_offscreen(hwnd: HWND) {
+    unsafe {
+        let _ = SetWindowPos(
+            hwnd,
+            None,
+            -32000,
+            -32000,
+            0,
+            0,
+            SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW,
+        );
+        let _ = InvalidateRect(Some(hwnd), None, true);
+        let _ = UpdateWindow(hwnd);
         let _ = ShowWindow(hwnd, SW_HIDE);
     }
 }

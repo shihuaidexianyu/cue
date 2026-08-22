@@ -87,11 +87,24 @@ fn main() {
             }
         };
 
+        // core.start_on_boot 的 try-apply:写当前 exe 到 HKCU Run 键。
+        // exe 路径启动时解析一次;解析失败则事务恒失败(不 commit)。
+        let apply_start_on_boot = {
+            let exe = std::env::current_exe().ok();
+            move |on: bool| -> Result<(), String> {
+                match &exe {
+                    Some(path) => win::autostart::set_enabled(on, path),
+                    None => Err("cannot resolve current exe path".to_string()),
+                }
+            }
+        };
+
         let core = Core::new(
             CoreConfig {
                 usage_file: Some(storage_root.join("usage.tsv")),
                 settings_file: Some(storage_root.join("settings.tsv")),
                 apply_hotkey: Some(Box::new(apply_hotkey)),
+                apply_start_on_boot: Some(Box::new(apply_start_on_boot)),
                 storage_root,
                 ..CoreConfig::default()
             },
@@ -170,12 +183,16 @@ fn main() {
 
         // §112:CoreEffect → Win32 执行。FocusInput 的视图侧焦点
         // 由 LauncherView 自己在 render 时消费(见 cue-ui)。
+        // ever_shown 同时是 §114 渲染预热的护栏:会话开过就不必预热。
+        let ever_shown = Rc::new(std::cell::Cell::new(false));
+        let ever_shown_fx = ever_shown.clone();
         window_handle
             .update(cx, |view, _window, _cx| {
                 view.set_effect_handler(Box::new(move |effect| {
                     eprintln!("[effect] {effect:?}");
                     match effect {
                         CoreEffect::ShowLauncher => {
+                            ever_shown_fx.set(true);
                             win::monitor::place_on_active_monitor(
                                 hwnd,
                                 WINDOW_WIDTH,
@@ -198,6 +215,21 @@ fn main() {
                 }));
             })
             .expect("wire effect handler");
+
+        // §114:首次唤起的 406 ms 是 GPU/字体管线的惰性初始化。
+        // 空闲时离屏预热一帧,把它从唤起热路径(§55)上挪走。
+        // 若用户抢先唤起,ever_shown 护栏让预热直接跳过。
+        cx.spawn(async move |cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(700))
+                .await;
+            let _ = cx.update(|_cx| {
+                if !ever_shown.get() {
+                    win::window::render_warmup_offscreen(hwnd);
+                }
+            });
+        })
+        .detach();
 
         // 进程生命周期资源:guard 随进程退出释放,无回收点。
         // hotkey_slot 被 run 闭包环境与 Core 内回调共同持有,无需 forget。

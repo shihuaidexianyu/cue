@@ -626,6 +626,52 @@ fn hotkey_apply_success_commits() {
 }
 
 #[test]
+fn start_on_boot_apply_failure_keeps_old_value() {
+    // try-apply 失败(注册表写入被拒):不 commit,旧值保留(§42)。
+    let mut config = test_config();
+    config.apply_start_on_boot = Some(Box::new(|_| Err("registry denied".to_string())));
+    let (mut core, _spawner) = setup_with_config(FakeModule::new("fake"), config);
+
+    core.open_settings();
+    let err = core
+        .apply_setting("core.start_on_boot", SettingValue::Bool(true))
+        .expect_err("must fail");
+    assert!(err.contains("registry denied"));
+    let model = core.settings_model().unwrap();
+    let row = model
+        .rows
+        .iter()
+        .find(|r| r.key.as_ref() == "core.start_on_boot")
+        .unwrap();
+    assert_eq!(row.value, SettingValue::Bool(false)); // 旧值保留
+    assert!(model.error.is_some());
+}
+
+#[test]
+fn start_on_boot_apply_success_commits() {
+    let applied = Arc::new(Mutex::new(Vec::new()));
+    let mut config = test_config();
+    let seen = Arc::clone(&applied);
+    config.apply_start_on_boot = Some(Box::new(move |on: bool| {
+        seen.lock().unwrap().push(on);
+        Ok(())
+    }));
+    let (mut core, _spawner) = setup_with_config(FakeModule::new("fake"), config);
+
+    core.open_settings();
+    core.apply_setting("core.start_on_boot", SettingValue::Bool(true))
+        .unwrap();
+    assert_eq!(applied.lock().unwrap().as_slice(), &[true]);
+    let model = core.settings_model().unwrap();
+    let row = model
+        .rows
+        .iter()
+        .find(|r| r.key.as_ref() == "core.start_on_boot")
+        .unwrap();
+    assert_eq!(row.value, SettingValue::Bool(true));
+}
+
+#[test]
 fn apply_setting_validates_type_and_value() {
     let (mut core, _spawner) = setup(FakeModule::new("fake"));
 
@@ -664,14 +710,15 @@ fn settings_view_lifecycle_and_effects() {
     assert!(core.in_settings());
     assert!(core.session().is_none());
     let model = core.settings_model().unwrap();
-    assert_eq!(model.rows.len(), 2); // core.hotkey + core.hide_on_focus_loss
+    assert_eq!(model.rows.len(), 3); // hotkey + hide_on_focus_loss + start_on_boot
     assert_eq!(model.selected, 0);
 
     core.settings_select_next();
     core.settings_select_next(); // 夹紧在最后一行
-    assert_eq!(core.settings_model().unwrap().selected, 1);
+    core.settings_select_next();
+    assert_eq!(core.settings_model().unwrap().selected, 2);
     core.settings_select_prev();
-    assert_eq!(core.settings_model().unwrap().selected, 0);
+    assert_eq!(core.settings_model().unwrap().selected, 1);
 
     // 热键在设置页 = Esc(关闭设置)。
     core.hotkey_pressed();
