@@ -3,9 +3,9 @@
 //! Chromium 系(Edge/Chrome)书签搜索:触发词 `b`(§5.2 词边界规则:
 //! 字母触发的模块只吃 `b<空格>` 或裸 `b`,不吞 `baidu`)。数据源是
 //! `<User Data>/<profile>/Bookmarks` JSON(无锁,浏览器运行中可读);
-//! 刷新走 mtime 指纹,无 watcher(§56 精神)。打开用 ShellExecuteExW
-//! (系统默认浏览器)。Firefox(places.sqlite)不在范围——§117 依赖
-//! 决策:不为它引入 rusqlite。
+//! 刷新走 mtime 指纹,无 watcher(§56 精神)。打开从哪来回哪开——
+//! 来源浏览器 exe 带 URL 启动(exe 缺失退回系统默认浏览器)。
+//! Firefox(places.sqlite)不在范围——§117 依赖决策:不为它引入 rusqlite。
 
 mod catalog;
 mod chromium;
@@ -241,8 +241,8 @@ impl LauncherModule for BookmarkModule {
         }]
     }
 
-    /// 打开 = ShellExecuteExW(url) → 系统默认浏览器(§117:不写死
-    /// 来源浏览器——书签只是 URL,用户选过默认浏览器)。
+    /// 打开 = 从哪来回哪开(§117):来源浏览器 exe 带 URL 启动;
+    /// exe 缺失(浏览器已卸载等)退回系统默认浏览器。
     fn activate(&mut self, item: &ModuleItem, action: ActionId) -> ActivationFuture {
         let entry = item.downcast_ref::<Arc<catalog::BookmarkEntry>>().cloned();
         Box::pin(async move {
@@ -251,10 +251,10 @@ impl LauncherModule for BookmarkModule {
                     "item payload is not a BookmarkEntry".into(),
                 ));
             };
-            match open_url(&entry.url) {
+            match open_in_browser(entry.browser, &entry.url) {
                 Ok(()) => ModuleOutcome::success(
                     SessionDisposition::Close,
-                    // §51:usage 身份 = URL。
+                    // §51:usage 身份 = {browser}:{url}。
                     Some(UsageRecordRequest {
                         item_key: entry.item_key.to_string(),
                         action_id: action,
@@ -266,22 +266,37 @@ impl LauncherModule for BookmarkModule {
     }
 }
 
-/// ShellExecuteExW 打开 URL(与 cue-module-app launch_win32 同型,
-/// lpFile 直接给 URL,shell 路由到默认浏览器)。
-fn open_url(url: &str) -> Result<(), ModuleError> {
+/// 从哪来回哪开:来源浏览器 exe + URL 参数;exe 找不到退回
+/// 默认浏览器打开 URL——宁可降级,不让激活失败。
+fn open_in_browser(browser: Browser, url: &str) -> Result<(), ModuleError> {
+    match browser.exe_path() {
+        Some(exe) => shell_execute(&exe.to_string_lossy(), Some(url)),
+        None => shell_execute(url, None),
+    }
+}
+
+/// ShellExecuteExW(与 cue-module-app launch_win32 同型):lpFile =
+/// file(可带参数);file 直接是 URL 时由 shell 路由到默认浏览器。
+fn shell_execute(file: &str, params: Option<&str>) -> Result<(), ModuleError> {
     use windows::core::PCWSTR;
     use windows::Win32::UI::Shell::{ShellExecuteExW, SHELLEXECUTEINFOW};
     use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 
-    let url_w: Vec<u16> = url.encode_utf16().chain(Some(0)).collect();
+    let file_w: Vec<u16> = file.encode_utf16().chain(Some(0)).collect();
+    let params_w: Option<Vec<u16>> = params.map(|p| p.encode_utf16().chain(Some(0)).collect());
     let mut info = SHELLEXECUTEINFOW {
         cbSize: std::mem::size_of::<SHELLEXECUTEINFOW>() as u32,
-        lpFile: PCWSTR(url_w.as_ptr()),
+        lpFile: PCWSTR(file_w.as_ptr()),
+        lpParameters: params_w
+            .as_ref()
+            .map(|p| PCWSTR(p.as_ptr()))
+            .unwrap_or(PCWSTR::null()),
         nShow: SW_SHOWNORMAL.0,
         ..Default::default()
     };
     unsafe {
-        ShellExecuteExW(&mut info).map_err(|e| ModuleError::ActivationFailed(format!("{url}: {e}")))
+        ShellExecuteExW(&mut info)
+            .map_err(|e| ModuleError::ActivationFailed(format!("{file}: {e}")))
     }
 }
 
@@ -331,7 +346,7 @@ mod tests {
         assert!(search(&entries, None, "", 10).is_empty());
         let mut map = std::collections::HashMap::new();
         map.insert(
-            "https://b.example/".to_string(),
+            "edge:https://b.example/".to_string(),
             UsageStat {
                 count: 3,
                 last_used: SystemTime::now() - Duration::from_secs(60),
@@ -344,6 +359,17 @@ mod tests {
         assert_eq!(&*e.url, "https://b.example/");
     }
 
+    /// 从哪来回哪开:usage 身份带来源浏览器前缀——同 URL 在 Edge 与
+    /// Chrome 各收一份时,两行是不同启动动作,计数互不影响。
+    #[test]
+    fn item_key_scopes_usage_to_source_browser() {
+        let edge = entry("同一站", "https://x.example/", Browser::Edge);
+        let chrome = entry("同一站", "https://x.example/", Browser::Chrome);
+        assert_eq!(&*edge.item_key, "edge:https://x.example/");
+        assert_eq!(&*chrome.item_key, "chrome:https://x.example/");
+        assert_ne!(edge.item_id(), chrome.item_id());
+    }
+
     #[test]
     fn usage_bonus_breaks_ties() {
         let entries = vec![
@@ -352,7 +378,7 @@ mod tests {
         ];
         let mut map = std::collections::HashMap::new();
         map.insert(
-            "https://two.example/".to_string(),
+            "edge:https://two.example/".to_string(),
             UsageStat {
                 count: 5,
                 last_used: SystemTime::now(),

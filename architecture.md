@@ -3891,9 +3891,9 @@ trigger    = b（词边界规则见 §5.2:b<空白> 或裸 b 才命中,不吞 ba
 ## 打开与 usage
 
 ```text
-打开     = ShellExecuteExW(url) → 系统默认浏览器
-         (书签只是 URL;不写死来源浏览器,用户选过默认浏览器)
-item_key = URL(§51 usage 身份)
+打开     = 从哪来回哪开:来源浏览器 exe + URL 参数启动
+         (exe 缺失时退回系统默认浏览器,宁可降级不让激活失败)
+item_key = {browser}:{url}(§51;不同来源是不同启动动作,分开计数)
 session  = Close;失败保持打开并报错(§115)
 ```
 

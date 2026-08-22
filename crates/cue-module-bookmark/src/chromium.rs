@@ -23,6 +23,15 @@ impl Browser {
         }
     }
 
+    /// usage 身份前缀(§51):打开动作按来源浏览器区分(从哪来回哪开),
+    /// item_key = `{key}:{url}`。
+    pub fn key(self) -> &'static str {
+        match self {
+            Browser::Edge => "edge",
+            Browser::Chrome => "chrome",
+        }
+    }
+
     /// User Data 目录(%LOCALAPPDATA% 下)。
     fn user_data(self) -> Option<PathBuf> {
         let local = std::env::var_os("LOCALAPPDATA").map(PathBuf::from)?;

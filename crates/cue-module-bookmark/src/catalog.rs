@@ -23,7 +23,8 @@ pub struct BookmarkEntry {
     pub browser: Browser,
     /// 非 Default profile 的目录名;Default 为空串(不标注)。
     pub profile: Arc<str>,
-    /// §51 usage 身份:URL。
+    /// §51 usage 身份:`{browser}:{url}`——从哪来回哪开之后,不同来源
+    /// 浏览器是不同启动动作,usage 分开计。
     pub item_key: Arc<str>,
     id: u64,
 }
@@ -123,7 +124,7 @@ fn make_entry(
         pinyin_full,
         pinyin_initials,
         domain: domain.into(),
-        item_key: url.clone().into(),
+        item_key: format!("{}:{url}", file.browser.key()).into(),
         url: url.into(),
         browser: file.browser,
         profile: file.profile.as_str().into(),
