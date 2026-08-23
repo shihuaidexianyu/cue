@@ -4083,7 +4083,8 @@ E2E  = 真机:Tab 出菜单(截图:文件 3 行/书签 2 行,头部归属正确)
 
 > 名单的"保守"判断(AppData 不排除)在真机使用中证伪:
 > AppData\Local、.vscode\extensions 才是短查询的主要噪声源。
-> 名单细化与可编辑化见 §121。
+> 名单细化见 §121;可编辑化的最终形态(模块数据文件 +
+> 默认编辑器打开)见 §122。
 
 ## 验证
 
@@ -4129,14 +4130,17 @@ Search    "AppData 默认不可见"有系统级先例
              .m2、.npm、.nuget、.docker、.android
            (有意保留 .claude / .ssh 等:用户会直接找;
            项目内 .vscode 不在名单——编辑的是项目配置,不是扩展缓存)
-设置     = module.file.excluded_paths(String,分号分隔片段,
-           Immediate;try_apply 时重建否定子句)
+设置     = ~~module.file.excluded_paths(String,分号分隔片段,
+           Immediate;try_apply 时重建否定子句)~~(已推翻,§122:
+           名单搬出 Settings Host,成为模块数据文件)
            + module.file.exclude_noise_paths(Bool 总开关,§120)
-UI       = 设置页 String 行进入编辑态(视图本地缓冲,
+UI       = ~~设置页 String 行进入编辑态(视图本地缓冲,
            与搜索页同一套文本录入:命名键 + key_char + space 特判
            + Ctrl+V;Enter 提交走 §42 事务、Esc 放弃)——
            V1 编辑面扩展为 Bool + Hotkey + String
-           (首个 String 设置,无独立文本框组件,复用行内渲染)
+           (首个 String 设置,无独立文本框组件,复用行内渲染)~~
+           (已推翻,§122:长名单行内编辑无光标移动,编辑面回退为
+           Bool + Hotkey;名单改由默认编辑器打开)
 逃生口   = 不变(查询含 \ 原样发送);名单清空 = 不排除
 明确不做 = 名单的正则/通配语法(子串足矣)、按名单重排、
            白名单模式、AppData 内细分(整目录排除 + 逃生口已够)
@@ -4151,4 +4155,92 @@ UI       = 设置页 String 行进入编辑态(视图本地缓冲,
        try_apply 双键回合(类型错误 Err 不留半状态)
 E2E  = 真机:/d 结果不再出现 MathWorks ServiceHost 与
        .vscode\extensions(截图);设置页名单行可编辑(截图)
+```
+
+# 122. 名单外置:模块数据文件 + 默认编辑器打开(Path 设置)
+
+§121 的可编辑名单上线即暴露交互短板:400 字符的分号串在无光标
+移动的行内编辑里几乎不可改——名单本质是"一份给人编辑的文档",
+不是"一个设置值"。两处修订:名单从 Settings Host 搬出为模块
+数据文件;设置页改为提供"打开它"的入口。
+
+## 决议
+
+```text
+归属     = ~~modules/file/data/excluded-paths.txt~~(格式推翻,
+           §123 改 TOML;模块数据文件的定位不变)(§43 data 桶:
+           持久用户数据,aliases 同类)。~~每行一个路径片段,
+           # 起注释~~;首启播种(注释头 + §121 默认名单);
+           清空~~文件~~数组 = 不排除;文件被删 = 下次 load 重新播种
+           Settings Host 只留 Bool 总开关——单一事实源,
+           无双源同步问题(§48 管辖的是"值",不是文档)
+读法     = mtime 指纹(§117 BookmarkModule 已验证的模式,
+           无 watcher):query future 在后台线程 stat,
+           变了才重读重编译否定子句;读取失败~~保留旧子句~~
+           或语法错误保留旧子句(mtime 照记,同一坏版本
+           不重复重读重报;编辑器半保存状态不该打烂搜索);
+           UI 线程零 IO,§93 查询创建预算不破
+设置页   = 新增 module.file.excluded_paths_file(Path 类,
+           值 = 名单文件指针;schema 注册先于 load,路径按
+           编排层同一公式从环境重算)。Path 行回车 = 用系统
+           默认程序打开当前路径值——首个 Path 类设置的
+           激活语义,不是值变更,不走 §42 事务
+打开通道 = CoreConfig.open_path 同步 host 回调(§53 同款
+           同步例外:函数不是 trait,UI 线程调用);
+           编排层实现 = explorer.exe <path>(拉起默认关联,
+           其返回码不可靠故忽略,只认 spawn 失败)
+编辑面   = 回退为 Bool + Hotkey(行内 String 编辑随名单
+           外置一并撤除——克制:没有 String 设置就没有编辑面)
+逃生口   = 不变(查询含 \ 原样发送)
+明确不做 = 编辑器关闭/保存的事件监听(mtime 惰性检查已够)、
+           名单值经设置事务回流(双源)、行内 String 编辑组件、
+           名单内容的多行 TSV 转义(文件天然支持换行)
+```
+
+## 验证
+
+```text
+单测 = build_clause 行解析(注释/空行/CRLF)、播种文件
+       回合(注释头 + 默认片段可编译)、mtime 指纹三态
+       (变了重读/不变不重读/消失保留旧子句)、
+       schema Bool+Path 声明与 try_apply 回合;
+       Core:open_setting_path 回调收值、不 commit、
+       非 Path/未知 key 拒绝、回调失败进模型
+E2E  = 真机:设置页 Path 行回车 → 默认编辑器打开名单文件
+       (截图);编辑保存后下一次查询生效(mtime 重读)
+```
+
+# 123. 给人编辑的配置文件一律 TOML(名单格式修订)
+
+§122 的纯文本行格式能用但不像"配置":无高亮、无结构、无标准。
+定下通则:**凡是给用户手工编辑的配置文件,一律 TOML**;
+机器单方读写的存储(settings.tsv、usage.tsv)不在此列——
+它们不是"给人编辑的配置"。首个适用对象即排除名单。
+
+## 决议
+
+```text
+格式     = excluded-paths.toml:`excluded = [ '片段', ... ]`
+           路径用 literal string(单引号)——内容逐字,
+           Windows 反斜杠免转义,是这类名单的天然容器;
+           注释头说明格式与逃生口,数组内行尾也可加注释
+解析     = toml crate(标准解析,不手写子集——手搓"简化
+           TOML"是最糟糕的半标准);无 excluded 键 = 空名单
+错误纪律 = 语法错误/非字符串元素 → 保留旧子句 + Warn 日志,
+           mtime 照记(同一坏版本不重复重读重报);load 时
+           读取/解析失败 → 内置默认子句,不阻塞 load
+迁移     = 无:.txt 行格式只存在于未提交的中间态(未发版),
+           直接切换,不写迁移代码(YAGNI)
+明确不做 = settings.tsv/usage.tsv 改 TOML(机器单方读写,
+           不是给人编辑的);名单内容进 Settings Host(§122 已定:
+           文档不是"值");toml 序列化写回(播种只写受控默认值)
+```
+
+## 验证
+
+```text
+单测 = TOML 解析(literal/基本字符串、注释、空键)、语法错误与
+       非字符串元素报 Err;播种文件回合;坏版本保留旧子句且
+       mtime 照记、改对后生效
+E2E  = 真机:.toml 播种;外部缩减名单后 /d 噪声回归(重读生效)
 ```

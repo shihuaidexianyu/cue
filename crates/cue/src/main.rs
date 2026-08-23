@@ -113,12 +113,24 @@ fn main() {
             }
         };
 
+        // Path 类设置行的"打开":explorer 拉起文件的默认关联
+        // (.txt → 用户默认编辑器)。explorer 返回码不可靠(成功也常
+        // 非零),只认 spawn 失败;GUI 子进程,无控制台闪烁。
+        let open_path = |path: &std::path::Path| -> Result<(), String> {
+            std::process::Command::new("explorer")
+                .arg(path)
+                .spawn()
+                .map(|_| ())
+                .map_err(|e| format!("打开失败:{e}"))
+        };
+
         let core = Core::new(
             CoreConfig {
                 usage_file: Some(storage_root.join("usage.tsv")),
                 settings_file: Some(storage_root.join("settings.tsv")),
                 apply_hotkey: Some(Box::new(apply_hotkey)),
                 apply_start_on_boot: Some(Box::new(apply_start_on_boot)),
+                open_path: Some(Box::new(open_path)),
                 storage_root,
                 ..CoreConfig::default()
             },

@@ -19,8 +19,8 @@ pub use event::{ActivationTicket, CoreEvent, HostEvent, QueryTicket};
 pub use registry::{ModuleRegistry, RegistryError};
 pub use session::{ActionMenuState, SessionId, SessionState};
 pub use settings::{
-    ApplyHotkey, ApplyStartOnBoot, KEY_HOTKEY, KEY_START_ON_BOOT, SettingsHost, SettingsModel,
-    SettingsRow, SettingsViewState,
+    ApplyHotkey, ApplyStartOnBoot, KEY_HOTKEY, KEY_START_ON_BOOT, OpenPath, SettingsHost,
+    SettingsModel, SettingsRow, SettingsViewState,
 };
 pub use spawner::TaskSpawner;
 pub use usage::UsageStore;
@@ -49,6 +49,9 @@ pub struct CoreConfig {
     /// core.start_on_boot 的同步 try-apply 回调(写登录启动项,同模式)。
     /// None(测试)时 try-apply 视为通过。
     pub apply_start_on_boot: Option<ApplyStartOnBoot>,
+    /// Path 类设置行的"打开"动作回调(系统默认程序打开路径,同模式)。
+    /// None(测试)时打开视为成功。
+    pub open_path: Option<OpenPath>,
 }
 
 impl Default for CoreConfig {
@@ -60,6 +63,7 @@ impl Default for CoreConfig {
             result_limit: 20,
             apply_hotkey: None,
             apply_start_on_boot: None,
+            open_path: None,
         }
     }
 }
@@ -98,6 +102,7 @@ impl Core {
             config.settings_file.clone(),
             config.apply_hotkey.take(),
             config.apply_start_on_boot.take(),
+            config.open_path.take(),
         );
         let mut core = Self {
             settings,
@@ -314,6 +319,19 @@ impl Core {
     /// 失败不 commit、返回错误;UI 展示错误并保留旧值显示。
     pub fn apply_setting(&mut self, key: &str, candidate: SettingValue) -> Result<(), String> {
         let result = self.apply_setting_inner(key, candidate);
+        if let Some(view) = self.settings_view.as_mut() {
+            view.error = match &result {
+                Ok(()) => None,
+                Err(msg) => Some(msg.as_str().into()),
+            };
+        }
+        result
+    }
+
+    /// Path 类设置行的激活:用系统默认程序打开该路径(不是值变更,
+    /// 不走事务)。失败信息进模型,与 apply 错误同位置回显。
+    pub fn open_setting_path(&mut self, key: &str) -> Result<(), String> {
+        let result = self.settings.open_path(key);
         if let Some(view) = self.settings_view.as_mut() {
             view.error = match &result {
                 Ok(()) => None,

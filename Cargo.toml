@@ -28,6 +28,7 @@ cue-util-win = { path = "crates/cue-util-win" }
 
 futures = "0.3"
 gpui = "0.2"
+toml = "1"
 windows = "0.62"
 windows-future = "0.3"
 pinyin = "0.10"

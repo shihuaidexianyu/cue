@@ -15,18 +15,24 @@
 //! 噪声目录默认排除:工作文件几乎从不在系统目录、AppData、包缓存、
 //! 编辑器扩展目录里,但它们会以"工具内脏"的形式淹没结果。排除不做
 //! 结果后过滤,而是把否定子句拼进发给 Everything 的查询串(`!"路径
-//! 片段"`),让这些路径根本不占结果位。名单本身即设置
-//! (`module.file.excluded_paths`,分号分隔的路径片段,参照 VS Code
-//! search.exclude 与 Windows Search 默认索引范围的口径给默认值),
-//! 总开关是 `module.file.exclude_noise_paths`。查询含 `\`(用户在写
-//! 显式路径)时原样发送、不加排除——刻意找系统文件时不会被拦。
+//! 片段"`),让这些路径根本不占结果位。名单是模块数据文件
+//! `modules/file/data/excluded-paths.toml`——给人编辑的配置一律
+//! TOML(literal string 数组,反斜杠免转义;默认口径参照 VS Code
+//! search.exclude 与 Windows Search 默认索引范围);设置页有一行
+//! 指向它的 Path 设置,回车即用系统默认编辑器打开,保存后下一次
+//! 查询生效(mtime 指纹重读,无 watcher;语法错误保留旧子句——
+//! 编辑器里的半保存状态不该打烂搜索)。总开关是
+//! `module.file.exclude_noise_paths`。查询含 `\`(用户在写显式
+//! 路径)时原样发送、不加排除——刻意找系统文件时不会被拦。
 
 mod everything;
 mod icon;
 
 use cue_protocol::*;
 use everything::{EverythingBackend, FileEntry};
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
+use std::time::SystemTime;
 
 /// 次级动作 ID(顺序即菜单顺序;PRIMARY = 打开)。
 const ACTION_REVEAL: ActionId = ActionId(1);
@@ -34,14 +40,17 @@ const ACTION_COPY_PATH: ActionId = ActionId(2);
 
 /// 噪声目录排除总开关(设置 UI 里的 Bool 行)。
 pub const KEY_EXCLUDE_NOISE: &str = "module.file.exclude_noise_paths";
-/// 排除名单(设置 UI 里的 String 行,分号分隔的路径片段)。
-pub const KEY_EXCLUDED_PATHS: &str = "module.file.excluded_paths";
+/// 名单文件的 Path 设置(设置 UI 里回车打开;值只是指针,
+/// 名单内容归模块数据文件,不是设置值)。
+pub const KEY_EXCLUDE_FILE: &str = "module.file.excluded_paths_file";
+/// 名单文件名(模块 data 目录下)。
+const EXCLUDE_FILE_NAME: &str = "excluded-paths.toml";
 
-/// 默认名单:全系统片段(node_modules 等依赖目录,任意位置都排除;
+/// 默认名单片段:全系统(node_modules 等依赖目录,任意位置都排除;
 /// 口径对齐 VS Code search.exclude 默认)+ 按 USERPROFILE 展开的
 /// AppData(Windows Search 默认即不索引)与各工具缓存目录。
 /// 片段都以 `\` 结尾,锚定"目录"而非名字碰巧包含它的文件。
-fn default_excluded_paths() -> String {
+fn default_fragments() -> Vec<String> {
     let mut frags: Vec<String> = [
         r"C:\Windows\",
         r"C:\Program Files\",
@@ -59,7 +68,7 @@ fn default_excluded_paths() -> String {
     .map(|s| s.to_string())
     .collect();
     if let Some(home) = std::env::var_os("USERPROFILE") {
-        let home = std::path::PathBuf::from(home);
+        let home = PathBuf::from(home);
         for d in [
             "AppData", ".vscode", ".cursor", ".cargo", ".rustup", ".gradle", ".m2", ".npm",
             ".nuget", ".docker", ".android",
@@ -67,18 +76,76 @@ fn default_excluded_paths() -> String {
             frags.push(format!("{}\\", home.join(d).to_string_lossy()));
         }
     }
-    frags.join(";")
+    frags
 }
 
-/// 名单 → Everything 否定子句:含反斜杠的词按全路径子串匹配,
+/// 首启播种:注释头(格式与逃生口说明)+ 默认片段。片段都是
+/// Windows 路径——TOML literal string(单引号)内容逐字,
+/// 反斜杠免转义,是这类名单的天然容器。
+fn seed_exclude_file(path: &Path) -> std::io::Result<()> {
+    let mut text = String::from(
+        "# CUE 文件搜索排除名单\n\
+         # excluded 数组:每个片段按全路径子串匹配;以 \\ 结尾锚定目录。\n\
+         # 保存后下一次查询生效;清空数组 = 不排除任何路径。\n\
+         # 查询含 \\ 时本名单整体不生效(显式路径逃生口)。\n\
+         # 路径用单引号 literal string:反斜杠逐字,无需转义。\n\
+         \n\
+         excluded = [\n",
+    );
+    for f in default_fragments() {
+        // 默认片段均不含单引号/换行(literal string 的两个禁区)。
+        text.push_str(&format!("  '{f}',\n"));
+    }
+    text.push_str("]\n");
+    std::fs::write(path, text)
+}
+
+/// Path 设置的默认值:与编排层同一公式解析的模块数据路径
+/// (schema 在 load 之前注册,拿不到 ModuleContext,只能从环境重算;
+/// 生产环境两者一致,测试里这行只是展示值)。
+fn default_exclude_file() -> PathBuf {
+    std::env::var("LOCALAPPDATA")
+        .map(|p| PathBuf::from(p).join("CUE"))
+        .unwrap_or_else(|_| PathBuf::from("CUE"))
+        .join("modules")
+        .join("file")
+        .join("data")
+        .join(EXCLUDE_FILE_NAME)
+}
+
+/// TOML → 片段数组:无 `excluded` 键 = 空名单;语法错误、
+/// 非字符串元素报 Err(调用方保留旧子句)。
+fn parse_fragments(content: &str) -> Result<Vec<String>, String> {
+    let doc: toml::Value = toml::from_str(content).map_err(|e| e.to_string())?;
+    let Some(items) = doc.get("excluded").and_then(|v| v.as_array()) else {
+        return Ok(Vec::new());
+    };
+    items
+        .iter()
+        .enumerate()
+        .map(|(i, v)| {
+            v.as_str()
+                .map(str::to_string)
+                .ok_or_else(|| format!("excluded[{i}] 不是字符串"))
+        })
+        .collect()
+}
+
+/// 片段 → Everything 否定子句:含反斜杠的词按全路径子串匹配,
 /// `!"…"` 即"路径不含该片段"。带引号容忍空格;大小写不敏感。
-fn build_clause(list: &str) -> String {
-    list.split(';')
-        .map(str::trim)
+fn clause_from_fragments(frags: &[String]) -> String {
+    frags
+        .iter()
+        .map(|f| f.trim())
         .filter(|f| !f.is_empty())
         .map(|f| format!("!\"{f}\""))
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+/// 名单文件内容 → Everything 否定子句。
+fn build_clause(content: &str) -> Result<String, String> {
+    Ok(clause_from_fragments(&parse_fragments(content)?))
 }
 
 /// 构造发给 Everything 的搜索串。查询含 `\` 视为显式路径输入,
@@ -88,6 +155,47 @@ fn effective_search(query: &str, exclude_noise: bool, clause: &str) -> String {
         return query.to_string();
     }
     format!("{query} {clause}")
+}
+
+/// 名单的共享视图:query future 在后台线程做 mtime 指纹检查,
+/// 变了才重读重编译(UI 线程零 IO,查询创建预算不破)。
+struct ExcludeState {
+    /// 名单文件路径(load 后才有;测试里 None = 固定内置子句)。
+    path: Option<PathBuf>,
+    /// 上次读到的文件修改时间(含解析失败的版本——见过即记,
+    /// 免得每次查询都重读重报)。
+    mtime: Option<SystemTime>,
+    /// 当前编译出的否定子句。
+    clause: String,
+    /// 解析失败告警(load 后才有)。
+    logger: Option<ModuleLogger>,
+}
+
+/// 后台线程侧:mtime 变了才重读文件、重编译子句;stat/读失败
+/// 或 TOML 语法错误保留旧子句(编辑器里的半保存状态不该打烂
+/// 搜索)。返回当前子句。
+fn refreshed_clause(state: &Mutex<ExcludeState>) -> String {
+    let path = state.lock().unwrap().path.clone();
+    if let Some(p) = path {
+        let mtime = std::fs::metadata(&p).and_then(|m| m.modified()).ok();
+        let stale = mtime.is_some() && mtime != state.lock().unwrap().mtime;
+        if stale && let Ok(content) = std::fs::read_to_string(&p) {
+            let mut g = state.lock().unwrap();
+            match build_clause(&content) {
+                Ok(clause) => g.clause = clause,
+                Err(e) => {
+                    if let Some(logger) = &g.logger {
+                        logger.log(
+                            LogLevel::Warn,
+                            &format!("file: 排除名单解析失败({e}),沿用旧名单"),
+                        );
+                    }
+                }
+            }
+            g.mtime = mtime;
+        }
+    }
+    state.lock().unwrap().clause.clone()
 }
 
 /// FileModule,trigger `/`。
@@ -103,8 +211,8 @@ pub struct FileModule {
     last_items: Arc<Mutex<Vec<ItemId>>>,
     /// 噪声目录排除开关的当前值(load 时从设置快照读,try_apply 更新)。
     exclude_noise: bool,
-    /// 排除名单编译出的 Everything 否定子句(load/try_apply 时重建)。
-    exclude_clause: String,
+    /// 排除名单(模块数据文件 + mtime 指纹;future 后台重读)。
+    exclude: Arc<Mutex<ExcludeState>>,
 }
 
 impl FileModule {
@@ -119,7 +227,12 @@ impl FileModule {
             icons: Arc::new(OnceLock::new()),
             last_items: Arc::new(Mutex::new(Vec::new())),
             exclude_noise: true,
-            exclude_clause: build_clause(&default_excluded_paths()),
+            exclude: Arc::new(Mutex::new(ExcludeState {
+                path: None,
+                mtime: None,
+                clause: clause_from_fragments(&default_fragments()),
+                logger: None,
+            })),
         }
     }
 }
@@ -136,13 +249,40 @@ impl Module for FileModule {
     }
 
     /// load 廉价:只起两个线程——Everything IPC 线程(窗口与消息泵都在
-    /// 线程内)与图标提取线程(两次 SHGetFileInfoW,毫秒级)。
+    /// 线程内)与图标提取线程(两次 SHGetFileInfoW,毫秒级)。名单文件
+    /// 播种 + 首读是两次小文件 IO(缺失才写),微秒级。
     fn load(&mut self, ctx: ModuleContext) -> Result<(), ModuleError> {
         if let Some(SettingValue::Bool(v)) = ctx.settings.get("exclude_noise_paths") {
             self.exclude_noise = *v;
         }
-        if let Some(SettingValue::String(v)) = ctx.settings.get("excluded_paths") {
-            self.exclude_clause = build_clause(v);
+        // 名单文件:缺失则播种默认名单;读取/解析失败沿用 new()
+        // 里的内置默认子句——排除是体验优化,不该阻塞 load。
+        let file = ctx.storage.data.join(EXCLUDE_FILE_NAME);
+        if !file.exists()
+            && let Err(e) = seed_exclude_file(&file)
+        {
+            ctx.logger.log(
+                LogLevel::Warn,
+                &format!("file: 排除名单播种失败({e}),沿用内置默认"),
+            );
+        }
+        {
+            let mut g = self.exclude.lock().unwrap();
+            match std::fs::read_to_string(&file)
+                .map_err(|e| e.to_string())
+                .and_then(|c| build_clause(&c))
+            {
+                Ok(clause) => {
+                    g.clause = clause;
+                    g.mtime = std::fs::metadata(&file).and_then(|m| m.modified()).ok();
+                }
+                Err(e) => ctx.logger.log(
+                    LogLevel::Warn,
+                    &format!("file: 排除名单读取/解析失败({e}),沿用内置默认"),
+                ),
+            }
+            g.path = Some(file);
+            g.logger = Some(ctx.logger.clone());
         }
         self.backend = Some(EverythingBackend::start(ctx.logger.clone()));
 
@@ -188,13 +328,13 @@ impl Module for FileModule {
                 apply_policy: ApplyPolicy::Immediate,
             },
             SettingSpec {
-                key: SettingKey(KEY_EXCLUDED_PATHS.into()),
-                label: "文件搜索:排除名单".into(),
-                description: Some(
-                    "分号分隔的路径片段,按全路径子串匹配;片段以 \\ 结尾锚定目录".into(),
-                ),
-                kind: SettingKind::String,
-                default: SettingValue::String(default_excluded_paths()),
+                key: SettingKey(KEY_EXCLUDE_FILE.into()),
+                label: "文件搜索:排除名单文件".into(),
+                description: Some("回车用系统默认编辑器打开;TOML 数组,保存后下一次查询生效".into()),
+                kind: SettingKind::Path,
+                // schema 注册先于 load(拿不到 ModuleContext),路径按
+                // 编排层同一公式从环境重算。
+                default: SettingValue::Path(default_exclude_file()),
                 apply_policy: ApplyPolicy::Immediate,
             },
         ]
@@ -204,12 +344,11 @@ impl Module for FileModule {
         for (key, value) in &changes.changes {
             match (key.0.as_ref(), value) {
                 (KEY_EXCLUDE_NOISE, SettingValue::Bool(v)) => self.exclude_noise = *v,
-                (KEY_EXCLUDED_PATHS, SettingValue::String(v)) => {
-                    self.exclude_clause = build_clause(v);
-                }
-                (KEY_EXCLUDE_NOISE | KEY_EXCLUDED_PATHS, _) => {
+                (KEY_EXCLUDE_NOISE, _) => {
                     return Err(ModuleError::InvalidState(format!("{} 类型不符", key.0)));
                 }
+                // Path 行的值只是文件指针,打开动作不产生变更;
+                // 名单内容模块自己从文件读,不经设置事务。
                 _ => {}
             }
         }
@@ -226,7 +365,8 @@ impl LauncherModule for FileModule {
     }
 
     /// 创建不触碰 IO——只往 latest-wins 槽投一个请求,future 内
-    /// await 应答。空查询直接返回空(见模块头注释)。
+    /// await 应答。空查询直接返回空(见模块头注释)。名单的 mtime
+    /// 指纹检查也在 future 里做(后台线程,一次 stat 亚毫秒)。
     fn query(&mut self, ctx: QueryContext) -> QueryFuture {
         // 标点触发的剩余输入不去空白;Everything 语义上前导
         // 空白无意义,trim 掉。
@@ -234,7 +374,8 @@ impl LauncherModule for FileModule {
         if search.is_empty() {
             return Box::pin(async { Ok(QueryResponse { items: Vec::new() }) });
         }
-        let search = effective_search(&search, self.exclude_noise, &self.exclude_clause);
+        let exclude_noise = self.exclude_noise;
+        let exclude = Arc::clone(&self.exclude);
         let Some(backend) = self.backend.clone() else {
             return Box::pin(async {
                 Err(ModuleError::Unavailable("file module not loaded".into()))
@@ -243,6 +384,8 @@ impl LauncherModule for FileModule {
         let limit = ctx.result_limit;
         let last_items = Arc::clone(&self.last_items);
         Box::pin(async move {
+            let clause = refreshed_clause(&exclude);
+            let search = effective_search(&search, exclude_noise, &clause);
             let entries = backend
                 .query(search, limit as u32)
                 .await
@@ -476,7 +619,7 @@ mod tests {
     /// 或查询含 `\`(显式路径)时原样发送。
     #[test]
     fn effective_search_excludes_noise_by_default() {
-        let clause = build_clause(&default_excluded_paths());
+        let clause = clause_from_fragments(&default_fragments());
         let noisy = effective_search("ds", true, &clause);
         assert!(noisy.starts_with("ds "));
         for frag in [
@@ -502,39 +645,151 @@ mod tests {
         assert!(effective_search("ext:pdf report", true, &clause).contains(r#"!"C:\Windows\""#));
     }
 
-    /// 名单解析:分号分隔、trim、空段跳过,编译成 `!"片段"` 子句。
+    /// TOML 解析:literal string 反斜杠逐字、注释与空行自由、
+    /// 无 excluded 键 = 空名单;语法错误与非字符串元素报 Err。
     #[test]
-    fn build_clause_parses_semicolon_list() {
-        assert_eq!(build_clause(""), "");
-        assert_eq!(build_clause(" ; ; "), "");
+    fn build_clause_parses_toml_list() {
+        assert_eq!(build_clause("").unwrap(), "");
+        assert_eq!(build_clause("# 只有注释\n").unwrap(), "");
         assert_eq!(
-            build_clause(r" C:\Windows\ ; \node_modules\;"),
+            build_clause(
+                "# 系统目录\nexcluded = [\n  'C:\\Windows\\',\n  '\\node_modules\\', # 依赖\n]\n"
+            )
+            .unwrap(),
             r#"!"C:\Windows\" !"\node_modules\""#
         );
+        // 单行数组 + 基本字符串(双引号,反斜杠需转义)也能解析。
+        assert_eq!(
+            build_clause("excluded = [\"C:\\\\Windows\\\\\"]").unwrap(),
+            r#"!"C:\Windows\""#
+        );
+        assert!(build_clause("excluded = ['unterminated").is_err());
+        assert!(build_clause("excluded = [1]").is_err());
     }
 
-    /// 名单即设置:schema 声明 Bool 总开关 + String 名单,try_apply
-    /// 重建子句;类型错误返回 Err 而不是 panic。
+    /// 播种的文件带注释头与默认片段,且能编译出子句。
+    #[test]
+    fn seed_file_roundtrips_into_clause() {
+        let dir = std::env::temp_dir().join(format!("cue-file-seed-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join(EXCLUDE_FILE_NAME);
+        seed_exclude_file(&file).unwrap();
+        let content = std::fs::read_to_string(&file).unwrap();
+        assert!(content.starts_with("# CUE"));
+        let clause = build_clause(&content).expect("seed parses");
+        assert!(clause.contains(r#"!"\node_modules\""#));
+        assert!(clause.contains(r#"\AppData\""#));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// mtime 指纹:变了才重读重编译;文件消失/读取失败保留旧子句。
+    #[test]
+    fn refreshed_clause_follows_mtime() {
+        let dir = std::env::temp_dir().join(format!("cue-file-mtime-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("list.toml");
+        std::fs::write(&file, "excluded = ['\\alpha\\']\n").unwrap();
+
+        let state = Mutex::new(ExcludeState {
+            path: Some(file.clone()),
+            mtime: None,
+            clause: "old".into(),
+            logger: None,
+        });
+        // mtime None ≠ Some → 首读
+        assert_eq!(refreshed_clause(&state), r#"!"\alpha\""#);
+        let first_mtime = state.lock().unwrap().mtime.unwrap();
+
+        // 内容变了但 mtime 没变(写后强制回拨)→ 不重读
+        std::fs::write(&file, "excluded = ['\\beta\\']\n").unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&file)
+            .unwrap()
+            .set_modified(first_mtime)
+            .unwrap();
+        assert_eq!(refreshed_clause(&state), r#"!"\alpha\""#);
+
+        // 推进 mtime → 重读
+        std::fs::File::options()
+            .write(true)
+            .open(&file)
+            .unwrap()
+            .set_modified(first_mtime + std::time::Duration::from_secs(10))
+            .unwrap();
+        assert_eq!(refreshed_clause(&state), r#"!"\beta\""#);
+
+        // 文件消失 → 保留旧子句,不 panic
+        std::fs::remove_file(&file).unwrap();
+        assert_eq!(refreshed_clause(&state), r#"!"\beta\""#);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// 语法错误(编辑器半保存):保留旧子句,但 mtime 照记——
+    /// 同一坏版本不重复重读重报;改对之后正常生效。
+    #[test]
+    fn malformed_toml_keeps_previous_clause() {
+        let dir = std::env::temp_dir().join(format!("cue-file-bad-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("list.toml");
+        std::fs::write(&file, "excluded = ['\\alpha\\']\n").unwrap();
+
+        let state = Mutex::new(ExcludeState {
+            path: Some(file.clone()),
+            mtime: None,
+            clause: "old".into(),
+            logger: None,
+        });
+        assert_eq!(refreshed_clause(&state), r#"!"\alpha\""#);
+        let bump = |secs: u64| {
+            let t = state.lock().unwrap().mtime.unwrap() + std::time::Duration::from_secs(secs);
+            std::fs::File::options()
+                .write(true)
+                .open(&file)
+                .unwrap()
+                .set_modified(t)
+                .unwrap();
+        };
+
+        // 写坏 + 推进 mtime → 子句不动,mtime 已记
+        std::fs::write(&file, "excluded = ['oops\n").unwrap();
+        bump(10);
+        assert_eq!(refreshed_clause(&state), r#"!"\alpha\""#);
+        let seen = state.lock().unwrap().mtime.unwrap();
+
+        // 同一坏版本再查:不重读(把文件改回 alpha 但回拨 mtime,子句不变)
+        std::fs::write(&file, "excluded = ['\\alpha\\']\n").unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&file)
+            .unwrap()
+            .set_modified(seen)
+            .unwrap();
+        assert_eq!(refreshed_clause(&state), r#"!"\alpha\""#);
+
+        // 改对 + 推进 → 生效
+        std::fs::write(&file, "excluded = ['\\beta\\']\n").unwrap();
+        bump(10);
+        assert_eq!(refreshed_clause(&state), r#"!"\beta\""#);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// schema 声明 Bool 总开关 + Path 名单文件;try_apply 只管开关,
+    /// 类型错误返回 Err 而不是 panic。
     #[test]
     fn exclude_settings_roundtrip() {
         let mut m = FileModule::new();
         assert!(m.exclude_noise);
-        assert!(!m.exclude_clause.is_empty());
+        assert!(!m.exclude.lock().unwrap().clause.is_empty());
         let schema = m.settings_schema();
         assert_eq!(schema.len(), 2);
         assert_eq!(schema[0].key.0.as_ref(), KEY_EXCLUDE_NOISE);
         assert_eq!(schema[0].kind, SettingKind::Bool);
-        assert_eq!(schema[1].key.0.as_ref(), KEY_EXCLUDED_PATHS);
-        assert_eq!(schema[1].kind, SettingKind::String);
-        assert!(matches!(&schema[1].default, SettingValue::String(s) if s.contains(r"\AppData\")));
-
-        let mut cs = SettingsChangeSet::default();
-        cs.changes.push((
-            SettingKey(KEY_EXCLUDED_PATHS.into()),
-            SettingValue::String(r"\scratch\".into()),
-        ));
-        m.try_apply_settings(cs).expect("apply ok");
-        assert_eq!(m.exclude_clause, r#"!"\scratch\""#);
+        assert_eq!(schema[1].key.0.as_ref(), KEY_EXCLUDE_FILE);
+        assert_eq!(schema[1].kind, SettingKind::Path);
+        assert!(
+            matches!(&schema[1].default, SettingValue::Path(p) if p.ends_with(EXCLUDE_FILE_NAME))
+        );
 
         let mut off = SettingsChangeSet::default();
         off.changes.push((
@@ -546,10 +801,10 @@ mod tests {
 
         let mut bad = SettingsChangeSet::default();
         bad.changes.push((
-            SettingKey(KEY_EXCLUDED_PATHS.into()),
-            SettingValue::Bool(true),
+            SettingKey(KEY_EXCLUDE_NOISE.into()),
+            SettingValue::String("x".into()),
         ));
         assert!(m.try_apply_settings(bad).is_err());
-        assert_eq!(m.exclude_clause, r#"!"\scratch\""#); // 失败不留半拉子状态
+        assert!(!m.exclude_noise); // 失败不留半拉子状态
     }
 }

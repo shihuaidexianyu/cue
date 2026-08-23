@@ -6,6 +6,7 @@ use cue_protocol::*;
 use futures::channel::oneshot;
 use futures::future::BoxFuture;
 use std::collections::VecDeque;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 // ---------------------------------------------------------------------
@@ -947,6 +948,74 @@ fn module_setting_transaction_reaches_module() {
         core.apply_setting("module.fake.nope", SettingValue::Bool(true))
             .is_err()
     );
+}
+
+#[test]
+fn open_setting_path_invokes_host_callback() {
+    // Path 行激活 = 打开当前路径值:host 回调收到值,不产生 commit
+    // (值不变、不 persist);非 Path kind / 未知 key 报错并进模型。
+    let mut module = FakeModule::new("fake");
+    module.schema = vec![SettingSpec {
+        key: SettingKey("module.fake.list_file".into()),
+        label: "fake path".into(),
+        description: None,
+        kind: SettingKind::Path,
+        default: SettingValue::Path(PathBuf::from(r"C:\fake\list.txt")),
+        apply_policy: ApplyPolicy::Immediate,
+    }];
+    let opened = Arc::new(Mutex::new(Vec::new()));
+    let opened2 = Arc::clone(&opened);
+    let mut config = test_config();
+    config.open_path = Some(Box::new(move |p: &std::path::Path| {
+        opened2.lock().unwrap().push(p.to_path_buf());
+        Ok(())
+    }));
+    let (mut core, _spawner) = setup_with_config(module, config);
+
+    core.open_settings();
+    core.open_setting_path("module.fake.list_file").unwrap();
+    assert_eq!(
+        opened.lock().unwrap().as_slice(),
+        &[PathBuf::from(r"C:\fake\list.txt")]
+    );
+    // 打开不是值变更:模型值仍是默认,host 无持久化文件可写。
+    let model = core.settings_model().unwrap();
+    let row = model
+        .rows
+        .iter()
+        .find(|r| r.key.as_ref() == "module.fake.list_file")
+        .unwrap();
+    assert_eq!(
+        row.value,
+        SettingValue::Path(PathBuf::from(r"C:\fake\list.txt"))
+    );
+    assert!(model.error.is_none());
+
+    // 非 Path kind 拒绝,错误进模型。
+    assert!(core.open_setting_path("core.hide_on_focus_loss").is_err());
+    let model = core.settings_model().unwrap();
+    assert!(model.error.is_some());
+    // 未知 key 拒绝。
+    assert!(core.open_setting_path("module.fake.nope").is_err());
+    // 回调失败:错误返回并进模型。
+    let mut module = FakeModule::new("fake");
+    module.schema = vec![SettingSpec {
+        key: SettingKey("module.fake.list_file".into()),
+        label: "fake path".into(),
+        description: None,
+        kind: SettingKind::Path,
+        default: SettingValue::Path(PathBuf::from(r"C:\fake\list.txt")),
+        apply_policy: ApplyPolicy::Immediate,
+    }];
+    let mut config = test_config();
+    config.open_path = Some(Box::new(|_: &std::path::Path| Err("没有默认关联".into())));
+    let (mut core, _spawner) = setup_with_config(module, config);
+    core.open_settings();
+    assert_eq!(
+        core.open_setting_path("module.fake.list_file").unwrap_err(),
+        "没有默认关联"
+    );
+    assert!(core.settings_model().unwrap().error.is_some());
 }
 
 #[test]

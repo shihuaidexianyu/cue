@@ -24,6 +24,12 @@ pub type ApplyHotkey = Box<dyn FnMut(&Hotkey) -> Result<(), String>>;
 /// 同一模式:Host 注入、UI 线程调用、失败不 commit。
 pub type ApplyStartOnBoot = Box<dyn FnMut(bool) -> Result<(), String>>;
 
+/// Path 类设置行的"打开"动作:Host 注入的同步回调(用系统默认程序
+/// 打开该路径——名单、日志这类给人看/给人改的文件)。与 try-apply
+/// 无关:不是值变更,不 commit;同一模式,函数不是 trait,只在
+/// UI 线程调用。
+pub type OpenPath = Box<dyn FnMut(&std::path::Path) -> Result<(), String>>;
+
 const HEADER: &str = "cue-settings-v1";
 
 pub const KEY_HOTKEY: &str = "core.hotkey";
@@ -66,6 +72,7 @@ pub struct SettingsHost {
     file: Option<PathBuf>,
     apply_hotkey: Option<ApplyHotkey>,
     apply_start_on_boot: Option<ApplyStartOnBoot>,
+    open_path: Option<OpenPath>,
     restart_required: bool,
 }
 
@@ -74,6 +81,7 @@ impl SettingsHost {
         file: Option<PathBuf>,
         apply_hotkey: Option<ApplyHotkey>,
         apply_start_on_boot: Option<ApplyStartOnBoot>,
+        open_path: Option<OpenPath>,
     ) -> Self {
         let mut host = Self {
             specs: Vec::new(),
@@ -81,6 +89,7 @@ impl SettingsHost {
             file,
             apply_hotkey,
             apply_start_on_boot,
+            open_path,
             restart_required: false,
         };
         // core.*:V1 三项,都是 Immediate。
@@ -170,6 +179,26 @@ impl SettingsHost {
     pub fn try_apply_start_on_boot(&mut self, on: bool) -> Result<(), String> {
         match self.apply_start_on_boot.as_mut() {
             Some(f) => f(on),
+            None => Ok(()),
+        }
+    }
+
+    /// Path 行激活 = 用系统默认程序打开当前路径值。只读值、校验
+    /// kind,然后交给 Host 回调——不是设置变更,不 commit、不 persist。
+    pub fn open_path(&mut self, key: &str) -> Result<(), String> {
+        let spec = self
+            .spec(key)
+            .ok_or_else(|| format!("unknown setting: {key}"))?;
+        if spec.kind != SettingKind::Path {
+            return Err(format!("{key} 不是 Path 类设置"));
+        }
+        let Some(SettingValue::Path(path)) = self.values.get(key) else {
+            return Err(format!("{key} 没有路径值"));
+        };
+        let path = path.clone();
+        match self.open_path.as_mut() {
+            Some(f) => f(&path),
+            // 无回调(测试环境):视为成功。
             None => Ok(()),
         }
     }
@@ -350,7 +379,7 @@ mod tests {
         )
         .unwrap();
 
-        let host = SettingsHost::new(Some(file.clone()), None, None);
+        let host = SettingsHost::new(Some(file.clone()), None, None, None);
         assert_eq!(host.hotkey(), Hotkey::from_str("ctrl+alt+k").unwrap());
         assert!(!host.hide_on_focus_loss());
         let _ = std::fs::remove_dir_all(&dir);
@@ -363,7 +392,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(&file, "garbage\ncore.hotkey\tnot-a-hotkey\nbadline\n").unwrap();
 
-        let host = SettingsHost::new(Some(file.clone()), None, None);
+        let host = SettingsHost::new(Some(file.clone()), None, None, None);
         assert_eq!(host.hotkey(), Hotkey::default());
         assert!(host.hide_on_focus_loss());
         let _ = std::fs::remove_dir_all(&dir);
@@ -374,11 +403,11 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("cue-settings-test3-{}", std::process::id()));
         let file = dir.join("settings.tsv");
 
-        let mut host = SettingsHost::new(Some(file.clone()), None, None);
+        let mut host = SettingsHost::new(Some(file.clone()), None, None, None);
         host.commit(KEY_HIDE_ON_FOCUS_LOSS, SettingValue::Bool(false));
         drop(host);
 
-        let host = SettingsHost::new(Some(file.clone()), None, None);
+        let host = SettingsHost::new(Some(file.clone()), None, None, None);
         assert!(!host.hide_on_focus_loss());
         assert_eq!(host.hotkey(), Hotkey::default()); // 未动的保持默认
         let _ = std::fs::remove_dir_all(&dir);
