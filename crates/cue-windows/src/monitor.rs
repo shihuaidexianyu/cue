@@ -62,6 +62,10 @@ fn logical_to_physical(logical: i32, dpi: u32) -> i32 {
 /// WM_DPICHANGED,尺寸定音。单次带尺寸调用时,suggested rect
 /// 会把我们已按目标 DPI 换算好的尺寸再缩一次——这正是
 /// "首次唤起尺寸错、第二次才正常"的根因。
+///
+/// 两步都带 SWP_NOACTIVATE:放置阶段不抢激活——调用方的唤起
+/// 序列是 place → enter_english_mode → show_and_focus,焦点由
+/// 最后的 show_and_focus 显式取得(IME 布局切换须在聚焦前完成)。
 pub fn place_on_active_monitor(hwnd: HWND, logical_w: i32, logical_h: i32) {
     let (monitor, work) = active_monitor();
     let dpi = monitor_dpi(monitor, hwnd);
@@ -80,8 +84,16 @@ pub fn place_on_active_monitor(hwnd: HWND, logical_w: i32, logical_h: i32) {
             y,
             0,
             0,
-            SWP_NOSIZE | SWP_SHOWWINDOW,
+            SWP_NOSIZE | SWP_SHOWWINDOW | SWP_NOACTIVATE,
         );
-        let _ = SetWindowPos(hwnd, Some(HWND_TOPMOST), x, y, w, h, SWP_SHOWWINDOW);
+        let _ = SetWindowPos(
+            hwnd,
+            Some(HWND_TOPMOST),
+            x,
+            y,
+            w,
+            h,
+            SWP_SHOWWINDOW | SWP_NOACTIVATE,
+        );
     }
 }

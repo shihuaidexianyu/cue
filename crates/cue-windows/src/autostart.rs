@@ -3,6 +3,7 @@
 //! 每用户安装、无需管理员权限;只写当前用户 hive,卸载/关闭时
 //! 删除同名值。core.start_on_boot 设置的事务回调由编排层注入。
 
+use std::os::windows::ffi::OsStrExt;
 use std::path::Path;
 use windows::Win32::Foundation::{ERROR_FILE_NOT_FOUND, WIN32_ERROR};
 use windows::Win32::System::Registry::*;
@@ -20,8 +21,13 @@ pub fn set_enabled(enable: bool, exe: &Path) -> Result<(), String> {
             return Err(format!("open Run key failed: {err:?}"));
         }
         let result = if enable {
-            let quoted = format!("\"{}\"", exe.as_os_str().to_string_lossy());
-            let wide: Vec<u16> = quoted.encode_utf16().chain(std::iter::once(0)).collect();
+            // 路径不经 to_string_lossy:非 UTF-8 路径会被换成 U+FFFD。
+            // 引号防路径含空格时被命令行解析截断。
+            let wide: Vec<u16> = [0x0022u16] // '"'
+                .into_iter()
+                .chain(exe.as_os_str().encode_wide())
+                .chain([0x0022, 0])
+                .collect();
             let bytes = std::slice::from_raw_parts(wide.as_ptr() as *const u8, wide.len() * 2);
             RegSetValueExW(key, VALUE_NAME, None, REG_SZ, Some(bytes))
         } else {

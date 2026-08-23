@@ -24,7 +24,9 @@ static TRAY_HOST: AtomicIsize = AtomicIsize::new(0);
 
 pub fn add(host: HWND) -> Result<(), Error> {
     // 托盘槽位要小图标(SM_CXSMICON,通常 16);多尺寸 ICO 资源
-    // 由系统挑最近条目。资源缺失退回生成的占位图标。
+    // 由系统挑最近条目。资源缺失退回生成的占位图标。两条来源的
+    // HICON 都与进程同寿,有意不 DestroyIcon:remove() 只在退出
+    // 路径跑,句柄随进程回收。
     let small = unsafe { GetSystemMetrics(SM_CXSMICON) };
     let icon = match crate::icon::brand_icon(small, small) {
         Some(h) => h,

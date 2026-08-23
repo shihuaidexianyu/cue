@@ -13,7 +13,7 @@ use windows::Win32::System::Ole::CF_UNICODETEXT;
 /// 把 `text` 放进系统剪贴板(覆盖既有内容)。剪贴板被别的程序短暂
 /// 占用时 OpenClipboard 失败——不重试,错误横幅展示后用户可再触发。
 pub fn set_text(text: &str) -> Result<(), ModuleError> {
-    let wide: Vec<u16> = text.encode_utf16().chain(Some(0)).collect();
+    let wide = crate::shell::to_wide(text);
     unsafe {
         OpenClipboard(None)
             .map_err(|e| ModuleError::ActivationFailed(format!("OpenClipboard: {e}")))?;
@@ -53,8 +53,10 @@ mod tests {
     use windows::Win32::System::DataExchange::{GetClipboardData, IsClipboardFormatAvailable};
 
     /// 真机写一次再读回:内容逐字相等,且剪贴板在函数返回后已可被
-    /// 本进程再次打开(句柄无泄漏)。
+    /// 本进程再次打开(句柄无泄漏)。会覆盖真实剪贴板,故默认 ignore,
+    /// 手动跑:`cargo test -p cue-util-win -- --ignored`
     #[test]
+    #[ignore]
     fn set_text_round_trips_unicode() {
         let text = "CUE 测试 ✓ C:\\路径\\文件.txt";
         set_text(text).expect("set_text");

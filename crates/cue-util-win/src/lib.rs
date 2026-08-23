@@ -5,7 +5,8 @@
 //! - [`com`]:COM 初始化 guard(app → bookmark → file 第三次复用时下沉);
 //! - [`icon`]:SHGetFileInfoW 系统图标提取 + HICON → RGBA(同下沉);
 //! - [`shell`]:ShellExecuteExW 打开/启动 + 次级动作原语(runas
-//!   提权、explorer /select 定位);
+//!   提权、explorer /select 定位)+ UTF-16 转换助手(to_wide /
+//!   os_str_to_wide,第三个使用处出现时下沉的模块间共享件);
 //! - [`clipboard`]:一次性写剪贴板(Copy path/link;不是
 //!   clipboard manager)。
 //!

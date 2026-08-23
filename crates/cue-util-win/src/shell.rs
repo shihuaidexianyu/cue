@@ -44,7 +44,8 @@ fn shell_execute_verb(
 ) -> Result<(), ModuleError> {
     let file_w = to_wide(file);
     let params_w = params.map(to_wide);
-    let dir_w = working_dir.map(|d| to_wide(&d.to_string_lossy()));
+    // 路径不经 to_string_lossy:非 UTF-8 路径会被换成 U+FFFD 而静默错位。
+    let dir_w = working_dir.map(|d| os_str_to_wide(d.as_os_str()));
     let verb_w = verb.map(to_wide);
     let mut info = SHELLEXECUTEINFOW {
         cbSize: std::mem::size_of::<SHELLEXECUTEINFOW>() as u32,
@@ -70,6 +71,15 @@ fn shell_execute_verb(
     }
 }
 
-fn to_wide(s: &str) -> Vec<u16> {
+/// UTF-16 + NUL 终止(Win32 `PCWSTR` 参数的通行前奏)。第三个
+/// 使用处出现时从模块私有下沉至此(§72);模块侧不要再写本地副本。
+pub fn to_wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(Some(0)).collect()
+}
+
+/// [`to_wide`] 的 `OsStr` 版:路径等系统字符串不走 lossy 转换,
+/// 非 UTF-8 序列原样保留(Windows 本就按 WTF-16 存路径)。
+pub fn os_str_to_wide(s: &std::ffi::OsStr) -> Vec<u16> {
+    use std::os::windows::ffi::OsStrExt;
+    s.encode_wide().chain(Some(0)).collect()
 }

@@ -155,6 +155,10 @@ fn main() {
             // (不留幽灵图标),再结束消息循环;热键随进程释放。
             if msg == win::host::HostMsg::QuitRequested {
                 win::tray::remove();
+                // §107 配对义务同样覆盖退出路径:可见状态下退出时
+                // hide 不会跑,这里恢复用户布局,否则全局输入法模式
+                // 下其他应用被留在英文。
+                win::ime::restore_saved_layout();
                 win::host::request_quit();
                 return;
             }

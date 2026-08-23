@@ -23,11 +23,7 @@ pub const ICON_SIZE: u32 = 96;
 
 /// 提取磁盘上真实文件的系统图标(exe / lnk 目标等)。
 pub fn extract_file_icon(path: &Path) -> Option<IconImage> {
-    let wide: Vec<u16> = path
-        .to_string_lossy()
-        .encode_utf16()
-        .chain(Some(0))
-        .collect();
+    let wide = crate::shell::os_str_to_wide(path.as_os_str());
     extract_shell_icon(&wide, FILE_FLAGS_AND_ATTRIBUTES(0), SHGFI_SYSICONINDEX)
 }
 
@@ -35,7 +31,7 @@ pub fn extract_file_icon(path: &Path) -> Option<IconImage> {
 /// `name` 只需是个合法文件名(如 "folder" / "file"),shell 按 `attrs`
 /// 返回该类的通用图标。
 pub fn extract_virtual_icon(name: &str, attrs: FILE_FLAGS_AND_ATTRIBUTES) -> Option<IconImage> {
-    let wide: Vec<u16> = name.encode_utf16().chain(Some(0)).collect();
+    let wide = crate::shell::to_wide(name);
     extract_shell_icon(&wide, attrs, SHGFI_SYSICONINDEX | SHGFI_USEFILEATTRIBUTES)
 }
 
