@@ -9,8 +9,9 @@
 //! - 查询:`WM_COPYDATA`,`dwData = 18`,负载为 pack(1) 的 QUERY2
 //!   (7 个 u32 头 + 以 NUL 结尾的 UTF-16 搜索串);
 //! - 应答:Everything 把 WM_COPYDATA 发回我们指定的 reply_hwnd,`dwData`
-//!   回声我们给的 id(官方 dll 用 0),负载为 pack(1) 的 LIST2
-//!   (5 个 u32 头 + ITEM2[numitems](flags, data_offset) + 变长数据);
+//!   回声 QUERY2 里我们给的 reply id(逐查询递增,见 CURRENT_REPLY_ID),
+//!   负载为 pack(1) 的 LIST2(5 个 u32 头 + ITEM2[numitems](flags,
+//!   data_offset) + 变长数据);
 //! - 变长数据按 request flag 位升序排列:字符串 = u32 字符数(不含
 //!   NUL)+ 文本;SIZE/DATE = 8 字节。所有读取先查边界。
 //!
@@ -37,8 +38,6 @@ const EVERYTHING_WNDCLASS: &[u16] = &[
 const EVERYTHING_WM_IPC: u32 = 0x0400; // WM_USER
 const IPC_GET_MAJOR_VERSION: usize = 0;
 const IPC_COPYDATA_QUERY2W: usize = 18;
-/// 应答 WM_COPYDATA 的 dwData:任意值,Everything 原样回声;官方 dll 用 0。
-const REPLY_ID: usize = 0;
 const SORT_NAME_ASCENDING: u32 = 1; // SDK:名字升序永远无性能损失
 const REQ_FULL_PATH_AND_NAME: u32 = 0x04;
 const REQ_SIZE: u32 = 0x10;
@@ -181,6 +180,21 @@ thread_local! {
     /// 应答负载暂存(wndproc 与泵同线程,无需锁)。
     static REPLY_STASH: RefCell<Option<Vec<u8>>> = const { RefCell::new(None) };
     static REPLY_TIMED_OUT: Cell<bool> = const { Cell::new(false) };
+    /// 当前在途查询的应答回声 id(写进 QUERY2 的 reply 字段,
+    /// Everything 原样放回应答 WM_COPYDATA 的 dwData)。逐查询递增,
+    /// wndproc 只认当前 id:上一次超时查询的迟到应答进的是同一个
+    /// 应答窗口,没有这层过滤会被下一次往返当成自己的结果收下。
+    static CURRENT_REPLY_ID: Cell<u32> = const { Cell::new(0) };
+}
+
+/// 分配本次查询的回声 id(wrapping:回绕无碍,要排除的只有
+/// 紧邻的上一次迟到应答)。
+fn next_reply_id() -> u32 {
+    CURRENT_REPLY_ID.with(|c| {
+        let id = c.get().wrapping_add(1);
+        c.set(id);
+        id
+    })
 }
 
 fn ipc_thread_main(
@@ -219,7 +233,8 @@ fn ipc_thread_main(
 /// 单次查询的完整往返:可用性检查 → 发 QUERY2W → 泵等应答/超时 → 解析。
 fn round_trip(window: HWND, search: &str, max_results: u32) -> Result<Vec<FileEntry>, ModuleError> {
     let everything = find_everything()?;
-    let query = build_query(window, search, max_results);
+    let reply_id = next_reply_id();
+    let query = build_query(window, reply_id, search, max_results);
     REPLY_STASH.with(|s| *s.borrow_mut() = None);
     REPLY_TIMED_OUT.with(|t| t.set(false));
     unsafe {
@@ -294,12 +309,13 @@ fn find_everything() -> Result<HWND, ModuleError> {
 }
 
 /// QUERY2(pack 1):7 个 u32 头 + NUL 结尾的 UTF-16 搜索串。
-fn build_query(reply: HWND, search: &str, max_results: u32) -> Vec<u8> {
-    let wide: Vec<u16> = search.encode_utf16().chain(Some(0)).collect();
+/// `reply_id` 是回声 id:Everything 把它放回应答的 dwData。
+fn build_query(reply: HWND, reply_id: u32, search: &str, max_results: u32) -> Vec<u8> {
+    let wide = cue_util_win::shell::to_wide(search);
     let mut buf = Vec::with_capacity(28 + wide.len() * 2);
     let mut push = |v: u32| buf.extend_from_slice(&v.to_le_bytes());
     push(reply.0 as u32); // SDK:x64 下窗口句柄也只有效于低 32 位
-    push(REPLY_ID as u32);
+    push(reply_id);
     push(0); // search_flags:Everything 默认(子串、忽略大小写)
     push(0); // offset
     push(max_results);
@@ -320,17 +336,24 @@ fn parse_list2(bytes: &[u8]) -> Result<Vec<FileEntry>, ModuleError> {
     if bytes.len() < 20 {
         return Err(bad("头部不足 20 字节"));
     }
-    let rd = |o: usize| u32::from_le_bytes(bytes[o..o + 4].try_into().unwrap());
-    let num = rd(4) as usize;
-    let request_flags = rd(12);
-    let items_end = 20 + num * 8;
+    // 一切读取经 get():上面与下面的边界检查若日后被改漏,
+    // 这里也只是 None → Err,永不 panic(外部数据纪律 §63)。
+    let rd = |o: usize| -> Option<u32> {
+        Some(u32::from_le_bytes(bytes.get(o..o + 4)?.try_into().ok()?))
+    };
+    let num = rd(4).ok_or_else(|| bad("头部不足 20 字节"))? as usize;
+    let request_flags = rd(12).ok_or_else(|| bad("头部不足 20 字节"))?;
+    let items_end = num
+        .checked_mul(8)
+        .and_then(|t| t.checked_add(20))
+        .ok_or_else(|| bad("条目数溢出"))?;
     if bytes.len() < items_end {
         return Err(bad("条目表越界"));
     }
     let mut out = Vec::with_capacity(num);
     for i in 0..num {
-        let flags = rd(20 + i * 8);
-        let mut p = rd(24 + i * 8) as usize;
+        let flags = rd(20 + i * 8).ok_or_else(|| bad("条目表越界"))?;
+        let mut p = rd(24 + i * 8).ok_or_else(|| bad("条目表越界"))? as usize;
         let mut path: Option<String> = None;
         let mut size: Option<u64> = None;
         let mut modified: Option<SystemTime> = None;
@@ -437,7 +460,10 @@ unsafe extern "system" fn reply_wndproc(
         match msg {
             WM_COPYDATA => {
                 let cds = &*(lparam.0 as *const COPYDATASTRUCT);
-                if cds.dwData == REPLY_ID && !cds.lpData.is_null() {
+                // 只收当前在途查询的回声:迟到应答(旧 id)直接丢弃,
+                // 不 stash、不退出泵——等的是本次应答或超时。
+                let current = CURRENT_REPLY_ID.with(|id| id.get() as usize);
+                if cds.dwData == current && !cds.lpData.is_null() {
                     let bytes =
                         std::slice::from_raw_parts(cds.lpData as *const u8, cds.cbData as usize)
                             .to_vec();
@@ -464,10 +490,10 @@ mod tests {
     #[test]
     fn query_layout_matches_sdk() {
         let hwnd = HWND(0x11223344 as *mut core::ffi::c_void);
-        let buf = build_query(hwnd, "cue", 8);
+        let buf = build_query(hwnd, 0xAABBCCDD, "cue", 8);
         let rd = |o: usize| u32::from_le_bytes(buf[o..o + 4].try_into().unwrap());
         assert_eq!(rd(0), 0x11223344);
-        assert_eq!(rd(4), REPLY_ID as u32);
+        assert_eq!(rd(4), 0xAABBCCDD); // 回声 id 原样进头部
         assert_eq!(rd(8), 0); // search flags
         assert_eq!(rd(12), 0); // offset
         assert_eq!(rd(16), 8); // max_results
@@ -545,6 +571,15 @@ mod tests {
             file.modified,
             Some(SystemTime::UNIX_EPOCH + Duration::from_secs(100))
         );
+    }
+
+    /// 回声 id 逐查询递增并记住当前值(wndproc 凭它丢迟到应答)。
+    #[test]
+    fn reply_id_advances_and_sticks() {
+        let first = next_reply_id();
+        let second = next_reply_id();
+        assert_eq!(second, first.wrapping_add(1));
+        CURRENT_REPLY_ID.with(|c| assert_eq!(c.get(), second));
     }
 
     /// 截断/畸形应答一律 Err,不 panic。

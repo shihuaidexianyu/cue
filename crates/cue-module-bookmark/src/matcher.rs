@@ -1,5 +1,7 @@
 //! fuzzy 匹配与打分。复制自 cue-module-app(Rule of Three
-//! 第二次使用, 允许重复;第三个消费者(FileModule)落地时下沉 util crate。
+//! 第二次使用,允许重复)。当初预测的第三个消费者 FileModule
+//! 最终走 Everything(不做本地 fuzzy),第三处复制暂未出现,
+//! 故维持重复、不下沉。
 //! 打分倾向:前缀命中 > 连续命中 > 词首命中 > 离散命中;键越短越好。
 //! 手写实现而非引入 nucleo:catalog 规模(千级)× 键数(3)下,
 //! 线性扫描远低于搜索 P95 < 15 ms 的预算。

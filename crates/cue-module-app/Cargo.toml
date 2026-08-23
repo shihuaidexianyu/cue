@@ -8,7 +8,6 @@ cue-protocol.workspace = true
 cue-util-win.workspace = true
 futures.workspace = true
 pinyin.workspace = true
-windows-future.workspace = true
 
 [dev-dependencies]
 image = "0.25"
@@ -18,13 +17,7 @@ workspace = true
 features = [
     "Win32_Foundation",
     "Win32_UI_Shell",
-    "Win32_UI_WindowsAndMessaging",
-    "Win32_UI_Controls",
     "Win32_System_Com",
-    "Win32_System_Com_StructuredStorage",
-    "Win32_System_Registry",
-    "Win32_Storage_FileSystem",
-    "Win32_Graphics_Gdi",
     "Management_Deployment",
     "ApplicationModel",
     "ApplicationModel_Core",

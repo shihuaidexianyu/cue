@@ -183,11 +183,13 @@ fn parse_fragments(content: &str) -> Result<Vec<String>, String> {
 
 /// 片段 → Everything 否定子句:含反斜杠的词按全路径子串匹配,
 /// `!"…"` 即"路径不含该片段"。带引号容忍空格;大小写不敏感。
+/// 含 `"` 的片段直接丢弃:Everything 查询语法没有引号转义,
+/// 放行会拆散引号配对、打烂整条子句(与空片段同按"不适用"处理)。
 fn clause_from_fragments(frags: &[String]) -> String {
     frags
         .iter()
         .map(|f| f.trim())
-        .filter(|f| !f.is_empty())
+        .filter(|f| !f.is_empty() && !f.contains('"'))
         .map(|f| format!("!\"{f}\""))
         .collect::<Vec<_>>()
         .join(" ")
@@ -223,13 +225,18 @@ struct ExcludeState {
 
 /// 后台线程侧:mtime 变了才重读文件、重编译子句;stat/读失败
 /// 或 TOML 语法错误保留旧子句(编辑器里的半保存状态不该打烂
-/// 搜索)。返回当前子句。
+/// 搜索)。两阶段:先快照路径与已知 mtime,IO 在锁外做,提交时
+/// 再锁——并发查询重复读同一版本无害(同内容幂等,后到覆盖)。
 fn refreshed_clause(state: &Mutex<ExcludeState>) -> String {
-    let path = state.lock().unwrap().path.clone();
+    let (path, known_mtime) = {
+        let g = state.lock().unwrap();
+        (g.path.clone(), g.mtime)
+    };
     if let Some(p) = path {
         let mtime = std::fs::metadata(&p).and_then(|m| m.modified()).ok();
-        let stale = mtime.is_some() && mtime != state.lock().unwrap().mtime;
-        if stale && let Ok(content) = std::fs::read_to_string(&p) {
+        if mtime.is_some() && mtime != known_mtime
+            && let Ok(content) = std::fs::read_to_string(&p)
+        {
             let mut g = state.lock().unwrap();
             match build_clause(&content) {
                 Ok(clause) => g.clause = clause,

@@ -44,7 +44,9 @@ pub struct CatalogCache {
 }
 
 struct State {
-    entries: Vec<Arc<BookmarkEntry>>,
+    /// 整表一个 Arc:查询每次取快照只 clone 一次 Arc,而不是
+    /// 逐条 bump 上千个条目的引用计数。
+    entries: Arc<Vec<Arc<BookmarkEntry>>>,
     fingerprints: Fingerprints,
 }
 
@@ -52,7 +54,7 @@ impl CatalogCache {
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
             state: Mutex::new(State {
-                entries: Vec::new(),
+                entries: Arc::new(Vec::new()),
                 fingerprints: Vec::new(),
             }),
         })
@@ -91,12 +93,13 @@ impl CatalogCache {
         }
         entries.sort_by(|a, b| a.title_lower.cmp(&b.title_lower));
         let mut state = self.state.lock().unwrap();
-        state.entries = entries;
+        state.entries = Arc::new(entries);
         state.fingerprints = fingerprints;
     }
 
-    pub fn entries(&self) -> Vec<Arc<BookmarkEntry>> {
-        self.state.lock().unwrap().entries.clone()
+    /// 当前快照:单 Arc clone;刷新换表后旧快照照常可用。
+    pub fn entries(&self) -> Arc<Vec<Arc<BookmarkEntry>>> {
+        Arc::clone(&self.state.lock().unwrap().entries)
     }
 }
 

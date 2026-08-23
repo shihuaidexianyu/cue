@@ -211,7 +211,7 @@ impl LauncherModule for AppModule {
                     .file_name()
                     .map(|f| f.to_string_lossy().into_owned())
                     .unwrap_or_default(),
-                LaunchTarget::Packaged { .. } => "Packaged app".to_string(),
+                LaunchTarget::Packaged { .. } => "商店应用".to_string(),
             }
             .into(),
         );

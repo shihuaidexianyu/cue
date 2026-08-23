@@ -15,13 +15,15 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
 enum Slot {
-    Pending,
+    /// 提取在途 + 等它的行。同一 key 可被多行共享(dedup 偏好
+    /// 保留重复项,同 exe 的行很常见):每行都登记进等待名单,
+    /// 完成时整单失效重画——只记首行的话兄弟行永远停在空槽。
+    Pending(Vec<ItemId>),
     Failed,
     Ready(Arc<IconImage>),
 }
 
 struct Request {
-    item_id: ItemId,
     key: String,
     exe: PathBuf,
 }
@@ -55,16 +57,19 @@ impl IconPipeline {
     /// 未命中登记 Pending 并投递提取请求,本帧返回 None(留空槽位)。
     pub fn get_or_queue(&self, item_id: ItemId, key: &str, exe: &Path) -> Option<ResultIcon> {
         let mut cache = self.cache.lock().unwrap();
-        match cache.get(key) {
+        match cache.get_mut(key) {
             // IconImage 内 rgba 是 Arc<[u8]>,clone 保持指针不变——
             // UI 按该指针缓存纹理。
             Some(Slot::Ready(icon)) => Some(ResultIcon::Raster((**icon).clone())),
-            Some(Slot::Pending) | Some(Slot::Failed) => None,
+            Some(Slot::Pending(waiting)) => {
+                waiting.push(item_id);
+                None
+            }
+            Some(Slot::Failed) => None,
             None => {
-                cache.insert(key.to_string(), Slot::Pending);
+                cache.insert(key.to_string(), Slot::Pending(vec![item_id]));
                 if let Some(tx) = &self.tx {
                     let _ = tx.send(Request {
-                        item_id,
                         key: key.to_string(),
                         exe: exe.to_path_buf(),
                     });
@@ -103,8 +108,12 @@ fn worker_loop(
             let mut cache = cache.lock().unwrap();
             match icon {
                 Some(icon) => {
-                    cache.insert(req.key, Slot::Ready(Arc::new(icon)));
-                    ready.push(req.item_id);
+                    // insert 返回旧槽:等待名单整单取出,广播失效。
+                    if let Some(Slot::Pending(waiting)) =
+                        cache.insert(req.key, Slot::Ready(Arc::new(icon)))
+                    {
+                        ready = waiting;
+                    }
                 }
                 // 负缓存:失败不重试(图标缺失不是致命问题)
                 None => {

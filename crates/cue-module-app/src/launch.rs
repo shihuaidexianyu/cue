@@ -57,13 +57,9 @@ pub fn reveal_location(target: &LaunchTarget) -> Result<(), ModuleError> {
     }
 }
 
-fn to_wide(s: &str) -> Vec<u16> {
-    s.encode_utf16().chain(Some(0)).collect()
-}
-
 fn launch_packaged(aumid: &str) -> Result<(), ModuleError> {
     let _com = ComGuard::new();
-    let aumid_w = to_wide(aumid);
+    let aumid_w = cue_util_win::shell::to_wide(aumid);
     unsafe {
         let mgr: IApplicationActivationManager =
             CoCreateInstance(&ApplicationActivationManager, None, CLSCTX_ALL)

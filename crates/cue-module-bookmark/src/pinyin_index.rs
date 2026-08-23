@@ -1,5 +1,6 @@
 //! 拼音索引:全拼 + 首字母。复制自 cue-module-app(见该 crate
-//! matcher.rs 的 Rule of Three 注释);第三个消费者落地时下沉 util crate。
+//! matcher.rs 的 Rule of Three 注释);预测的第三个消费者
+//! (FileModule)走 Everything,第三处复制暂未出现,维持重复。
 use pinyin::ToPinyin;
 
 /// 返回 (全拼键, 首字母键)。ASCII 字符不进拼音键——

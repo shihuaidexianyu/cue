@@ -309,10 +309,10 @@ impl LauncherModule for SystemModule {
         let spec = item.downcast_ref::<&'static ActionSpec>().copied();
         Box::pin(async move {
             let Some(spec) = spec else {
-                return ModuleOutcome::failed(ModuleError::InvalidState("system: 未知条目".into()));
+                return ModuleOutcome::failed(ModuleError::ActivationFailed("system: 未知条目".into()));
             };
             if action != ActionId::PRIMARY {
-                return ModuleOutcome::failed(ModuleError::InvalidState("system: 未知动作".into()));
+                return ModuleOutcome::failed(ModuleError::ActivationFailed("system: 未知动作".into()));
             }
             match exec::run(spec.kind) {
                 Ok(()) => ModuleOutcome::success(
