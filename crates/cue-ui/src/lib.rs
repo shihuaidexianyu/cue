@@ -22,13 +22,14 @@ use std::sync::Arc;
 /// `Arc<[u8]>`,指针即缓存 key,同一张图只转换/上传一次。
 type TextureCache = HashMap<usize, Arc<RenderImage>>;
 
-/// 视口内可见结果行数:窗口 420px - 内边距 12 - 输入行 36 - 分隔线 1,
-/// ÷ 行高 74px ≈ 5 行(宽松密度:图标 32px、标题 text_base)。结果可
-/// 多于可见行数(result_limit=20),超出的行由选择驱动的滚动窗口
-/// 覆盖(键盘 launcher 不需要真滚动条)。
+/// 视口内可见结果行数:窗口 450px - 内边距 12 - 输入区 61
+/// (输入行 48 + 分隔线上下各 6 呼吸空隙 + 线 1),÷ 行高 74px ≈ 5 行
+/// (宽松密度:图标 32px、标题 text_base)。结果可多于可见行数
+/// (result_limit=20),超出的行由选择驱动的滚动窗口覆盖
+/// (键盘 launcher 不需要真滚动条)。
 const VISIBLE_ROWS: usize = 5;
 
-/// 结果行高:74px × 5 行 = 370,恰填满结果区(371px)。
+/// 结果行高:74px × 5 行 = 370,结果区 377px 内留 7px 底隙。
 const ROW_HEIGHT: f32 = 74.0;
 
 /// 契约:协议侧是 RGBA8 直线 alpha;GPUI atlas 存 BGRA(见 gpui
@@ -328,7 +329,7 @@ impl LauncherView {
             div().child(format!("{}▍", self.input))
         };
         div()
-            .h(px(36.0))
+            .h(px(48.0))
             .flex()
             .items_center()
             .px(px(6.0))
@@ -351,14 +352,16 @@ impl LauncherView {
             .flex_col()
             .child(
                 div()
-                    .h(px(36.0))
+                    .h(px(48.0))
                     .flex()
                     .items_center()
                     .px(px(6.0))
                     .text_lg()
                     .child("设置"),
             )
-            .child(div().h(px(1.0)).w_full().bg(rgb(0x33333d)))
+            .child(div().h(px(6.0)))
+            .child(div().h(px(1.0)).w_full().bg(rgb(0x3d3d49)))
+            .child(div().h(px(6.0)))
             .child(list);
 
         if model.restart_required {
@@ -485,7 +488,7 @@ impl LauncherView {
                     .overflow_hidden()
                     .child(format!("动作 · {}", model.item_title)),
             )
-            .child(div().h(px(1.0)).w_full().bg(rgb(0x33333d)))
+            .child(div().h(px(1.0)).w_full().bg(rgb(0x3d3d49)))
             .child(list)
             .child(
                 div()
@@ -702,7 +705,9 @@ impl Render for LauncherView {
         if !in_settings {
             chrome = chrome
                 .child(self.render_input())
-                .child(div().h(px(1.0)).w_full().bg(rgb(0x33333d)));
+                .child(div().h(px(6.0)))
+                .child(div().h(px(1.0)).w_full().bg(rgb(0x3d3d49)))
+                .child(div().h(px(6.0)));
         }
         chrome.child(body)
     }

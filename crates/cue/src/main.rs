@@ -36,7 +36,7 @@ impl TaskSpawner for GpuiSpawner {
 }
 
 const WINDOW_WIDTH: i32 = 640;
-const WINDOW_HEIGHT: i32 = 420;
+const WINDOW_HEIGHT: i32 = 450;
 
 /// 开发期热键覆盖:`CUE_HOTKEY="ctrl+alt+k"`(格式同设置值)。
 /// 只影响本次进程的初始注册,不写入 settings.tsv——调试覆盖不应
