@@ -4,7 +4,10 @@
 //! cue-ui 不认识 Module,不认识 Win32;CoreEffect 的执行经由注入的
 //! effect handler 交给编排层(cue binary,§112)。
 
-use cue_core::{Core, CoreEffect, CoreEvent, SettingsModel, SettingsRow, KEY_HOTKEY};
+use cue_core::{
+    ActionMenuModel, ActionMenuRow, Core, CoreEffect, CoreEvent, SettingsModel, SettingsRow,
+    KEY_HOTKEY,
+};
 use cue_protocol::{
     Hotkey, IconImage, Key as ProtoKey, Modifiers as ProtoModifiers, ResultAccessory, ResultIcon,
     ResultPresentation, SettingKind, SettingValue, SystemIconId,
@@ -191,12 +194,19 @@ impl LauncherView {
             self.after_core_change(true, cx);
             return;
         }
+        // §18:动作菜单打开时是第三套语义(模态)。
+        if self.core.in_action_menu() {
+            self.on_action_menu_key_down(event);
+            self.after_core_change(true, cx);
+            return;
+        }
         let keystroke = &event.keystroke;
         let modifiers = &keystroke.modifiers;
 
         match keystroke.key.as_str() {
             "escape" => self.core.close_session(),
             "enter" => self.core.activate_selected(),
+            "tab" => self.core.open_action_menu(),
             "up" => self.core.select_prev(),
             "down" => self.core.select_next(),
             "backspace" => {
@@ -279,6 +289,21 @@ impl LauncherView {
             }
             // V1 没有 Integer/String/Enum/Path 类设置;出现后按 §39 再加编辑 UI。
             _ => {}
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // 动作菜单键盘(§18):↑↓ 选择,Enter 执行,Esc/Tab 返回。
+    // 模态:其余按键关掉菜单并被吞掉(不落进搜索输入)。
+    // ------------------------------------------------------------------
+
+    fn on_action_menu_key_down(&mut self, event: &KeyDownEvent) {
+        match event.keystroke.key.as_str() {
+            "escape" | "tab" => self.core.close_action_menu(),
+            "up" => self.core.action_menu_select_prev(),
+            "down" => self.core.action_menu_select_next(),
+            "enter" => self.core.activate_action_menu_selection(),
+            _ => self.core.close_action_menu(),
         }
     }
 
@@ -410,6 +435,62 @@ impl LauncherView {
             )
     }
 
+    // ------------------------------------------------------------------
+    // 动作菜单渲染(§18):整体替换结果区(同设置页模式),
+    // 头部标注菜单归属的选中项。
+    // ------------------------------------------------------------------
+
+    fn render_action_menu(&self, model: &ActionMenuModel) -> Div {
+        let mut list = div().flex().flex_col();
+        for (i, row) in model.rows.iter().enumerate() {
+            list = list.child(Self::render_action_row(row, i == model.selected));
+        }
+        div()
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .h(px(28.0))
+                    .flex()
+                    .items_center()
+                    .px(px(6.0))
+                    .text_xs()
+                    .text_color(rgb(0x9a9aa3))
+                    .child(format!("动作 · {}", model.item_title)),
+            )
+            .child(div().h(px(1.0)).w_full().bg(rgb(0x33333d)))
+            .child(list)
+            .child(
+                div()
+                    .px(px(6.0))
+                    .py(px(4.0))
+                    .text_xs()
+                    .text_color(rgb(0x6a6a75))
+                    .child("↑↓ 选择 · Enter 执行 · Esc/Tab 返回"),
+            )
+    }
+
+    fn render_action_row(row: &ActionMenuRow, is_selected: bool) -> Div {
+        let mut container = div()
+            .h(px(36.0))
+            .flex()
+            .items_center()
+            .rounded_md()
+            .px(px(6.0))
+            .when(is_selected, |d| d.bg(rgb(0x2d4f67)))
+            .child(div().flex_1().text_sm().child(row.label.to_string()));
+        if let Some(shortcut) = &row.shortcut {
+            container = container.child(
+                div()
+                    .flex_none()
+                    .text_xs()
+                    .text_color(rgb(0x9a9aa3))
+                    .child(shortcut.clone()),
+            );
+        }
+        container
+    }
+
     fn render_icon_slot(textures: &TextureCache, row: &ResultPresentation) -> Div {
         // icon 槽位:固定 32px,None 即留空,文字起点永不移动(§108)。
         let slot = div()
@@ -524,6 +605,9 @@ impl Render for LauncherView {
         let body: Div = if let Some(model) = self.core.settings_model() {
             // §41:设置模式整体替换搜索区(输入行也不再显示,见下方 chrome)。
             self.render_settings(&model)
+        } else if let Some(menu) = self.core.action_menu_model() {
+            // §18:动作菜单整体替换结果区(输入行保留,可见查询上下文)。
+            self.render_action_menu(&menu)
         } else {
             let mut col = div().flex().flex_col();
             if let Some(error) = &self.error {

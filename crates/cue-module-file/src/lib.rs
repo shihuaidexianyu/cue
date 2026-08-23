@@ -19,6 +19,10 @@ use cue_protocol::*;
 use everything::{EverythingBackend, FileEntry};
 use std::sync::{Arc, Mutex, OnceLock};
 
+/// §18 次级动作 ID(顺序即菜单顺序;PRIMARY = 打开)。
+const ACTION_REVEAL: ActionId = ActionId(1);
+const ACTION_COPY_PATH: ActionId = ActionId(2);
+
 /// §31:FileModule,trigger `/`。
 pub struct FileModule {
     descriptor: ModuleDescriptor,
@@ -176,13 +180,25 @@ impl LauncherModule for FileModule {
         p
     }
 
-    /// V1 只有 Open;打开所在文件夹等次级 action 等 P1 action menu。
+    /// §18:打开 / 打开所在文件夹 / 复制路径。
     fn actions(&self, _item: &ModuleItem) -> Vec<ActionDescriptor> {
-        vec![ActionDescriptor {
-            id: ActionId::PRIMARY,
-            label: "Open".into(),
-            shortcut: None,
-        }]
+        vec![
+            ActionDescriptor {
+                id: ActionId::PRIMARY,
+                label: "打开".into(),
+                shortcut: None,
+            },
+            ActionDescriptor {
+                id: ACTION_REVEAL,
+                label: "打开所在文件夹".into(),
+                shortcut: None,
+            },
+            ActionDescriptor {
+                id: ACTION_COPY_PATH,
+                label: "复制路径".into(),
+                shortcut: None,
+            },
+        ]
     }
 
     /// Open = ShellExecute 默认动词:文件由系统关联程序打开,文件夹
@@ -195,7 +211,15 @@ impl LauncherModule for FileModule {
                     "item payload is not a FileEntry".into(),
                 ));
             };
-            match cue_util_win::shell::shell_execute(&entry.path, None, None) {
+            let result = match action {
+                ActionId::PRIMARY => cue_util_win::shell::shell_execute(&entry.path, None, None),
+                ACTION_REVEAL => cue_util_win::shell::reveal_in_explorer(&entry.path),
+                ACTION_COPY_PATH => cue_util_win::clipboard::set_text(&entry.path),
+                _ => Err(ModuleError::ActivationFailed(format!(
+                    "unknown action {action:?}"
+                ))),
+            };
+            match result {
                 Ok(()) => ModuleOutcome::success(
                     SessionDisposition::Close,
                     Some(UsageRecordRequest {
@@ -247,6 +271,22 @@ mod tests {
         assert_eq!(format_size(5 * 1024 * 1024), "5.0 MB");
         assert_eq!(format_size(2 * 1024 * 1024 * 1024), "2.0 GB");
         assert_eq!(format_size(3 * 1024u64.pow(4)), "3.0 TB");
+    }
+
+    /// §18:打开 / 打开所在文件夹 / 复制路径,顺序即菜单顺序。
+    #[test]
+    fn actions_are_open_reveal_copy() {
+        let m = FileModule::new();
+        let file = ModuleItem::new(ItemId(1), entry("C:\\Alpha\\beta.txt", false, None));
+        let actions = m.actions(&file);
+        assert_eq!(
+            actions.iter().map(|a| a.id).collect::<Vec<_>>(),
+            [ActionId::PRIMARY, ACTION_REVEAL, ACTION_COPY_PATH]
+        );
+        assert_eq!(
+            actions.iter().map(|a| &*a.label).collect::<Vec<_>>(),
+            ["打开", "打开所在文件夹", "复制路径"]
+        );
     }
 
     #[test]

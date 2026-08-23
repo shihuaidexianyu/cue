@@ -26,6 +26,37 @@ pub fn launch(target: &LaunchTarget) -> Result<(), ModuleError> {
     }
 }
 
+/// §18 以管理员身份运行:仅 Win32 目标——packaged 应用由系统代理激活,
+/// 没有可提权的 exe,actions() 也不为它们声明此动作。
+pub fn launch_elevated(target: &LaunchTarget) -> Result<(), ModuleError> {
+    match target {
+        LaunchTarget::Win32 {
+            exe,
+            args,
+            working_dir,
+        } => cue_util_win::shell::shell_execute_elevated(
+            &exe.to_string_lossy(),
+            (!args.is_empty()).then_some(&**args),
+            working_dir.as_deref(),
+        ),
+        LaunchTarget::Packaged { aumid } => Err(ModuleError::ActivationFailed(format!(
+            "packaged app 不支持以管理员身份运行:{aumid}"
+        ))),
+    }
+}
+
+/// §18 打开所在位置:仅 Win32 目标(packaged 同上)。
+pub fn reveal_location(target: &LaunchTarget) -> Result<(), ModuleError> {
+    match target {
+        LaunchTarget::Win32 { exe, .. } => {
+            cue_util_win::shell::reveal_in_explorer(&exe.to_string_lossy())
+        }
+        LaunchTarget::Packaged { aumid } => Err(ModuleError::ActivationFailed(format!(
+            "packaged app 不支持打开所在位置:{aumid}"
+        ))),
+    }
+}
+
 fn to_wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(Some(0)).collect()
 }

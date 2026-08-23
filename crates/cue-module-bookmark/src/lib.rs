@@ -18,6 +18,9 @@ use cue_protocol::*;
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 
+/// §18 次级动作 ID(顺序即菜单顺序;PRIMARY = 打开)。
+const ACTION_COPY_URL: ActionId = ActionId(1);
+
 /// §117:BookmarkModule,trigger `b`。
 pub struct BookmarkModule {
     descriptor: ModuleDescriptor,
@@ -232,12 +235,20 @@ impl LauncherModule for BookmarkModule {
         p
     }
 
+    /// §18:打开 / 复制链接。
     fn actions(&self, _item: &ModuleItem) -> Vec<ActionDescriptor> {
-        vec![ActionDescriptor {
-            id: ActionId::PRIMARY,
-            label: "Open".into(),
-            shortcut: None,
-        }]
+        vec![
+            ActionDescriptor {
+                id: ActionId::PRIMARY,
+                label: "打开".into(),
+                shortcut: None,
+            },
+            ActionDescriptor {
+                id: ACTION_COPY_URL,
+                label: "复制链接".into(),
+                shortcut: None,
+            },
+        ]
     }
 
     /// 打开 = 从哪来回哪开(§117):来源浏览器 exe 带 URL 启动;
@@ -250,7 +261,14 @@ impl LauncherModule for BookmarkModule {
                     "item payload is not a BookmarkEntry".into(),
                 ));
             };
-            match open_in_browser(entry.browser, &entry.url) {
+            let result = match action {
+                ActionId::PRIMARY => open_in_browser(entry.browser, &entry.url),
+                ACTION_COPY_URL => cue_util_win::clipboard::set_text(&entry.url),
+                _ => Err(ModuleError::ActivationFailed(format!(
+                    "unknown action {action:?}"
+                ))),
+            };
+            match result {
                 Ok(()) => ModuleOutcome::success(
                     SessionDisposition::Close,
                     // §51:usage 身份 = {browser}:{url}。
@@ -288,6 +306,25 @@ mod tests {
         fn stat(&self, item_key: &str, _action: ActionId) -> Option<UsageStat> {
             self.0.get(item_key).copied()
         }
+    }
+
+    /// §18:打开 / 复制链接,顺序即菜单顺序。
+    #[test]
+    fn actions_are_open_and_copy_url() {
+        let m = BookmarkModule::new();
+        let item = ModuleItem::new(
+            ItemId(1),
+            entry("GitHub", "https://github.com/", Browser::Edge),
+        );
+        let actions = m.actions(&item);
+        assert_eq!(
+            actions.iter().map(|a| a.id).collect::<Vec<_>>(),
+            [ActionId::PRIMARY, ACTION_COPY_URL]
+        );
+        assert_eq!(
+            actions.iter().map(|a| &*a.label).collect::<Vec<_>>(),
+            ["打开", "复制链接"]
+        );
     }
 
     #[test]

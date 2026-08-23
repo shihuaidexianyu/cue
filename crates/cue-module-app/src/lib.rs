@@ -20,6 +20,10 @@ use icon::IconPipeline;
 use ready::CatalogCell;
 use std::sync::Arc;
 
+/// §18 次级动作 ID(顺序即菜单顺序;PRIMARY = 打开)。
+const ACTION_RUN_AS_ADMIN: ActionId = ActionId(1);
+const ACTION_OPEN_LOCATION: ActionId = ActionId(2);
+
 /// §65:AppModule 是 V1 的 required default module。
 pub struct AppModule {
     descriptor: ModuleDescriptor,
@@ -222,12 +226,30 @@ impl LauncherModule for AppModule {
         p
     }
 
-    fn actions(&self, _item: &ModuleItem) -> Vec<ActionDescriptor> {
-        vec![ActionDescriptor {
+    /// §18:打开 / 以管理员身份运行 / 打开所在位置。后两个仅 Win32
+    /// 目标——packaged 应用由系统代理激活,没有可提权/可定位的 exe。
+    fn actions(&self, item: &ModuleItem) -> Vec<ActionDescriptor> {
+        let mut actions = vec![ActionDescriptor {
             id: ActionId::PRIMARY,
-            label: "Open".into(),
+            label: "打开".into(),
             shortcut: None,
-        }]
+        }];
+        let is_win32 = item
+            .downcast_ref::<AppEntry>()
+            .is_some_and(|e| matches!(e.target, LaunchTarget::Win32 { .. }));
+        if is_win32 {
+            actions.push(ActionDescriptor {
+                id: ACTION_RUN_AS_ADMIN,
+                label: "以管理员身份运行".into(),
+                shortcut: None,
+            });
+            actions.push(ActionDescriptor {
+                id: ACTION_OPEN_LOCATION,
+                label: "打开所在位置".into(),
+                shortcut: None,
+            });
+        }
+        actions
     }
 
     fn activate(&mut self, item: &ModuleItem, action: ActionId) -> ActivationFuture {
@@ -238,7 +260,15 @@ impl LauncherModule for AppModule {
                     "item payload is not an AppEntry".into(),
                 ));
             };
-            match launch::launch(&entry.target) {
+            let result = match action {
+                ActionId::PRIMARY => launch::launch(&entry.target),
+                ACTION_RUN_AS_ADMIN => launch::launch_elevated(&entry.target),
+                ACTION_OPEN_LOCATION => launch::reveal_location(&entry.target),
+                _ => Err(ModuleError::ActivationFailed(format!(
+                    "unknown action {action:?}"
+                ))),
+            };
+            match result {
                 Ok(()) => ModuleOutcome::success(
                     SessionDisposition::Close,
                     Some(UsageRecordRequest {
@@ -249,5 +279,50 @@ impl LauncherModule for AppModule {
                 Err(e) => ModuleOutcome::failed(e),
             }
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn item_with(target: LaunchTarget) -> ModuleItem {
+        ModuleItem::new(ItemId(1), AppEntry::new("TestApp", target))
+    }
+
+    /// §18:Win32 应用有完整动作集(打开/以管理员身份运行/打开所在位置),
+    /// packaged 应用只有打开——后两个动作没有可作用的 exe。
+    #[test]
+    fn actions_depend_on_target_kind() {
+        let module = AppModule::new();
+        let win32 = item_with(LaunchTarget::Win32 {
+            exe: PathBuf::from(r"C:\Apps\test.exe"),
+            args: "".into(),
+            working_dir: None,
+        });
+        let actions = module.actions(&win32);
+        assert_eq!(
+            actions.iter().map(|a| a.id).collect::<Vec<_>>(),
+            [ActionId::PRIMARY, ACTION_RUN_AS_ADMIN, ACTION_OPEN_LOCATION]
+        );
+
+        let packaged = item_with(LaunchTarget::Packaged {
+            aumid: "Test!App".into(),
+        });
+        let actions = module.actions(&packaged);
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0].id, ActionId::PRIMARY);
+    }
+
+    /// packaged 目标走到次级动作只能来自 Core 与模块的版本错配——
+    /// 明确报错,不静默降级(§63)。
+    #[test]
+    fn secondary_actions_reject_packaged() {
+        let target = LaunchTarget::Packaged {
+            aumid: "Test!App".into(),
+        };
+        assert!(launch::launch_elevated(&target).is_err());
+        assert!(launch::reveal_location(&target).is_err());
     }
 }

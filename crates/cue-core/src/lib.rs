@@ -17,7 +17,7 @@ mod usage;
 pub use effects::CoreEffect;
 pub use event::{ActivationTicket, CoreEvent, HostEvent, QueryTicket};
 pub use registry::{ModuleRegistry, RegistryError};
-pub use session::{SessionId, SessionState};
+pub use session::{ActionMenuState, SessionId, SessionState};
 pub use settings::{
     ApplyHotkey, ApplyStartOnBoot, SettingsHost, SettingsModel, SettingsRow, SettingsViewState,
     KEY_HOTKEY, KEY_START_ON_BOOT,
@@ -392,11 +392,13 @@ impl Core {
             if module_id != s.active_module {
                 s.active_module = module_id.clone();
             }
-            // §102:输入变化立即清空——stale 结果永不可激活。
+            // §102:输入变化立即清空——stale 结果永不可激活;
+            // 动作菜单引用旧选中项的动作快照,一并关闭。
             s.generation += 1;
             s.results.clear();
             s.selected = None;
             s.error = None;
+            s.action_menu = None;
             (module_id, query)
         };
         self.run_query_with(module_id, query);
@@ -465,6 +467,96 @@ impl Core {
     }
 
     // ------------------------------------------------------------------
+    // §18 次级动作菜单(Tab 打开):状态在 session 上,键盘路由由
+    // UI 按 in_action_menu() 决定(同设置页模式)。
+    // ------------------------------------------------------------------
+
+    /// Tab:对选中项快照 Module::actions 并打开菜单。无选中项或
+    /// 模块返回空动作列表时不打开。
+    pub fn open_action_menu(&mut self) {
+        let opened = self
+            .session
+            .as_ref()
+            .is_some_and(|s| s.action_menu.is_some());
+        if opened {
+            return;
+        }
+        let Some((module_id, item)) = self
+            .session
+            .as_ref()
+            .and_then(|s| Some((s.active_module.clone(), s.selected_item()?.clone())))
+        else {
+            return;
+        };
+        let Some(module) = self.registry.module(&module_id) else {
+            return;
+        };
+        let actions = module.actions(&item);
+        if actions.is_empty() {
+            return;
+        }
+        let item_title = module.present(&item).title;
+        if let Some(s) = self.session.as_mut() {
+            s.action_menu = Some(ActionMenuState {
+                actions,
+                selected: 0,
+                item_title,
+            });
+        }
+    }
+
+    pub fn close_action_menu(&mut self) {
+        if let Some(s) = self.session.as_mut() {
+            s.action_menu = None;
+        }
+    }
+
+    pub fn in_action_menu(&self) -> bool {
+        self.session
+            .as_ref()
+            .is_some_and(|s| s.action_menu.is_some())
+    }
+
+    pub fn action_menu_select_next(&mut self) {
+        let Some(menu) = self.session.as_mut().and_then(|s| s.action_menu.as_mut()) else {
+            return;
+        };
+        menu.selected = (menu.selected + 1).min(menu.actions.len().saturating_sub(1));
+    }
+
+    pub fn action_menu_select_prev(&mut self) {
+        let Some(menu) = self.session.as_mut().and_then(|s| s.action_menu.as_mut()) else {
+            return;
+        };
+        menu.selected = menu.selected.saturating_sub(1);
+    }
+
+    /// 菜单的 UI 行模型(Core 出模型,UI 只渲染,同 §41 设置页)。
+    pub fn action_menu_model(&self) -> Option<ActionMenuModel> {
+        let menu = self.session.as_ref()?.action_menu.as_ref()?;
+        Some(ActionMenuModel {
+            item_title: menu.item_title.clone(),
+            rows: menu
+                .actions
+                .iter()
+                .map(|a| ActionMenuRow {
+                    label: a.label.clone(),
+                    // Shortcut 与 Hotkey 同形(protocol 注释:刻意不共类型);
+                    // 显示格式复用 Hotkey 的 Display。
+                    shortcut: a.shortcut.map(|s| {
+                        Hotkey {
+                            modifiers: s.modifiers,
+                            key: s.key,
+                        }
+                        .to_string()
+                    }),
+                })
+                .collect(),
+            selected: menu.selected,
+        })
+    }
+
+    // ------------------------------------------------------------------
     // Query / Activation(§94–96、§103)
     // ------------------------------------------------------------------
 
@@ -504,6 +596,25 @@ impl Core {
     }
 
     pub fn activate_selected(&mut self) {
+        self.activate_with(ActionId::PRIMARY);
+    }
+
+    /// Enter on 动作菜单:以菜单选中的 ActionId 激活当前选中项。
+    /// 菜单先关——失败时用户看到的是结果列表 + 错误横幅(§115)。
+    pub fn activate_action_menu_selection(&mut self) {
+        let Some(s) = self.session.as_mut() else {
+            return;
+        };
+        let Some(menu) = s.action_menu.take() else {
+            return;
+        };
+        let Some(action) = menu.actions.get(menu.selected).map(|a| a.id) else {
+            return;
+        };
+        self.activate_with(action);
+    }
+
+    fn activate_with(&mut self, action: ActionId) {
         let Some(s) = self.session.as_mut() else {
             return;
         };
@@ -522,7 +633,7 @@ impl Core {
         let Some(module) = self.registry.module_mut(&ticket.module_id) else {
             return;
         };
-        let fut = module.activate(&item, ActionId::PRIMARY);
+        let fut = module.activate(&item, action);
         let tx = self.event_tx.clone();
         self.spawner.spawn(Box::pin(async move {
             let outcome = fut.await;
@@ -584,6 +695,9 @@ impl Core {
                 s.error = Some(e);
             }
         }
+        // 结果集在菜单打开期间被替换:菜单的动作快照属于旧选中项,
+        // 继续用会把旧动作打到新结果上——关掉(§102 同旨)。
+        s.action_menu = None;
         true
     }
 
@@ -737,6 +851,20 @@ fn match_trigger(input: &str, trigger: &str) -> Option<String> {
         }
     }
     Some(rest.to_string())
+}
+
+/// §18 动作菜单的 UI 行模型(Core 出模型,UI 只渲染,同 §41 设置页)。
+pub struct ActionMenuModel {
+    /// 菜单归属的选中项标题(UI 头部展示)。
+    pub item_title: Arc<str>,
+    pub rows: Vec<ActionMenuRow>,
+    pub selected: usize,
+}
+
+pub struct ActionMenuRow {
+    pub label: Arc<str>,
+    /// 预格式化的快捷键提示(如 "Ctrl+Enter");模块未给则为 None。
+    pub shortcut: Option<String>,
 }
 
 /// §42 校验:kind 与值类型必须匹配。

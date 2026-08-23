@@ -1,9 +1,18 @@
-use cue_protocol::{ItemId, ModuleError, ModuleId, ModuleItem};
+use cue_protocol::{ActionDescriptor, ItemId, ModuleError, ModuleId, ModuleItem};
 
 /// Session 标识。跨 session 的旧结果由它保证必死(§96)——
 /// generation 在每个 session 内从 0 递增即可。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct SessionId(pub u64);
+
+/// §18 次级动作菜单(Tab 打开):打开时对选中项快照
+/// `Module::actions`(同步、廉价);输入变化或新结果提交即关(§102)。
+pub struct ActionMenuState {
+    pub actions: Vec<ActionDescriptor>,
+    pub selected: usize,
+    /// 菜单归属的选中项标题(打开时 present 快照,UI 头部展示)。
+    pub item_title: std::sync::Arc<str>,
+}
 
 /// §5.1 SessionState。
 pub struct SessionState {
@@ -17,6 +26,8 @@ pub struct SessionState {
     pub error: Option<ModuleError>,
     /// Enter 后 activation 在途,期间忽略重复 Enter。
     pub activation_in_flight: bool,
+    /// Some 时 UI 渲染动作菜单,↑↓/Enter/Esc 路由给菜单。
+    pub action_menu: Option<ActionMenuState>,
 }
 
 impl SessionState {
@@ -30,6 +41,7 @@ impl SessionState {
             selected: None,
             error: None,
             activation_in_flight: false,
+            action_menu: None,
         }
     }
 

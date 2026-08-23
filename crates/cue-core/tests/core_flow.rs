@@ -67,6 +67,10 @@ struct FakeModule {
     sink: Arc<Mutex<Option<ModuleEventSink>>>,
     /// 收到的查询原文(路由断言用)。
     queries: Arc<Mutex<Vec<String>>>,
+    /// actions() 返回的动作集(默认仅 PRIMARY)。
+    menu_actions: Vec<ActionDescriptor>,
+    /// activate 收到的 ActionId(动作路由断言用)。
+    activated: Arc<Mutex<Vec<ActionId>>>,
 }
 
 impl FakeModule {
@@ -83,6 +87,12 @@ impl FakeModule {
             pending_activations: Mutex::new(VecDeque::new()),
             sink: Arc::new(Mutex::new(None)),
             queries: Arc::new(Mutex::new(Vec::new())),
+            menu_actions: vec![ActionDescriptor {
+                id: ActionId::PRIMARY,
+                label: "Open".into(),
+                shortcut: None,
+            }],
+            activated: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -119,6 +129,15 @@ impl FakeModule {
 
     fn sink_handle(&self) -> Arc<Mutex<Option<ModuleEventSink>>> {
         Arc::clone(&self.sink)
+    }
+
+    fn with_menu_actions(mut self, actions: Vec<ActionDescriptor>) -> Self {
+        self.menu_actions = actions;
+        self
+    }
+
+    fn activated_handle(&self) -> Arc<Mutex<Vec<ActionId>>> {
+        Arc::clone(&self.activated)
     }
 }
 
@@ -192,14 +211,11 @@ impl LauncherModule for FakeModule {
     }
 
     fn actions(&self, _item: &ModuleItem) -> Vec<ActionDescriptor> {
-        vec![ActionDescriptor {
-            id: ActionId::PRIMARY,
-            label: "Open".into(),
-            shortcut: None,
-        }]
+        self.menu_actions.clone()
     }
 
     fn activate(&mut self, item: &ModuleItem, action: ActionId) -> ActivationFuture {
+        self.activated.lock().unwrap().push(action);
         if let Some(rx) = self.pending_activations.lock().unwrap().pop_front() {
             return Box::pin(async move {
                 rx.await.unwrap_or_else(|_| {
@@ -531,6 +547,160 @@ fn failed_activation_keeps_session_open_with_error() {
     assert!(core.session().is_some());
     assert!(core.session().unwrap().error.is_some());
     assert!(!core.take_effects().contains(&CoreEffect::HideLauncher));
+}
+
+// ---------------------------------------------------------------------
+// §18 次级动作菜单(Tab)
+// ---------------------------------------------------------------------
+
+fn three_actions() -> Vec<ActionDescriptor> {
+    vec![
+        ActionDescriptor {
+            id: ActionId::PRIMARY,
+            label: "Open".into(),
+            shortcut: None,
+        },
+        ActionDescriptor {
+            id: ActionId(1),
+            label: "Copy".into(),
+            shortcut: None,
+        },
+        ActionDescriptor {
+            id: ActionId(2),
+            label: "Reveal".into(),
+            shortcut: None,
+        },
+    ]
+}
+
+#[test]
+fn tab_opens_menu_on_selected_item_and_navigates() {
+    let module = FakeModule::new("fake").with_menu_actions(three_actions());
+    module.push_ready(&["Alpha", "Beta"]);
+    let (mut core, spawner) = setup(module);
+    let mut rx = core.take_event_receiver();
+
+    core.open_session();
+    spawner.poll_all();
+    drain(&mut core, &mut rx);
+
+    core.open_action_menu();
+    assert!(core.in_action_menu());
+    let model = core.action_menu_model().unwrap();
+    assert_eq!(
+        model.rows.iter().map(|r| &*r.label).collect::<Vec<_>>(),
+        ["Open", "Copy", "Reveal"]
+    );
+    assert_eq!(model.selected, 0);
+
+    core.action_menu_select_next();
+    core.action_menu_select_next();
+    core.action_menu_select_next(); // 钳制在末尾
+    assert_eq!(core.action_menu_model().unwrap().selected, 2);
+    core.action_menu_select_prev();
+    core.action_menu_select_prev();
+    core.action_menu_select_prev(); // 钳制在开头
+    assert_eq!(core.action_menu_model().unwrap().selected, 0);
+
+    // 关闭再打开:选择归零,菜单是新的快照。
+    core.close_action_menu();
+    assert!(!core.in_action_menu());
+    core.open_action_menu();
+    assert_eq!(core.action_menu_model().unwrap().selected, 0);
+}
+
+#[test]
+fn menu_requires_selected_item_and_nonempty_actions() {
+    // 无选中项:不开。
+    let module = FakeModule::new("fake");
+    module.push_ready(&[]);
+    let (mut core, spawner) = setup(module);
+    let mut rx = core.take_event_receiver();
+    core.open_session();
+    spawner.poll_all();
+    drain(&mut core, &mut rx);
+    core.open_action_menu();
+    assert!(!core.in_action_menu());
+    core.close_session();
+
+    // 模块返回空动作列表:不开。
+    let module = FakeModule::new("fake").with_menu_actions(vec![]);
+    module.push_ready(&["Alpha"]);
+    let (mut core, spawner) = setup(module);
+    let mut rx = core.take_event_receiver();
+    core.open_session();
+    spawner.poll_all();
+    drain(&mut core, &mut rx);
+    core.open_action_menu();
+    assert!(!core.in_action_menu());
+}
+
+#[test]
+fn menu_enter_activates_with_chosen_action_id() {
+    let module = FakeModule::new("fake").with_menu_actions(three_actions());
+    let activated = module.activated_handle();
+    module.push_ready(&["Alpha"]);
+    let (mut core, spawner) = setup(module);
+    let mut rx = core.take_event_receiver();
+
+    core.open_session();
+    spawner.poll_all();
+    drain(&mut core, &mut rx);
+
+    core.open_action_menu();
+    core.action_menu_select_next(); // "Copy" = ActionId(1)
+    core.activate_action_menu_selection();
+    // 菜单在激活发起时即关。
+    assert!(!core.in_action_menu());
+    spawner.poll_all();
+    drain(&mut core, &mut rx);
+
+    assert_eq!(*activated.lock().unwrap(), [ActionId(1)]);
+    // success + Close → session 关闭;usage 记在 ActionId(1) 名下(§103)。
+    assert!(core.session().is_none());
+    assert!(core
+        .usage_stat(&ModuleId::from_static("fake"), "Alpha", ActionId(1))
+        .is_some());
+    assert!(core
+        .usage_stat(&ModuleId::from_static("fake"), "Alpha", ActionId::PRIMARY)
+        .is_none());
+}
+
+#[test]
+fn plain_enter_still_activates_primary() {
+    let module = FakeModule::new("fake").with_menu_actions(three_actions());
+    let activated = module.activated_handle();
+    module.push_ready(&["Alpha"]);
+    let (mut core, spawner) = setup(module);
+    let mut rx = core.take_event_receiver();
+
+    core.open_session();
+    spawner.poll_all();
+    drain(&mut core, &mut rx);
+    core.activate_selected();
+    spawner.poll_all();
+    drain(&mut core, &mut rx);
+
+    assert_eq!(*activated.lock().unwrap(), [ActionId::PRIMARY]);
+}
+
+#[test]
+fn input_change_closes_menu() {
+    let module = FakeModule::new("fake").with_menu_actions(three_actions());
+    module.push_ready(&["Alpha"]);
+    module.push_ready(&["Beta"]);
+    let (mut core, spawner) = setup(module);
+    let mut rx = core.take_event_receiver();
+
+    core.open_session();
+    spawner.poll_all();
+    drain(&mut core, &mut rx);
+    core.open_action_menu();
+    assert!(core.in_action_menu());
+
+    // §102:输入变化,stale 结果与动作快照一并失效。
+    core.input_changed("x".into());
+    assert!(!core.in_action_menu());
 }
 
 // ---------------------------------------------------------------------
