@@ -1248,7 +1248,7 @@ checksum = "e2931af7e13dc045d8e9d26afccc6fa115d64e115c9c84b1166288b46f6782c2"
 
 [[package]]
 name = "cue"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "cue-core",
  "cue-module-app",
