@@ -4490,33 +4490,104 @@ E2E = 真机经托盘同路径消息(WM_CUE_TRAY_CMD/SETTINGS)
       窗口滚动且末行选中、详情条显示该行完整描述
 ```
 
-# 130. 跨 DPI 唤起放置(两步 SetWindowPos)
+# 130. 跨 DPI 唤起的双重缩放:问题、根因与两步 SetWindowPos
 
-Launcher 进程是 PerMonitorV2:唤起时把逻辑尺寸(640×450)按目标
-显示器 DPI 换算成物理像素后设窗。单次带尺寸的 SetWindowPos 跨显示器
-移动时,Windows 同步派发 WM_DPICHANGED,GPUI 会把 suggested rect
-(旧矩形 × 新旧 DPI 比)应用上去——我们已按目标 DPI 换算好的尺寸
-被再缩一次:150% 屏上胀成 1440×1012,100% 屏上缩成 427×300。
-症状:换屏后第一次唤起尺寸错、第二次才正常(不跨屏则无消息、无错缩)。
+## 问题
 
-## 决议
+真机双屏(主 2560×1440@150%、副 1920×1080@100%)上,唤起
+落点跟随前台窗口所在显示器,按目标 DPI 的尺寸换算本身正确——
+但**换屏后的第一次唤起尺寸总是错的,第二次才正常**:150% 屏上
+窗口胀成 1440×1012(应为 960×675),100% 屏上缩成 427×300
+(应为 640×450)。
+
+## 根因:我们换算一次,系统又"帮"我们换算一次
+
+三个事实的碰撞:
 
 ```text
-两步   = 第一步 SetWindowPos 移动 + 显示但 SWP_NOSIZE——DPI 跃迁与
-         GPUI 的 suggested rect 应用都发生在这一步(落在旧尺寸上,
-         无所谓);第二步在同一显示器上设最终尺寸,不再触发
-         WM_DPICHANGED,尺寸定音
-尺寸   = 必须显式设置:GPUI 以 show: false 创建窗口时用
-         CW_USEDEFAULT,请求尺寸只存在它内部的 initial_placement,
-         仅由 GPUI 自己的 activate() 补设;我们走原生 ShowWindow
-         唤起,那条路径永远不会执行
-DPI    = GetDpiForMonitor(MDT_EFFECTIVE_DPI) 按目标显示器换算;
-         失败回退窗口当前 DPI,再回退 96
-位置   = 活跃显示器(前台窗口所在)工作区水平居中、垂直约 1/4 处,
-         窗口过高时底边不出工作区
-明确不做 = 拦 WM_DPICHANGED 不让 GPUI 应用(GPUI 内部行为,
-           不与其争夺)、唤出后二次修正尺寸(可见跳变)
+① 进程是 PerMonitorV2,唤起时单次 SetWindowPos 同时完成
+  "跨屏移动 + 按目标 DPI 换算好的尺寸设置"
+② Windows 对跨 DPI 移动的窗口同步派发 WM_DPICHANGED,附
+  suggested rect = 窗口当前矩形 × (新DPI/旧DPI)——关键:
+  它按我们刚设进去的新尺寸起算
+③ GPUI 的 WM_DPICHANGED 处理器无条件应用 suggested rect
+  (这正是微软文档的 canonical 写法,GPUI 没有做错)
 ```
+
+于是尺寸被应用两次:150% 方向 960×675 × 1.5 = 1440×1012,
+100% 方向 640×450 × 96/144 = 427×300。第二次唤起不跨屏、
+无消息、无二次应用,所以永远正确——与"第一次错、第二次对"
+的症状精确吻合。
+
+## 方法:两步 SetWindowPos
+
+拦不住也不想拦 GPUI 应用 suggested rect,就让它打在无关紧要
+的时刻:
+
+```text
+第一步  SetWindowPos(移动 + 显示,SWP_NOSIZE 不带尺寸)
+        窗口以旧尺寸跨屏;WM_DPICHANGED 与 GPUI 的 suggested
+        rect 应用都发生在这一步,落在旧尺寸上,无所谓
+第二步  SetWindowPos(同一显示器上设最终尺寸)
+        已在目标屏,不再触发 WM_DPICHANGED,无人再来改,
+        尺寸定音
+```
+
+两个调用在同一消息处理里背靠背同步执行,中间不发生任何
+WM_PAINT——用户看不到中间尺寸,无闪烁。
+
+配套事实:
+
+```text
+尺寸必须显式设 = GPUI 以 show: false 创建窗口时用
+                 CW_USEDEFAULT,请求的尺寸只存在它内部的
+                 initial_placement,仅由 GPUI 自己的
+                 activate() 补设;我们走原生 ShowWindow
+                 唤起,那条路径永不执行
+DPI 换算       = GetDpiForMonitor(MDT_EFFECTIVE_DPI) 按目标
+                 显示器;失败回退窗口当前 DPI,再回退 96
+位置           = 活跃显示器工作区水平居中、垂直约 1/4 处,
+                 窗口过高时底边不出工作区
+```
+
+## 为什么有效且优雅
+
+有效性来自契约:WM_DPICHANGED 的语义是"DPI 跃迁期间尺寸归
+系统管"。想自己说了算,唯一合规时机就是跃迁完成之后——第一
+步跃迁、第二步定音,正是这个契约最直白的表达。
+
+优雅性用排除法确立——所有"看起来更优雅"的候选都被证伪:
+
+```text
+A 拦 WM_DPICHANGED 不让 GPUI 应用
+  GPUI 拥有 WndProc,拦截 = subclass 框架窗口;且 GPUI 在
+  同一消息里还更新渲染缩放因子(必需),只能拦一半;GPUI 是
+  crates.io 依赖,改它 = vendor 打补丁。最正面也最脆弱
+B 只移动,依赖系统 suggested rect 保持逻辑大小
+  首唤必死:窗口以 CW_USEDEFAULT 创建,首唤时真实尺寸根本
+  不是逻辑 640×450,系统"保持"的是错误基数——恰是原 bug
+  场景。"优雅"建立在隐藏耦合上
+C 尺寸延后一帧再设(PostMessage)
+  引入异步状态与时序耦合,且可能闪一帧错误尺寸
+D 单次带尺寸调用
+  即原 bug,被阴性对照实测证伪(411×291)
+```
+
+外部印证(同一答案被独立收敛到):
+
+```text
+微软 WM_DPICHANGED 文档:尺寸的唯一设定者应是 DPI 处理器,
+  自设尺寸与之并存即双重缩放
+SciChart(WPF):第一次 MoveWindow 只为触发框架 DPI 切换,
+  第二次才设最终位置——同款两步
+Wails #5677:WebView2 跨屏缩没,修法是 DPI 变更后重新断言
+  bounds——同族手法
+winit #4304:"程序化 resize 触发的 WM_DPICHANGED 该不该
+  忽略"——框架层抑制连 winit 都尚无定论(open issue)
+```
+
+零新增状态、无 hook、无 timer、同步确定性:这是约束下的
+最优解,不是妥协。
 
 ## 验证
 
