@@ -20,7 +20,13 @@ use std::sync::Arc;
 
 /// GPU 纹理按 `Arc` 指针缓存——module 对同一缓存图标复用同一
 /// `Arc<[u8]>`,指针即缓存 key,同一张图只转换/上传一次。
-type TextureCache = HashMap<usize, Arc<RenderImage>>;
+/// 条目同时钉住 key 的 Arc:地址永不释放,新分配不可能复址冒名
+/// (ABA);容量封顶整体清空,被清的行下一帧按未命中自然重传。
+type TextureCache = HashMap<usize, (Arc<[u8]>, Arc<RenderImage>)>;
+
+/// 纹理缓存上限(与 FileModule §124 的 CACHE_CAP 同纪律):
+/// 96×96×4 ≈ 37 KB/张,512 张 ≈ 19 MB。
+const TEXTURE_CACHE_CAP: usize = 512;
 
 /// 视口内可见结果行数:窗口 450px - 内边距 12 - 输入区 61
 /// (输入行 48 + 分隔线上下各 6 呼吸空隙 + 线 1),÷ 行高 74px ≈ 5 行
@@ -51,7 +57,8 @@ fn texture_key(icon: &IconImage) -> usize {
 }
 
 /// 设置页热键捕获:GPUI keystroke → 协议 Hotkey(OS-neutral 描述)。
-/// 纯修饰键或不可映射键名返回 None(视图继续等待下一次按键)。
+/// 不可映射键名返回 None(视图继续等待下一次按键;纯修饰键由
+/// GPUI 发成 ModifiersChangedEvent,根本进不了本函数)。
 fn capture_candidate(ks: &Keystroke) -> Option<Hotkey> {
     let key = ProtoKey::parse(ks.key.as_str())?;
     let m = &ks.modifiers;
@@ -156,6 +163,12 @@ impl LauncherView {
             if let Some(handler) = self.effect_handler.as_mut() {
                 handler(effect);
             }
+        }
+        // 设置页被热键 toggle / 失焦等外部路径关闭时,视图本地模态
+        // 一并复位——下次打开不复活陈旧的编辑/捕获态。
+        if !self.core.in_settings() {
+            self.capturing_hotkey = false;
+            self.editing_string = None;
         }
         cx.notify();
     }
@@ -313,7 +326,7 @@ impl LauncherView {
                     .core
                     .apply_setting(KEY_HOTKEY, SettingValue::Hotkey(hotkey));
             } else {
-                // 纯修饰键/不可映射键:继续等待下一次按键。
+                // 不可映射键:继续等待下一次按键。
                 self.capturing_hotkey = true;
             }
             return;
@@ -381,12 +394,16 @@ impl LauncherView {
         } else {
             div().child(format!("{}▍", self.input))
         };
+        // 长输入(大段粘贴)不换行、不溢出固定行高——裁剪显示,
+        // 不画进分隔线/结果区。
         div()
             .h(px(48.0))
             .flex()
             .items_center()
             .px(px(6.0))
             .text_lg()
+            .whitespace_nowrap()
+            .overflow_hidden()
             .child(content)
     }
 
@@ -395,7 +412,8 @@ impl LauncherView {
     //
     // 行是单行(label + value):描述集中到选中行下方的详情条——
     // 整页不再是满屏文字。行数超过窗口容量时按选中项跟随切片
-    // (无状态滚动窗口,语义同结果列表)。
+    // (结果列表的无状态变体:offset 纯函数于选中下标,选中行贴
+    // 窗口底;结果列表是状态化 scroll_offset,选中出视口才滚)。
     // ------------------------------------------------------------------
 
     fn render_settings(&self, model: &SettingsModel) -> Div {
@@ -493,7 +511,7 @@ impl LauncherView {
             SettingValue::String(s) | SettingValue::Enum(s) => match &self.editing_string {
                 // 行内编辑态:渲染 buffer + 光标,不渲染已提交值。
                 Some((k, buf)) if k.as_str() == row.key.as_ref() => format!("{buf}▏"),
-                // 空串有语义(§128 触发词留空 = 停用),不能渲染成空白。
+                // 空串渲染成空白会像渲染 bug,如实标注。
                 _ if s.is_empty() => "(空)".to_string(),
                 _ => s.clone(),
             },
@@ -614,7 +632,7 @@ impl LauncherView {
             }),
             Some(ResultIcon::Raster(icon)) => match textures.get(&texture_key(icon)) {
                 // 32px 显示尺寸;96px 源纹理由 GPUI 降采样。
-                Some(texture) => slot.child(img(Arc::clone(texture)).w(px(32.0)).h(px(32.0))),
+                Some((_, texture)) => slot.child(img(Arc::clone(texture)).w(px(32.0)).h(px(32.0))),
                 None => slot,
             },
         }
@@ -693,14 +711,19 @@ impl Render for LauncherView {
         {
             let rows = &self.rows;
             let textures = &mut self.icon_textures;
+            // 容量封顶:整体清空,本帧未命中的行随即重传。
+            if textures.len() >= TEXTURE_CACHE_CAP {
+                textures.clear();
+            }
             for row in rows {
                 if let Some(ResultIcon::Raster(icon)) = &row.icon
                     && let std::collections::hash_map::Entry::Vacant(e) =
                         textures.entry(texture_key(icon))
                 {
                     // 契约违约的图标不留空槽占位条目,下一帧重试。
+                    // key 的 Arc 随条目钉住,根除复址冒名。
                     if let Some(texture) = raster_to_texture(icon) {
-                        e.insert(texture);
+                        e.insert((Arc::clone(&icon.rgba), texture));
                     }
                 }
             }
