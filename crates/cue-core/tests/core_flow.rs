@@ -375,27 +375,46 @@ fn custom_trigger_reroutes_input() {
 }
 
 #[test]
-fn empty_trigger_disables_module_entry() {
-    let default_mod = FakeModule::new("default");
-    let default_queries = default_mod.queries_handle();
+fn empty_trigger_is_rejected() {
+    let bm = FakeModule::with_trigger("bm", "b");
+    let (mut core, _spawner) = setup_many(vec![FakeModule::new("default"), bm]);
+
+    // §128 用户决策:触发词必填,空(含 trim 后为空)拒绝。
+    assert!(
+        core.apply_setting("module.bm.trigger", SettingValue::String(String::new()))
+            .is_err()
+    );
+    assert!(
+        core.apply_setting("module.bm.trigger", SettingValue::String("   ".into()))
+            .is_err()
+    );
+}
+
+#[test]
+fn legacy_empty_trigger_falls_back_to_declared() {
+    // settings.tsv 里的空值(手工改坏/旧版残留):路由按声明值处理,
+    // 模块入口不丢——空值不可能经设置事务产生。
+    let dir = std::env::temp_dir().join(format!("cue-trigger-fallback-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("settings.tsv");
+    std::fs::write(&file, "cue-settings-v1\nmodule.bm.trigger\t\n").unwrap();
+
     let bm = FakeModule::with_trigger("bm", "b");
     let bm_queries = bm.queries_handle();
-    let (mut core, _spawner) = setup_many(vec![default_mod, bm]);
+    let spawner = ManualSpawner::new();
+    let mut registry = ModuleRegistry::new();
+    registry
+        .register(Box::new(FakeModule::new("default")))
+        .unwrap();
+    registry.register(Box::new(bm)).unwrap();
+    let config = CoreConfig {
+        settings_file: Some(file),
+        ..test_config()
+    };
+    let mut core = Core::new(config, registry, spawner).unwrap();
     let mut rx = core.take_event_receiver();
 
-    // 留空 = 停用该模块的触发入口(§128)。
-    core.apply_setting("module.bm.trigger", SettingValue::String(String::new()))
-        .unwrap();
     core.open_session();
-    core.input_changed("b gh".into());
-    drain(&mut core, &mut rx);
-
-    assert!(bm_queries.lock().unwrap().is_empty()); // 停用:不再收到任何查询
-    assert_eq!(default_queries.lock().unwrap().as_slice(), ["", "b gh"]);
-
-    // 改回来立即恢复。
-    core.apply_setting("module.bm.trigger", SettingValue::String("b".into()))
-        .unwrap();
     core.input_changed("b gh".into());
     drain(&mut core, &mut rx);
     assert_eq!(bm_queries.lock().unwrap().as_slice(), ["gh"]);
@@ -422,11 +441,7 @@ fn trigger_validation_rejects_bad_values() {
             .is_err()
     );
 
-    // 空值合法(= 停用);纯空白 trim 后同为空。
-    core.apply_setting("module.bm.trigger", SettingValue::String("   ".into()))
-        .unwrap();
-
-    // 拒绝项未生效;停用项已提交为空。
+    // 全部拒绝:值未被破坏。
     core.open_settings();
     let model = core.settings_model().unwrap();
     let row = model
@@ -434,7 +449,7 @@ fn trigger_validation_rejects_bad_values() {
         .iter()
         .find(|r| r.key.as_ref() == "module.bm.trigger")
         .unwrap();
-    assert_eq!(row.value, SettingValue::String(String::new()));
+    assert_eq!(row.value, SettingValue::String("b".to_string()));
 }
 
 // ---------------------------------------------------------------------

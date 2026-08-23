@@ -647,29 +647,22 @@ impl Core {
         (default, input.to_string())
     }
 
-    /// 生效触发词 = 设置值存在即为准:非空用之,空 = 停用该模块
-    /// 触发入口(§128);仅当 key 缺失(理论上不会发生,spec 注册
-    /// 即填默认值)才回落模块声明值。
+    /// 生效触发词 = 设置值(非空)?? 模块声明值(§128)。
+    /// 空值只会来自手工改坏的 settings.tsv(设置事务拒绝空),
+    /// 按"未设置"处理、回落声明值——自愈,不把模块入口弄丢。
     fn effective_trigger_of(&self, id: &ModuleId, declared: Option<&str>) -> Option<String> {
         let key = format!("module.{}.trigger", id.as_str());
         match self.settings.value(&key) {
-            Some(SettingValue::String(s)) => {
-                if s.is_empty() {
-                    None
-                } else {
-                    Some(s.clone())
-                }
-            }
+            Some(SettingValue::String(s)) if !s.is_empty() => Some(s.clone()),
             _ => declared.map(str::to_string),
         }
     }
 
-    /// 触发词校验(§128):空 = 停用,直接放行;非空要求无空白、
-    /// 长度封顶、不与其他模块的生效触发词冲突。
-    /// 纯 Core 校验——触发词不走模块 try_apply。
+    /// 触发词校验(§128):非空、无空白、长度封顶、不与其他模块的
+    /// 生效触发词冲突。纯 Core 校验——触发词不走模块 try_apply。
     fn validate_trigger(&self, self_key: &str, candidate: &str) -> Result<(), String> {
         if candidate.is_empty() {
-            return Ok(()); // 空 = 停用该模块的触发入口
+            return Err("触发词不能为空".into());
         }
         if candidate.chars().any(char::is_whitespace) {
             return Err("触发词不能包含空白字符".into());

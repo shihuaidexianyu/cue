@@ -119,7 +119,7 @@ impl SettingsHost {
             key: SettingKey(Arc::from(key.as_str())),
             label: "触发词".into(),
             description: Some(
-                "在输入开头键入它进入该模块;以字母/数字结尾时后面需跟空格(如 `b github`),标点类直接前缀匹配(如 `/路径`);留空 = 停用该模块的触发入口"
+                "在输入开头键入它进入该模块;以字母/数字结尾时后面需跟空格(如 `b github`),标点类直接前缀匹配(如 `/路径`)"
                     .into(),
             ),
             kind: SettingKind::String,
