@@ -11,6 +11,7 @@ use cue_core::{Core, CoreConfig, CoreEffect, CoreEvent, HostEvent, ModuleRegistr
 use cue_module_app::AppModule;
 use cue_module_bookmark::BookmarkModule;
 use cue_module_file::FileModule;
+use cue_module_system::SystemModule;
 use cue_protocol::Hotkey;
 use cue_ui::LauncherView;
 use cue_windows as win;
@@ -71,6 +72,10 @@ fn main() {
         registry
             .register(Box::new(FileModule::new()))
             .expect("register file module");
+        // SystemModule,触发词 `>`(固定系统动作,§126)。
+        registry
+            .register(Box::new(SystemModule::new()))
+            .expect("register system module");
 
         let storage_root = std::env::var("LOCALAPPDATA")
             .map(|p| PathBuf::from(p).join("CUE"))

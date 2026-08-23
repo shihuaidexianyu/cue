@@ -15,6 +15,7 @@ cue-windows.workspace = true
 cue-module-app.workspace = true
 cue-module-bookmark.workspace = true
 cue-module-file.workspace = true
+cue-module-system.workspace = true
 futures.workspace = true
 gpui.workspace = true
 

@@ -534,6 +534,13 @@ impl LauncherView {
                 SystemIconId::File => "📄",
                 SystemIconId::Folder => "📁",
                 SystemIconId::Generic => "▪",
+                SystemIconId::Lock => "🔒",
+                SystemIconId::Sleep => "😴",
+                SystemIconId::Hibernate => "💤",
+                SystemIconId::Logoff => "🚪",
+                SystemIconId::Restart => "🔄",
+                SystemIconId::Shutdown => "⏻",
+                SystemIconId::RecycleBin => "🗑",
             }),
             Some(ResultIcon::Raster(icon)) => match textures.get(&texture_key(icon)) {
                 // 32px 显示尺寸;96px 源纹理由 GPUI 降采样。

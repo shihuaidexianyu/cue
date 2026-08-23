@@ -61,13 +61,21 @@ impl IconImage {
     }
 }
 
-/// SystemIcon 逃生口。V1 只保留最小集合。
+/// SystemIcon 逃生口。前四个是 V1 最小集合;`Lock` 起为系统动作
+/// 模块(§126)的动作字形——协议自有语义,UI 决定具体字形(emoji)。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SystemIconId {
     App,
     File,
     Folder,
     Generic,
+    Lock,
+    Sleep,
+    Hibernate,
+    Logoff,
+    Restart,
+    Shutdown,
+    RecycleBin,
 }
 
 #[derive(Clone, Debug)]
