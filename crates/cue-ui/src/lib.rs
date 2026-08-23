@@ -78,6 +78,9 @@ pub struct LauncherView {
     /// 设置页的热键捕获态(视图本地):true 时下一次按键组合
     /// 成为 core.hotkey 候选。
     capturing_hotkey: bool,
+    /// 设置页 String 行的编辑缓冲(视图本地):Some 时键盘全部
+    /// 进缓冲,Enter 提交(走 Core 事务)、Esc 放弃。
+    editing_string: Option<String>,
     /// 测量探针:文本输入的时刻;下一次结果行非空时
     /// 打印 input→rows 时延(InputChanged → ResultState 提交的视图侧
     /// 上界,含事件泵与 present)。
@@ -118,6 +121,7 @@ impl LauncherView {
             effect_handler: None,
             icon_textures: HashMap::new(),
             capturing_hotkey: false,
+            editing_string: None,
             perf_input_at: None,
             scroll_offset: 0,
         }
@@ -189,7 +193,7 @@ impl LauncherView {
     fn on_key_down(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
         // 设置页与搜索页是两套键盘语义,Core 状态决定路由。
         if self.core.in_settings() {
-            self.on_settings_key_down(event);
+            self.on_settings_key_down(event, cx);
             self.after_core_change(true, cx);
             return;
         }
@@ -242,10 +246,15 @@ impl LauncherView {
     // ------------------------------------------------------------------
     // 设置页键盘:↑↓ 选择,Enter/Space 修改,Esc 返回。
     // 热键行进入捕获态:下一次组合键即候选,事务结果由 Core 模型回显。
+    // String 行进入编辑态:按键进缓冲,Enter 提交、Esc 放弃。
     // ------------------------------------------------------------------
 
-    fn on_settings_key_down(&mut self, event: &KeyDownEvent) {
+    fn on_settings_key_down(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
         let ks = &event.keystroke;
+        if self.editing_string.is_some() {
+            self.on_string_edit_key_down(event, cx);
+            return;
+        }
         if self.capturing_hotkey {
             self.capturing_hotkey = false;
             if ks.key.as_str() == "escape" {
@@ -272,6 +281,55 @@ impl LauncherView {
         }
     }
 
+    /// String 编辑态的键盘:与搜索页同一套文本录入(命名键优先,
+    /// key_char 兜底,space 显式插入,Ctrl+V 粘贴)。
+    fn on_string_edit_key_down(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
+        let ks = &event.keystroke;
+        let modifiers = &ks.modifiers;
+        match ks.key.as_str() {
+            "escape" => self.editing_string = None, // 放弃,不触碰 Core
+            "enter" => {
+                let Some(buffer) = self.editing_string.take() else {
+                    return;
+                };
+                let Some(model) = self.core.settings_model() else {
+                    return;
+                };
+                if let Some(row) = model.rows.get(model.selected) {
+                    let key = row.key.to_string();
+                    // 事务结果由 Core 模型回显(失败时错误进模型)。
+                    let _ = self.core.apply_setting(&key, SettingValue::String(buffer));
+                }
+            }
+            "backspace" => {
+                if let Some(buffer) = &mut self.editing_string {
+                    buffer.pop();
+                }
+            }
+            "space" if !modifiers.control && !modifiers.alt => {
+                if let Some(buffer) = &mut self.editing_string {
+                    buffer.push(' ');
+                }
+            }
+            "v" if modifiers.control && !modifiers.alt => {
+                if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text())
+                    && let Some(buffer) = &mut self.editing_string
+                {
+                    buffer.push_str(&text);
+                }
+            }
+            _ => {
+                if !modifiers.control
+                    && !modifiers.alt
+                    && let Some(text) = ks.key_char.clone()
+                    && let Some(buffer) = &mut self.editing_string
+                {
+                    buffer.push_str(&text);
+                }
+            }
+        }
+    }
+
     fn settings_activate_selected(&mut self) {
         let Some(model) = self.core.settings_model() else {
             return;
@@ -287,7 +345,10 @@ impl LauncherView {
             (SettingKind::Hotkey, _) => {
                 self.capturing_hotkey = true;
             }
-            // V1 没有 Integer/String/Enum/Path 类设置;出现后再加编辑 UI。
+            (SettingKind::String, SettingValue::String(s)) => {
+                self.editing_string = Some(s.clone());
+            }
+            // V1 没有 Integer/Enum/Path 类设置;出现后再加编辑 UI。
             _ => {}
         }
     }
@@ -377,7 +438,11 @@ impl LauncherView {
                 .py(px(4.0))
                 .text_xs()
                 .text_color(rgb(0x6a6a75))
-                .child("↑↓ 选择 · Enter 修改 · Esc 返回"),
+                .child(if self.editing_string.is_some() {
+                    "编辑中 · Enter 保存 · Esc 放弃"
+                } else {
+                    "↑↓ 选择 · Enter 修改 · Esc 返回"
+                }),
         )
     }
 
@@ -398,7 +463,28 @@ impl LauncherView {
                 }
             }
             SettingValue::Integer(i) => i.to_string(),
-            SettingValue::String(s) | SettingValue::Enum(s) => s.clone(),
+            SettingValue::String(s) => {
+                if is_selected && let Some(buffer) = &self.editing_string {
+                    // 编辑态展示缓冲尾部:输入发生在末尾,头部省略。
+                    const TAIL: usize = 36;
+                    let tail: String = buffer
+                        .chars()
+                        .rev()
+                        .take(TAIL)
+                        .collect::<Vec<_>>()
+                        .into_iter()
+                        .rev()
+                        .collect();
+                    if buffer.chars().count() > TAIL {
+                        format!("…{tail}▍")
+                    } else {
+                        format!("{tail}▍")
+                    }
+                } else {
+                    s.clone()
+                }
+            }
+            SettingValue::Enum(s) => s.clone(),
             SettingValue::Path(p) => p.display().to_string(),
         };
 
@@ -408,12 +494,22 @@ impl LauncherView {
             .flex_col()
             .justify_center()
             .overflow_hidden()
-            .child(div().text_sm().child(row.label.to_string()));
+            .child(
+                div()
+                    .text_sm()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
+                    .overflow_hidden()
+                    .child(row.label.to_string()),
+            );
         if let Some(desc) = &row.description {
             label_col = label_col.child(
                 div()
                     .text_xs()
                     .text_color(rgb(0x9a9aa3))
+                    .whitespace_nowrap()
+                    .text_ellipsis()
+                    .overflow_hidden()
                     .child(desc.to_string()),
             );
         }
@@ -429,8 +525,12 @@ impl LauncherView {
             .child(
                 div()
                     .flex_none()
+                    .max_w(px(320.0))
                     .text_xs()
                     .text_color(rgb(0x61afef))
+                    .whitespace_nowrap()
+                    .text_ellipsis()
+                    .overflow_hidden()
                     .child(value_text),
             )
     }
