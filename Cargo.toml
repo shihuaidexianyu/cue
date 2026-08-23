@@ -13,7 +13,7 @@ members = [
 ]
 
 [workspace.package]
-edition = "2021"
+edition = "2024"
 
 # crate 统一 cue- 前缀。`cue` 为 binary(composition root)。
 [workspace.dependencies]

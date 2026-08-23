@@ -13,14 +13,14 @@
 //! 候选替代是在 GPUI 层禁用该窗口的 text input 处理。
 
 use std::sync::atomic::{AtomicIsize, Ordering};
-use windows::core::{w, Error};
 use windows::Win32::Foundation::HWND;
 use windows::Win32::UI::Input::Ime::ImmAssociateContext;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    ActivateKeyboardLayout, GetKeyboardLayout, LoadKeyboardLayoutW, ACTIVATE_KEYBOARD_LAYOUT_FLAGS,
-    HKL, KLF_ACTIVATE,
+    ACTIVATE_KEYBOARD_LAYOUT_FLAGS, ActivateKeyboardLayout, GetKeyboardLayout, HKL, KLF_ACTIVATE,
+    LoadKeyboardLayoutW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId};
+use windows::core::{Error, w};
 
 /// 唤醒时记录的用户原布局(前台线程 HKL),hide 时恢复。
 static SAVED_LAYOUT: AtomicIsize = AtomicIsize::new(0);

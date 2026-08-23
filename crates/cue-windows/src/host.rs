@@ -9,11 +9,11 @@
 //! 无需子类化 GPUI 窗口,前台窗口变化且不是 Launcher 时通知 Core。
 
 use std::sync::atomic::{AtomicIsize, Ordering};
-use windows::core::{w, Error, PCWSTR};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows::Win32::UI::Accessibility::{SetWinEventHook, UnhookWinEvent, HWINEVENTHOOK};
+use windows::Win32::UI::Accessibility::{HWINEVENTHOOK, SetWinEventHook, UnhookWinEvent};
 use windows::Win32::UI::WindowsAndMessaging::*;
+use windows::core::{Error, PCWSTR, w};
 
 /// Host 上报给编排层的事件(由 cue binary 翻译成 Core 的 HostEvent)。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

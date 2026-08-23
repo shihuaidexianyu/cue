@@ -8,15 +8,15 @@
 use cue_protocol::IconImage;
 use std::path::Path;
 use std::sync::Arc;
-use windows::core::PCWSTR;
 use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::Storage::FileSystem::FILE_FLAGS_AND_ATTRIBUTES;
 use windows::Win32::UI::Controls::{IImageList, ILD_TRANSPARENT};
 use windows::Win32::UI::Shell::{
-    SHGetFileInfoW, SHGetImageList, SHFILEINFOW, SHGFI_FLAGS, SHGFI_SYSICONINDEX,
-    SHGFI_USEFILEATTRIBUTES, SHIL_JUMBO,
+    SHFILEINFOW, SHGFI_FLAGS, SHGFI_SYSICONINDEX, SHGFI_USEFILEATTRIBUTES, SHGetFileInfoW,
+    SHGetImageList, SHIL_JUMBO,
 };
 use windows::Win32::UI::WindowsAndMessaging::*;
+use windows::core::PCWSTR;
 
 /// 单尺寸 96px。
 pub const ICON_SIZE: u32 = 96;

@@ -4,9 +4,9 @@ use crate::catalog::{AppEntry, LaunchTarget};
 use cue_protocol::{LogLevel, ModuleLogger};
 use cue_util_win::com::ComGuard;
 use std::path::{Path, PathBuf};
-use windows::core::{Interface, PCWSTR};
-use windows::Win32::System::Com::{CoCreateInstance, IPersistFile, CLSCTX_INPROC_SERVER, STGM};
+use windows::Win32::System::Com::{CLSCTX_INPROC_SERVER, CoCreateInstance, IPersistFile, STGM};
 use windows::Win32::UI::Shell::{IShellLinkW, ShellLink};
+use windows::core::{Interface, PCWSTR};
 
 /// 枚举两个 Start Menu 根,解析全部 .lnk,返回未去重的 entry。
 /// 单个 lnk 失败只跳过并计数——外部数据永不 panic。

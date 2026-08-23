@@ -5,11 +5,11 @@
 use crate::catalog::LaunchTarget;
 use cue_protocol::ModuleError;
 use cue_util_win::com::ComGuard;
-use windows::core::PCWSTR;
-use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_ALL};
+use windows::Win32::System::Com::{CLSCTX_ALL, CoCreateInstance};
 use windows::Win32::UI::Shell::{
-    ApplicationActivationManager, IApplicationActivationManager, ACTIVATEOPTIONS,
+    ACTIVATEOPTIONS, ApplicationActivationManager, IApplicationActivationManager,
 };
+use windows::core::PCWSTR;
 
 pub fn launch(target: &LaunchTarget) -> Result<(), ModuleError> {
     match target {

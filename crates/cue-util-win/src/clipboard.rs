@@ -7,7 +7,7 @@ use windows::Win32::Foundation::{GlobalFree, HANDLE};
 use windows::Win32::System::DataExchange::{
     CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData,
 };
-use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
+use windows::Win32::System::Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalUnlock};
 use windows::Win32::System::Ole::CF_UNICODETEXT;
 
 /// 把 `text` 放进系统剪贴板(覆盖既有内容)。剪贴板被别的程序短暂

@@ -10,7 +10,7 @@ use cue_util_win::com::ComGuard;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{channel, Receiver, Sender};
+use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
@@ -165,8 +165,11 @@ mod tests {
                 ok += 1;
             }
         }
-        println!("== icon audit: {ok} ok, {} all-alpha-zero, {} >95% transparent, {extract_failed} extract failed ==",
-            zero_alpha.len(), partial.len());
+        println!(
+            "== icon audit: {ok} ok, {} all-alpha-zero, {} >95% transparent, {extract_failed} extract failed ==",
+            zero_alpha.len(),
+            partial.len()
+        );
         for s in &zero_alpha {
             println!("ZERO-ALPHA: {s}");
         }

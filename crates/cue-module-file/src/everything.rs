@@ -23,10 +23,10 @@ use futures::channel::oneshot;
 use std::cell::{Cell, RefCell};
 use std::sync::{Arc, Condvar, Mutex, Once};
 use std::time::{Duration, SystemTime};
-use windows::core::PCWSTR;
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::DataExchange::COPYDATASTRUCT;
 use windows::Win32::UI::WindowsAndMessaging::*;
+use windows::core::PCWSTR;
 
 // ---- 协议常量(everything_ipc.h) ----
 
@@ -499,7 +499,7 @@ mod tests {
         }
         data.extend_from_slice(&u64::MAX.to_le_bytes()); // size:文件夹无
         data.extend_from_slice(&0u64.to_le_bytes()); // date:无
-                                                     // item 1:文件 "C:\\Alpha\\beta.txt",size=1234,date=某时刻
+        // item 1:文件 "C:\\Alpha\\beta.txt",size=1234,date=某时刻
         let off1 = 36 + data.len() as u32;
         let p1: Vec<u16> = "C:\\Alpha\\beta.txt"
             .encode_utf16()

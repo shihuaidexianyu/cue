@@ -5,9 +5,9 @@
 //! 多尺寸 ICO 资源由系统按请求尺寸挑最近条目,避免模糊缩放。
 //! 资源缺失(如不带资源的测试宿主)返回 None,调用方走兜底。
 
-use windows::core::PCWSTR;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows::Win32::UI::WindowsAndMessaging::{LoadImageW, HICON, IMAGE_ICON, LR_DEFAULTCOLOR};
+use windows::Win32::UI::WindowsAndMessaging::{HICON, IMAGE_ICON, LR_DEFAULTCOLOR, LoadImageW};
+use windows::core::PCWSTR;
 
 /// 与 crates/cue/cue.rc 的资源 id 一致。
 const BRAND_ICON_ID: usize = 1;

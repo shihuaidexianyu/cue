@@ -3,10 +3,10 @@
 //! HWND 通过"按进程枚举顶层可见窗口"获得,刻意不依赖 GPUI 的内部 API
 //! (raw window handle),把 GPUI 版本漂移关在门外。
 
-use windows::core::{Error, BOOL};
 use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
 use windows::Win32::Graphics::Gdi::{InvalidateRect, UpdateWindow};
 use windows::Win32::UI::WindowsAndMessaging::*;
+use windows::core::{BOOL, Error};
 
 /// 枚举本进程的顶层窗口,返回 GPUI 主窗口的 HWND。
 ///

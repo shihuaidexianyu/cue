@@ -527,9 +527,10 @@ fn activation_from_old_session_does_not_close_new_session() {
     // usage 仍然记录,但 session B 不被误关。
     assert!(core.session().is_some());
     assert!(!core.take_effects().contains(&CoreEffect::HideLauncher));
-    assert!(core
-        .usage_stat(&ModuleId::from_static("fake"), "a-key", ActionId::PRIMARY)
-        .is_some());
+    assert!(
+        core.usage_stat(&ModuleId::from_static("fake"), "a-key", ActionId::PRIMARY)
+            .is_some()
+    );
 }
 
 #[test]
@@ -668,12 +669,14 @@ fn menu_enter_activates_with_chosen_action_id() {
     assert_eq!(*activated.lock().unwrap(), [ActionId(1)]);
     // success + Close → session 关闭;usage 记在 ActionId(1) 名下。
     assert!(core.session().is_none());
-    assert!(core
-        .usage_stat(&ModuleId::from_static("fake"), "Alpha", ActionId(1))
-        .is_some());
-    assert!(core
-        .usage_stat(&ModuleId::from_static("fake"), "Alpha", ActionId::PRIMARY)
-        .is_none());
+    assert!(
+        core.usage_stat(&ModuleId::from_static("fake"), "Alpha", ActionId(1))
+            .is_some()
+    );
+    assert!(
+        core.usage_stat(&ModuleId::from_static("fake"), "Alpha", ActionId::PRIMARY)
+            .is_none()
+    );
 }
 
 #[test]
@@ -835,7 +838,7 @@ fn hotkey_apply_failure_keeps_old_value() {
         .expect_err("must fail");
     assert!(err.contains("occupied"));
     assert_eq!(core.hotkey(), before); // 旧值保留
-                                       // 错误进入模型,UI 据此展示;再次成功 apply 后错误清除。
+    // 错误进入模型,UI 据此展示;再次成功 apply 后错误清除。
     let model = core.settings_model().unwrap();
     assert!(model.error.is_some());
 }
@@ -940,9 +943,10 @@ fn module_setting_transaction_reaches_module() {
     assert_eq!(row.value, SettingValue::Bool(false));
 
     // 未知模块设置 key 走 validate 拒绝。
-    assert!(core
-        .apply_setting("module.fake.nope", SettingValue::Bool(true))
-        .is_err());
+    assert!(
+        core.apply_setting("module.fake.nope", SettingValue::Bool(true))
+            .is_err()
+    );
 }
 
 #[test]
@@ -950,21 +954,24 @@ fn apply_setting_validates_type_and_value() {
     let (mut core, _spawner) = setup(FakeModule::new("fake"));
 
     // 类型不匹配
-    assert!(core
-        .apply_setting("core.hotkey", SettingValue::Bool(true))
-        .is_err());
+    assert!(
+        core.apply_setting("core.hotkey", SettingValue::Bool(true))
+            .is_err()
+    );
     // 取值不合法:无修饰键
     let no_mod = Hotkey {
         modifiers: Modifiers::NONE,
         key: Key::Space,
     };
-    assert!(core
-        .apply_setting("core.hotkey", SettingValue::Hotkey(no_mod))
-        .is_err());
+    assert!(
+        core.apply_setting("core.hotkey", SettingValue::Hotkey(no_mod))
+            .is_err()
+    );
     // 未知 key
-    assert!(core
-        .apply_setting("core.nope", SettingValue::Bool(true))
-        .is_err());
+    assert!(
+        core.apply_setting("core.nope", SettingValue::Bool(true))
+            .is_err()
+    );
     // 默认值未被破坏
     assert_eq!(core.hotkey(), Hotkey::default());
 }

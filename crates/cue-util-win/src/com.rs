@@ -4,7 +4,7 @@
 //! 但 MSDN 要求**每次成功调用(含 S_FALSE)都配对 CoUninitialize**;
 //! 只有失败(RPC_E_CHANGED_MODE,沿用现有 apartment)才不解引用。
 
-use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_MULTITHREADED};
+use windows::Win32::System::Com::{COINIT_MULTITHREADED, CoInitializeEx, CoUninitialize};
 
 pub struct ComGuard(bool);
 

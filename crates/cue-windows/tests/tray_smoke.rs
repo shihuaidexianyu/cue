@@ -4,11 +4,11 @@
 
 use cue_windows::tray;
 use std::mem::size_of;
-use windows::core::w;
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Shell::NOTIFYICONDATAW;
 use windows::Win32::UI::WindowsAndMessaging::*;
+use windows::core::w;
 
 unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESULT {
     unsafe { DefWindowProcW(hwnd, msg, w, l) }

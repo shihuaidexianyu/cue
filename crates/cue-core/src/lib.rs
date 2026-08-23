@@ -19,8 +19,8 @@ pub use event::{ActivationTicket, CoreEvent, HostEvent, QueryTicket};
 pub use registry::{ModuleRegistry, RegistryError};
 pub use session::{ActionMenuState, SessionId, SessionState};
 pub use settings::{
-    ApplyHotkey, ApplyStartOnBoot, SettingsHost, SettingsModel, SettingsRow, SettingsViewState,
-    KEY_HOTKEY, KEY_START_ON_BOOT,
+    ApplyHotkey, ApplyStartOnBoot, KEY_HOTKEY, KEY_START_ON_BOOT, SettingsHost, SettingsModel,
+    SettingsRow, SettingsViewState,
 };
 pub use spawner::TaskSpawner;
 pub use usage::UsageStore;
@@ -331,10 +331,10 @@ impl Core {
         if !kind_matches(spec.kind, &candidate) {
             return Err(format!("type mismatch for {key}: expected {:?}", spec.kind));
         }
-        if let SettingValue::Hotkey(h) = &candidate {
-            if h.modifiers.is_empty() {
-                return Err("热键至少需要一个修饰键".into());
-            }
+        if let SettingValue::Hotkey(h) = &candidate
+            && h.modifiers.is_empty()
+        {
+            return Err("热键至少需要一个修饰键".into());
         }
         let policy = spec.apply_policy;
         match policy {
@@ -823,10 +823,10 @@ impl Core {
 /// trigger 之后的剩余输入原样交给 Module(如 `ext:pdf` 语义不属于 Core)。
 fn route(registry: &ModuleRegistry, input: &str) -> (ModuleId, String) {
     for (id, descriptor) in registry.launcher_descriptors() {
-        if let Some(trigger) = &descriptor.trigger {
-            if let Some(query) = match_trigger(input, trigger) {
-                return (id.clone(), query);
-            }
+        if let Some(trigger) = &descriptor.trigger
+            && let Some(query) = match_trigger(input, trigger)
+        {
+            return (id.clone(), query);
         }
     }
     let default = registry

@@ -167,13 +167,13 @@ fn walk(node: &serde_json::Value, out: &mut Vec<(String, String)>) {
     let Some(obj) = node.as_object() else {
         return;
     };
-    if obj.get("type").and_then(|t| t.as_str()) == Some("url") {
-        if let (Some(name), Some(url)) = (
+    if obj.get("type").and_then(|t| t.as_str()) == Some("url")
+        && let (Some(name), Some(url)) = (
             obj.get("name").and_then(|v| v.as_str()),
             obj.get("url").and_then(|v| v.as_str()),
-        ) {
-            out.push((name.to_string(), url.to_string()));
-        }
+        )
+    {
+        out.push((name.to_string(), url.to_string()));
     }
     if let Some(children) = obj.get("children").and_then(|c| c.as_array()) {
         for child in children {

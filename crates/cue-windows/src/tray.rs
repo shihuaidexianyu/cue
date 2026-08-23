@@ -6,13 +6,13 @@
 
 use crate::host::{HostMsg, WM_CUE_TRAY, WM_CUE_TRAY_CMD};
 use std::sync::atomic::{AtomicIsize, Ordering};
-use windows::core::{w, Error};
 use windows::Win32::Foundation::{HWND, LPARAM, POINT, WPARAM};
 use windows::Win32::UI::Shell::{
-    Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE, NIF_SHOWTIP, NIF_TIP, NIM_ADD, NIM_DELETE,
-    NOTIFYICONDATAW,
+    NIF_ICON, NIF_MESSAGE, NIF_SHOWTIP, NIF_TIP, NIM_ADD, NIM_DELETE, NOTIFYICONDATAW,
+    Shell_NotifyIconW,
 };
 use windows::Win32::UI::WindowsAndMessaging::*;
+use windows::core::{Error, w};
 
 const TRAY_UID: u32 = 1;
 const TRAY_CMD_SHOW: usize = 1;

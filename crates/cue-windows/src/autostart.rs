@@ -4,9 +4,9 @@
 //! 删除同名值。core.start_on_boot 设置的事务回调由编排层注入。
 
 use std::path::Path;
-use windows::core::w;
 use windows::Win32::Foundation::{ERROR_FILE_NOT_FOUND, WIN32_ERROR};
 use windows::Win32::System::Registry::*;
+use windows::core::w;
 
 const RUN_SUBKEY: windows::core::PCWSTR = w!("Software\\Microsoft\\Windows\\CurrentVersion\\Run");
 const VALUE_NAME: windows::core::PCWSTR = w!("CUE");
@@ -56,14 +56,16 @@ mod tests {
         set_enabled(true, exe).unwrap();
         unsafe {
             let mut key = HKEY::default();
-            assert!(RegOpenKeyExW(
-                HKEY_CURRENT_USER,
-                RUN_SUBKEY,
-                None,
-                KEY_QUERY_VALUE,
-                &mut key
-            )
-            .is_ok());
+            assert!(
+                RegOpenKeyExW(
+                    HKEY_CURRENT_USER,
+                    RUN_SUBKEY,
+                    None,
+                    KEY_QUERY_VALUE,
+                    &mut key
+                )
+                .is_ok()
+            );
             let mut ty = REG_VALUE_TYPE::default();
             let mut buf = [0u8; 512];
             let mut len = buf.len() as u32;
@@ -88,14 +90,16 @@ mod tests {
         set_enabled(false, exe).unwrap();
         unsafe {
             let mut key = HKEY::default();
-            assert!(RegOpenKeyExW(
-                HKEY_CURRENT_USER,
-                RUN_SUBKEY,
-                None,
-                KEY_QUERY_VALUE,
-                &mut key
-            )
-            .is_ok());
+            assert!(
+                RegOpenKeyExW(
+                    HKEY_CURRENT_USER,
+                    RUN_SUBKEY,
+                    None,
+                    KEY_QUERY_VALUE,
+                    &mut key
+                )
+                .is_ok()
+            );
             let err = RegQueryValueExW(key, VALUE_NAME, None, None, None, None);
             let _ = RegCloseKey(key);
             assert_eq!(err, ERROR_FILE_NOT_FOUND);

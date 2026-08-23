@@ -4,9 +4,9 @@
 
 use cue_protocol::ModuleError;
 use std::path::Path;
-use windows::core::PCWSTR;
-use windows::Win32::UI::Shell::{ShellExecuteExW, SHELLEXECUTEINFOW};
+use windows::Win32::UI::Shell::{SHELLEXECUTEINFOW, ShellExecuteExW};
 use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+use windows::core::PCWSTR;
 
 /// 打开 `file`(exe / 文档 / 文件夹 / URL),可带参数与工作目录。
 pub fn shell_execute(

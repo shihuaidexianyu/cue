@@ -5,8 +5,8 @@
 //! effect handler 交给编排层(cue binary)。
 
 use cue_core::{
-    ActionMenuModel, ActionMenuRow, Core, CoreEffect, CoreEvent, SettingsModel, SettingsRow,
-    KEY_HOTKEY,
+    ActionMenuModel, ActionMenuRow, Core, CoreEffect, CoreEvent, KEY_HOTKEY, SettingsModel,
+    SettingsRow,
 };
 use cue_protocol::{
     Hotkey, IconImage, Key as ProtoKey, Modifiers as ProtoModifiers, ResultAccessory, ResultIcon,
@@ -227,11 +227,12 @@ impl LauncherView {
                 self.core.push_text(" ");
             }
             _ => {
-                if !modifiers.control && !modifiers.alt {
-                    if let Some(text) = keystroke.key_char.clone() {
-                        self.perf_input_at = Some(std::time::Instant::now());
-                        self.core.push_text(&text);
-                    }
+                if !modifiers.control
+                    && !modifiers.alt
+                    && let Some(text) = keystroke.key_char.clone()
+                {
+                    self.perf_input_at = Some(std::time::Instant::now());
+                    self.core.push_text(&text);
                 }
             }
         }
@@ -592,14 +593,13 @@ impl Render for LauncherView {
             let rows = &self.rows;
             let textures = &mut self.icon_textures;
             for row in rows {
-                if let Some(ResultIcon::Raster(icon)) = &row.icon {
-                    if let std::collections::hash_map::Entry::Vacant(e) =
+                if let Some(ResultIcon::Raster(icon)) = &row.icon
+                    && let std::collections::hash_map::Entry::Vacant(e) =
                         textures.entry(texture_key(icon))
-                    {
-                        // 契约违约的图标不留空槽占位条目,下一帧重试。
-                        if let Some(texture) = raster_to_texture(icon) {
-                            e.insert(texture);
-                        }
+                {
+                    // 契约违约的图标不留空槽占位条目,下一帧重试。
+                    if let Some(texture) = raster_to_texture(icon) {
+                        e.insert(texture);
                     }
                 }
             }
