@@ -154,7 +154,12 @@ impl Core {
                 && !desc.is_default
                 && let Some(trigger) = &desc.trigger
             {
-                let key = self.settings.register_trigger_spec(&id, trigger);
+                let name = self
+                    .registry
+                    .module(&id)
+                    .map(|m| m.descriptor().name)
+                    .unwrap_or(id.as_str());
+                let key = self.settings.register_trigger_spec(&id, name, trigger);
                 self.trigger_keys.insert(key);
             }
 

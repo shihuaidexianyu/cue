@@ -39,7 +39,7 @@ impl AppModule {
         Self {
             descriptor: ModuleDescriptor {
                 id: ModuleId::from_static("app"),
-                name: "App",
+                name: "应用",
                 version: "0.1.0",
             },
             catalog: CatalogCell::new(),

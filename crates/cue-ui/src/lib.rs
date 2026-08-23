@@ -392,15 +392,52 @@ impl LauncherView {
 
     // ------------------------------------------------------------------
     // 设置页渲染:模型来自 Core,视图只做布局。
+    //
+    // 行是单行(label + value):描述集中到选中行下方的详情条——
+    // 整页不再是满屏文字。行数超过窗口容量时按选中项跟随切片
+    // (无状态滚动窗口,语义同结果列表)。
     // ------------------------------------------------------------------
 
     fn render_settings(&self, model: &SettingsModel) -> Div {
+        const VISIBLE: usize = 8; // 36px 行 × 8 = 288,与详情条/页脚同入 450 窗
+        let total = model.rows.len();
+        let offset = model
+            .selected
+            .saturating_sub(VISIBLE - 1)
+            .min(total.saturating_sub(VISIBLE));
+        let end = (offset + VISIBLE).min(total);
+
         let mut list = div().flex().flex_col();
-        for (i, row) in model.rows.iter().enumerate() {
-            list = list.child(self.render_settings_row(row, i == model.selected));
+        for (i, row) in model.rows[offset..end].iter().enumerate() {
+            list = list.child(self.render_settings_row(row, offset + i == model.selected));
         }
 
-        let mut body = div()
+        // 详情条:apply 错误优先(红),否则选中行的完整描述。
+        let (detail_text, detail_color) = if let Some(error) = &model.error {
+            (format!("设置未生效:{error}"), rgb(0xe06c75))
+        } else {
+            (
+                model
+                    .rows
+                    .get(model.selected)
+                    .and_then(|row| row.description.as_ref().map(|d| d.to_string()))
+                    .unwrap_or_default(),
+                rgb(0x9a9aa3),
+            )
+        };
+
+        let (footer_text, footer_color) = if model.restart_required {
+            (
+                "↑↓ 选择 · Enter 修改 · Esc 返回 · 部分设置将在重启 CUE 后生效",
+                rgb(0xe5c07b),
+            )
+        } else if self.editing_string.is_some() {
+            ("编辑中 · Enter 保存 · Esc 取消", rgb(0x6a6a75))
+        } else {
+            ("↑↓ 选择 · Enter 修改 · Esc 返回", rgb(0x6a6a75))
+        };
+
+        div()
             .flex()
             .flex_col()
             .child(
@@ -415,40 +452,25 @@ impl LauncherView {
             .child(div().h(px(6.0)))
             .child(div().h(px(1.0)).w_full().bg(rgb(0x3d3d49)))
             .child(div().h(px(6.0)))
-            .child(list);
-
-        if model.restart_required {
-            body = body.child(
+            .child(list)
+            .child(
+                div()
+                    .h(px(40.0))
+                    .px(px(6.0))
+                    .py(px(4.0))
+                    .text_xs()
+                    .text_color(detail_color)
+                    .overflow_hidden()
+                    .child(detail_text),
+            )
+            .child(
                 div()
                     .px(px(6.0))
                     .py(px(4.0))
                     .text_xs()
-                    .text_color(rgb(0xe5c07b))
-                    .child("部分设置将在重启 CUE 后生效"),
-            );
-        }
-        if let Some(error) = &model.error {
-            body = body.child(
-                div()
-                    .px(px(6.0))
-                    .py(px(4.0))
-                    .text_xs()
-                    .text_color(rgb(0xe06c75))
-                    .child(format!("设置未生效:{error}")),
-            );
-        }
-        body.child(
-            div()
-                .px(px(6.0))
-                .py(px(4.0))
-                .text_xs()
-                .text_color(rgb(0x6a6a75))
-                .child(if self.editing_string.is_some() {
-                    "编辑中 · Enter 保存 · Esc 取消"
-                } else {
-                    "↑↓ 选择 · Enter 修改 · Esc 返回"
-                }),
-        )
+                    .text_color(footer_color)
+                    .child(footer_text),
+            )
     }
 
     fn render_settings_row(&self, row: &SettingsRow, is_selected: bool) -> Div {
@@ -478,40 +500,22 @@ impl LauncherView {
             SettingValue::Path(p) => p.display().to_string(),
         };
 
-        let mut label_col = div()
-            .flex_1()
-            .flex()
-            .flex_col()
-            .justify_center()
-            .overflow_hidden()
-            .child(
-                div()
-                    .text_sm()
-                    .whitespace_nowrap()
-                    .text_ellipsis()
-                    .overflow_hidden()
-                    .child(row.label.to_string()),
-            );
-        if let Some(desc) = &row.description {
-            label_col = label_col.child(
-                div()
-                    .text_xs()
-                    .text_color(rgb(0x9a9aa3))
-                    .whitespace_nowrap()
-                    .text_ellipsis()
-                    .overflow_hidden()
-                    .child(desc.to_string()),
-            );
-        }
-
         div()
-            .h(px(44.0))
+            .h(px(36.0))
             .flex()
             .items_center()
             .rounded_md()
             .px(px(6.0))
             .when(is_selected, |d| d.bg(rgb(0x2d4f67)))
-            .child(label_col)
+            .child(
+                div()
+                    .flex_1()
+                    .text_sm()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
+                    .overflow_hidden()
+                    .child(row.label.to_string()),
+            )
             .child(
                 div()
                     .flex_none()

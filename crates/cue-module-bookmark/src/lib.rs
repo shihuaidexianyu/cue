@@ -36,7 +36,7 @@ impl BookmarkModule {
         Self {
             descriptor: ModuleDescriptor {
                 id: ModuleId::from_static("bookmark"),
-                name: "Bookmarks",
+                name: "书签",
                 version: "0.1.0",
             },
             catalog: catalog::CatalogCache::new(),

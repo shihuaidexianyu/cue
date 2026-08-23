@@ -273,7 +273,7 @@ impl FileModule {
         Self {
             descriptor: ModuleDescriptor {
                 id: ModuleId::from_static("file"),
-                name: "Files",
+                name: "文件",
                 version: "0.1.0",
             },
             backend: None,
