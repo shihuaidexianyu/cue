@@ -9,7 +9,6 @@
 
 mod catalog;
 mod chromium;
-mod com;
 mod icon;
 mod matcher;
 mod pinyin_index;
@@ -147,7 +146,7 @@ impl Module for BookmarkModule {
             catalog.refresh_if_changed(); // 冷启动解析挪离首个查询
             let n = catalog.entries().len();
             let t_catalog = started.elapsed();
-            let _com = com::ComGuard::new();
+            let _com = cue_util_win::com::ComGuard::new();
             let loaded = icon::load_browser_icons();
             logger.log(
                 LogLevel::Info,
@@ -270,33 +269,8 @@ impl LauncherModule for BookmarkModule {
 /// 默认浏览器打开 URL——宁可降级,不让激活失败。
 fn open_in_browser(browser: Browser, url: &str) -> Result<(), ModuleError> {
     match browser.exe_path() {
-        Some(exe) => shell_execute(&exe.to_string_lossy(), Some(url)),
-        None => shell_execute(url, None),
-    }
-}
-
-/// ShellExecuteExW(与 cue-module-app launch_win32 同型):lpFile =
-/// file(可带参数);file 直接是 URL 时由 shell 路由到默认浏览器。
-fn shell_execute(file: &str, params: Option<&str>) -> Result<(), ModuleError> {
-    use windows::core::PCWSTR;
-    use windows::Win32::UI::Shell::{ShellExecuteExW, SHELLEXECUTEINFOW};
-    use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
-
-    let file_w: Vec<u16> = file.encode_utf16().chain(Some(0)).collect();
-    let params_w: Option<Vec<u16>> = params.map(|p| p.encode_utf16().chain(Some(0)).collect());
-    let mut info = SHELLEXECUTEINFOW {
-        cbSize: std::mem::size_of::<SHELLEXECUTEINFOW>() as u32,
-        lpFile: PCWSTR(file_w.as_ptr()),
-        lpParameters: params_w
-            .as_ref()
-            .map(|p| PCWSTR(p.as_ptr()))
-            .unwrap_or(PCWSTR::null()),
-        nShow: SW_SHOWNORMAL.0,
-        ..Default::default()
-    };
-    unsafe {
-        ShellExecuteExW(&mut info)
-            .map_err(|e| ModuleError::ActivationFailed(format!("{file}: {e}")))
+        Some(exe) => cue_util_win::shell::shell_execute(&exe.to_string_lossy(), Some(url), None),
+        None => cue_util_win::shell::shell_execute(url, None, None),
     }
 }
 

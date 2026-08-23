@@ -3904,7 +3904,7 @@ session  = Close;失败保持打开并报错(§115)
 settings/usage 的手写 TSV 不适合这个量级与嵌套结构)。
 matcher / pinyin_index / usage_bonus / 图标提取 复制自
 cue-module-app——Rule of Three 第二次使用(§72);第三个消费者
-(FileModule)落地时下沉 util crate。
+(FileModule)落地后,图标/COM/shell_execute 已下沉 cue-util-win。
 
 ---
 
@@ -3983,4 +3983,4 @@ usage  = item_key = 全路径(§51);PRIMARY Open = ShellExecute 默认动词
 ```
 
 Rule of Three:icon / com / shell_execute 在此第三次复制(§72),
-util crate 下沉在 FileModule 落地后的独立提交处理。
+随后即下沉 cue-util-win(模块共享 Win32 助手,只下沉不上浮)。

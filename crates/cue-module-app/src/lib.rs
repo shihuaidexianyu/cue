@@ -5,7 +5,6 @@
 //! Core 不知道什么是 .lnk、拼音、AUMID——全部语义在本 crate。
 
 mod catalog;
-mod com;
 mod icon;
 mod launch;
 mod matcher;

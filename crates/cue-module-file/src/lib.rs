@@ -12,7 +12,6 @@
 //! (§50);不显示任何推荐内容(§115 精神)。排序保持 Everything 的
 //! NAME_ASCENDING(SDK 保证该序无性能损失),V1 不做 usage 重排。
 
-mod com;
 mod everything;
 mod icon;
 
@@ -69,7 +68,7 @@ impl Module for FileModule {
         let sink = ctx.events.clone();
         let logger = ctx.logger.clone();
         std::thread::spawn(move || {
-            let _com = com::ComGuard::new();
+            let _com = cue_util_win::com::ComGuard::new();
             match icon::load_file_icons() {
                 Some(loaded) => {
                     if icons.set(loaded).is_ok() {
@@ -196,7 +195,7 @@ impl LauncherModule for FileModule {
                     "item payload is not a FileEntry".into(),
                 ));
             };
-            match shell_execute(&entry.path) {
+            match cue_util_win::shell::shell_execute(&entry.path, None, None) {
                 Ok(()) => ModuleOutcome::success(
                     SessionDisposition::Close,
                     Some(UsageRecordRequest {
@@ -207,26 +206,6 @@ impl LauncherModule for FileModule {
                 Err(e) => ModuleOutcome::failed(e),
             }
         })
-    }
-}
-
-/// ShellExecuteExW(Rule of Three 第三次:app launch_win32 / bookmark
-/// shell_execute 同型;util 下沉单独提交)。lpVerb = None(默认动词)。
-fn shell_execute(file: &str) -> Result<(), ModuleError> {
-    use windows::core::PCWSTR;
-    use windows::Win32::UI::Shell::{ShellExecuteExW, SHELLEXECUTEINFOW};
-    use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
-
-    let file_w: Vec<u16> = file.encode_utf16().chain(Some(0)).collect();
-    let mut info = SHELLEXECUTEINFOW {
-        cbSize: std::mem::size_of::<SHELLEXECUTEINFOW>() as u32,
-        lpFile: PCWSTR(file_w.as_ptr()),
-        nShow: SW_SHOWNORMAL.0,
-        ..Default::default()
-    };
-    unsafe {
-        ShellExecuteExW(&mut info)
-            .map_err(|e| ModuleError::ActivationFailed(format!("{file}: {e}")))
     }
 }
 

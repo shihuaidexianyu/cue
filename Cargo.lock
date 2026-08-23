@@ -1275,6 +1275,7 @@ name = "cue-module-app"
 version = "0.1.0"
 dependencies = [
  "cue-protocol",
+ "cue-util-win",
  "futures",
  "image",
  "pinyin",
@@ -1287,9 +1288,9 @@ name = "cue-module-bookmark"
 version = "0.1.0"
 dependencies = [
  "cue-protocol",
+ "cue-util-win",
  "pinyin",
  "serde_json",
- "windows 0.62.2",
 ]
 
 [[package]]
@@ -1297,6 +1298,7 @@ name = "cue-module-file"
 version = "0.1.0"
 dependencies = [
  "cue-protocol",
+ "cue-util-win",
  "futures",
  "windows 0.62.2",
 ]
@@ -1315,6 +1317,14 @@ dependencies = [
  "gpui",
  "image",
  "smallvec",
+]
+
+[[package]]
+name = "cue-util-win"
+version = "0.1.0"
+dependencies = [
+ "cue-protocol",
+ "windows 0.62.2",
 ]
 
 [[package]]

@@ -4,8 +4,8 @@
 //! application);不解析 manifest,不走 shell:AppsFolder(脏数据)。
 
 use crate::catalog::{AppEntry, LaunchTarget};
-use crate::com::ComGuard;
 use cue_protocol::{LogLevel, ModuleLogger};
+use cue_util_win::com::ComGuard;
 use windows::Management::Deployment::PackageManager;
 
 pub fn discover(logger: &ModuleLogger) -> Vec<AppEntry> {

@@ -5,6 +5,7 @@ edition.workspace = true
 
 [dependencies]
 cue-protocol.workspace = true
+cue-util-win.workspace = true
 futures.workspace = true
 pinyin.workspace = true
 windows-future.workspace = true

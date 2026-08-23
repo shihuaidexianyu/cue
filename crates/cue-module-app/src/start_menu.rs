@@ -1,8 +1,8 @@
 //! User / Common Start Menu 的 .lnk 发现(§29)。不扫盘找 exe(§56)。
 
 use crate::catalog::{AppEntry, LaunchTarget};
-use crate::com::ComGuard;
 use cue_protocol::{LogLevel, ModuleLogger};
+use cue_util_win::com::ComGuard;
 use std::path::{Path, PathBuf};
 use windows::core::{Interface, PCWSTR};
 use windows::Win32::System::Com::{CoCreateInstance, IPersistFile, CLSCTX_INPROC_SERVER, STGM};

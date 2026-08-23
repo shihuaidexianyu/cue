@@ -63,6 +63,7 @@ crates/
 ├── cue-protocol           模块协议(ModuleItem / 结果展示 / 激活结果)
 ├── cue-ui                 GPUI 界面
 ├── cue-windows            Win32 宿主(热键 / 托盘 / 单实例 / 窗口)
+├── cue-util-win           模块共享 Win32 助手(COM / 图标 / ShellExecute)
 ├── cue-module-app         应用搜索(默认模块,无触发词)
 ├── cue-module-bookmark    书签搜索(触发词 b)
 └── cue-module-file        文件搜索(触发词 /,Everything IPC)
