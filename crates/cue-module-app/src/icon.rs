@@ -153,7 +153,7 @@ mod tests {
                 continue;
             };
             let total = icon.rgba.len() / 4;
-            let transparent = icon.rgba.chunks_exact(4).filter(|px| px[3] == 0).count();
+            let transparent = icon.rgba.as_chunks::<4>().0.iter().filter(|px| px[3] == 0).count();
             if transparent == total {
                 zero_alpha.push(format!("{} -> {}", e.name, exe.display()));
             } else if transparent * 100 / total > 95 {

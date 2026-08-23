@@ -32,7 +32,7 @@ const VISIBLE_ROWS: usize = 8;
 /// 放弃本张图标而非 panic。
 fn raster_to_texture(icon: &IconImage) -> Option<Arc<RenderImage>> {
     let mut bgra = icon.rgba.to_vec();
-    for px in bgra.chunks_exact_mut(4) {
+    for px in bgra.as_chunks_mut::<4>().0 {
         px.swap(0, 2);
     }
     let buffer = image::RgbaImage::from_raw(icon.width, icon.height, bgra)?;

@@ -117,7 +117,7 @@ fn hicon_to_rgba(hicon: HICON, size: u32) -> Option<IconImage> {
             let raw =
                 std::slice::from_raw_parts(bits as *const u8, (size * size * 4) as usize).to_vec();
             let mut out = raw;
-            for px in out.chunks_exact_mut(4) {
+            for px in out.as_chunks_mut::<4>().0 {
                 px.swap(0, 2); // BGRA → RGBA
             }
             normalize_bbox(&mut out, size);
@@ -210,7 +210,7 @@ mod tests {
             assert_eq!((icon.width, icon.height), (ICON_SIZE, ICON_SIZE));
             assert_eq!(icon.rgba.len() as u32, ICON_SIZE * ICON_SIZE * 4);
             assert!(
-                icon.rgba.chunks_exact(4).any(|px| px[3] > 0),
+                icon.rgba.as_chunks::<4>().0.iter().any(|px| px[3] > 0),
                 "图标不应全透明"
             );
         }

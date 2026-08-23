@@ -45,7 +45,7 @@ mod tests {
             (cue_util_win::icon::ICON_SIZE, cue_util_win::icon::ICON_SIZE)
         );
         assert!(
-            icon.rgba.chunks_exact(4).any(|px| px[3] > 0),
+            icon.rgba.as_chunks::<4>().0.iter().any(|px| px[3] > 0),
             "图标不应全透明"
         );
     }
