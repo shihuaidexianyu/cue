@@ -3921,8 +3921,7 @@ trigger    = /(标点触发,§5.2 verbatim 匹配;/ 之后原样进 Everything)
 查询语法   = Everything 原生语法原样透传(子串、ext:、路径过滤……)
              ——query syntax 归 Module,Core 不解析(§3)
 明确不做   = 自建索引(§76)、随包分发 Everything、Everything.dll/SDK 进仓库、
-             按扩展名的真实类型图标、usage 重排、次级 action
-             (打开所在文件夹等,随 P1 action menu 一并做)
+             按扩展名的真实类型图标、usage 重排、~~次级 action~~(已落地,§119)
 ```
 
 ## 依赖与 IPC(§31 定案的执行)
@@ -4052,4 +4051,45 @@ E2E  = 真机:Tab 出菜单(截图:文件 3 行/书签 2 行,头部归属正确)
        ↓↓ Enter 复制路径 → 剪贴板 = C:\Windows\explorer.exe,
        会话关闭;Esc 分层(先关菜单回结果页,再 Esc 关会话);
        usage.tsv 落 (file, action_id=2, 全路径)
+```
+
+# 120. FileModule 噪声目录排除(V1.x)
+
+`/ds` 之类短查询的结果曾被 `C:\Program Files\...` 安装目录内部文件
+淹没——那些不是用户工作时会用的文件。决议:黑名单而非白名单——
+白名单砍掉 Everything"全盘随查"的核心价值(无法预知目标文件落在
+哪个角落),而噪声高度可预测。
+
+## 决议
+
+```text
+形态     = 默认开启的排除名单(黑名单),不是结果后过滤:
+           FileModule 把否定子句拼进发给 Everything 的查询串,
+           噪声路径根本不占结果位
+实现     = Everything 原生语法:含反斜杠的词按全路径子串匹配,
+           `!"片段"` 即否定。查询 = `{用户输入} {EXCLUDE_CLAUSE}`
+名单     = C:\Windows\、C:\Program Files\、C:\Program Files (x86)\、
+           \$Recycle.Bin\、\node_modules\、\.git\
+           (保守:AppData、ProgramData 不排除——确有用户文件)
+逃生口   = 查询含 `\` 视为显式路径输入,原样发送不加排除——
+           刻意找系统文件(如 /C:\Windows\explorer.exe)不被拦
+设置     = module.file.exclude_noise_paths(Bool,默认 true,
+           Immediate)——首个 module.* 设置;V1 设置 UI 的 Bool
+           行直接可编辑,settings.tsv 持久化
+           (名单本身不设 String 编辑 UI:V1 编辑面只覆盖
+           Bool + Hotkey,不为单个设置扩表单)
+明确不做 = 用户自定义名单 UI、按名单重排(软黑名单)、
+           白名单模式
+```
+
+## 验证
+
+```text
+单测 = effective_search 三条路径(默认拼接/开关关闭/显式路径逃生)、
+       ext: 函数查询仍走排除;schema 声明与 try_apply 回合
+       (类型错误 Err 不留半状态);Core 集成:module.* 设置
+       事务直达模块、入模型、未知 key 拒绝(首个 module.* 设置
+       的端到端覆盖)
+E2E  = 真机:/ds 结果从满屏 MATLAB 安装目录变为用户目录文件
+       (截图);/C:\Windows\explorer.exe 照常命中(逃生口,截图)
 ```

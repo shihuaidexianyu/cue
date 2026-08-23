@@ -11,6 +11,13 @@
 //! 空查询返回空:UsageRead 只能按键查、不能枚举,给不出 Top Files,
 //! 不显示任何推荐内容。排序保持 Everything 的
 //! NAME_ASCENDING(SDK 保证该序无性能损失),V1 不做 usage 重排。
+//!
+//! 噪声目录默认排除:工作文件几乎从不在 `C:\Windows`、`Program Files`、
+//! `$Recycle.Bin`、`node_modules`、`.git` 里,但它们会以安装目录内部
+//! 文件的形式淹没结果。排除不自己过滤结果,而是把否定子句拼进发给
+//! Everything 的查询串(`!"路径片段"`),让这些路径根本不占结果位。
+//! 查询含 `\`(用户在写显式路径)时原样发送、不加排除——刻意找系统
+//! 文件时不会被拦。开关见 `module.file.exclude_noise_paths` 设置。
 
 mod everything;
 mod icon;
@@ -23,6 +30,22 @@ use std::sync::{Arc, Mutex, OnceLock};
 const ACTION_REVEAL: ActionId = ActionId(1);
 const ACTION_COPY_PATH: ActionId = ActionId(2);
 
+/// 噪声目录排除开关(设置 UI 里的 Bool 行)。
+pub const KEY_EXCLUDE_NOISE: &str = "module.file.exclude_noise_paths";
+
+/// 拼进 Everything 查询的否定子句:含反斜杠的搜索词按全路径子串
+/// 匹配,`!"…"` 即"路径不含该片段"。带引号容忍空格;大小写不敏感。
+const EXCLUDE_CLAUSE: &str = r#"!"C:\Windows\" !"C:\Program Files\" !"C:\Program Files (x86)\" !"\$Recycle.Bin\" !"\node_modules\" !"\.git\""#;
+
+/// 构造发给 Everything 的搜索串。查询含 `\` 视为显式路径输入,
+/// 原样发送(逃生口:刻意找系统文件时不被默认排除拦截)。
+fn effective_search(query: &str, exclude_noise: bool) -> String {
+    if !exclude_noise || query.contains('\\') {
+        return query.to_string();
+    }
+    format!("{query} {EXCLUDE_CLAUSE}")
+}
+
 /// FileModule,trigger `/`。
 pub struct FileModule {
     descriptor: ModuleDescriptor,
@@ -34,6 +57,8 @@ pub struct FileModule {
     /// 最近一次 query 返回的 item id:图标晚到时据此发
     /// PresentationInvalidated,让 Core 重画可见行。
     last_items: Arc<Mutex<Vec<ItemId>>>,
+    /// 噪声目录排除开关的当前值(load 时从设置快照读,try_apply 更新)。
+    exclude_noise: bool,
 }
 
 impl FileModule {
@@ -47,6 +72,7 @@ impl FileModule {
             backend: None,
             icons: Arc::new(OnceLock::new()),
             last_items: Arc::new(Mutex::new(Vec::new())),
+            exclude_noise: true,
         }
     }
 }
@@ -65,6 +91,9 @@ impl Module for FileModule {
     /// load 廉价:只起两个线程——Everything IPC 线程(窗口与消息泵都在
     /// 线程内)与图标提取线程(两次 SHGetFileInfoW,毫秒级)。
     fn load(&mut self, ctx: ModuleContext) -> Result<(), ModuleError> {
+        if let Some(SettingValue::Bool(v)) = ctx.settings.get("exclude_noise_paths") {
+            self.exclude_noise = *v;
+        }
         self.backend = Some(EverythingBackend::start(ctx.logger.clone()));
 
         let icons = Arc::clone(&self.icons);
@@ -97,10 +126,31 @@ impl Module for FileModule {
     }
 
     fn settings_schema(&self) -> SettingsSchema {
-        Vec::new()
+        vec![SettingSpec {
+            key: SettingKey(KEY_EXCLUDE_NOISE.into()),
+            label: "文件搜索:排除系统与依赖目录".into(),
+            description: Some(
+                "结果中不出现 C:\\Windows、Program Files、$Recycle.Bin、node_modules、.git;\
+                 输入含 \\ 的显式路径时不过滤"
+                    .into(),
+            ),
+            kind: SettingKind::Bool,
+            default: SettingValue::Bool(true),
+            apply_policy: ApplyPolicy::Immediate,
+        }]
     }
 
-    fn try_apply_settings(&mut self, _changes: SettingsChangeSet) -> Result<(), ModuleError> {
+    fn try_apply_settings(&mut self, changes: SettingsChangeSet) -> Result<(), ModuleError> {
+        for (key, value) in &changes.changes {
+            if key.0.as_ref() == KEY_EXCLUDE_NOISE {
+                let SettingValue::Bool(v) = value else {
+                    return Err(ModuleError::InvalidState(format!(
+                        "{KEY_EXCLUDE_NOISE} 需要 Bool 值"
+                    )));
+                };
+                self.exclude_noise = *v;
+            }
+        }
         Ok(())
     }
 }
@@ -122,6 +172,7 @@ impl LauncherModule for FileModule {
         if search.is_empty() {
             return Box::pin(async { Ok(QueryResponse { items: Vec::new() }) });
         }
+        let search = effective_search(&search, self.exclude_noise);
         let Some(backend) = self.backend.clone() else {
             return Box::pin(async {
                 Err(ModuleError::Unavailable("file module not loaded".into()))
@@ -357,5 +408,59 @@ mod tests {
         }))
         .expect("ok");
         assert!(r.items.is_empty());
+    }
+
+    /// 默认排除噪声目录:普通查询拼上否定子句;关掉开关、或查询
+    /// 含 `\`(显式路径)时原样发送。
+    #[test]
+    fn effective_search_excludes_noise_by_default() {
+        let noisy = effective_search("ds", true);
+        assert!(noisy.starts_with("ds "));
+        for frag in [
+            r#"!"C:\Windows\""#,
+            r#"!"C:\Program Files\""#,
+            r#"!"C:\Program Files (x86)\""#,
+            r#"!"\$Recycle.Bin\""#,
+            r#"!"\node_modules\""#,
+            r#"!"\.git\""#,
+        ] {
+            assert!(noisy.contains(frag), "missing {frag} in {noisy}");
+        }
+        assert_eq!(effective_search("ds", false), "ds");
+        assert_eq!(
+            effective_search(r"C:\Windows\explorer", true),
+            r"C:\Windows\explorer"
+        );
+        // Everything 查询函数(如 ext:)不含反斜杠,仍走默认排除。
+        assert!(effective_search("ext:pdf report", true).contains(r#"!"C:\Windows\""#));
+    }
+
+    /// 首个 module.* 设置:schema 声明 Bool + Immediate,try_apply
+    /// 更新开关,类型错误返回 Err 而不是 panic。
+    #[test]
+    fn exclude_noise_setting_roundtrip() {
+        let mut m = FileModule::new();
+        assert!(m.exclude_noise);
+        let schema = m.settings_schema();
+        assert_eq!(schema.len(), 1);
+        assert_eq!(schema[0].key.0.as_ref(), KEY_EXCLUDE_NOISE);
+        assert_eq!(schema[0].kind, SettingKind::Bool);
+        assert_eq!(schema[0].default, SettingValue::Bool(true));
+
+        let mut cs = SettingsChangeSet::default();
+        cs.changes.push((
+            SettingKey(KEY_EXCLUDE_NOISE.into()),
+            SettingValue::Bool(false),
+        ));
+        m.try_apply_settings(cs).expect("apply ok");
+        assert!(!m.exclude_noise);
+
+        let mut bad = SettingsChangeSet::default();
+        bad.changes.push((
+            SettingKey(KEY_EXCLUDE_NOISE.into()),
+            SettingValue::Integer(1),
+        ));
+        assert!(m.try_apply_settings(bad).is_err());
+        assert!(!m.exclude_noise); // 失败不留半拉子状态
     }
 }

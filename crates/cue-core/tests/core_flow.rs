@@ -71,6 +71,10 @@ struct FakeModule {
     menu_actions: Vec<ActionDescriptor>,
     /// activate 收到的 ActionId(动作路由断言用)。
     activated: Arc<Mutex<Vec<ActionId>>>,
+    /// 声明的设置规格(默认空)。
+    schema: SettingsSchema,
+    /// try_apply_settings 收到的改动(设置事务断言用)。
+    applied_settings: Arc<Mutex<Vec<(String, SettingValue)>>>,
 }
 
 impl FakeModule {
@@ -93,6 +97,8 @@ impl FakeModule {
                 shortcut: None,
             }],
             activated: Arc::new(Mutex::new(Vec::new())),
+            schema: Vec::new(),
+            applied_settings: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -175,10 +181,14 @@ impl Module for FakeModule {
     fn unload(&mut self) {}
 
     fn settings_schema(&self) -> SettingsSchema {
-        Vec::new()
+        self.schema.clone()
     }
 
-    fn try_apply_settings(&mut self, _changes: SettingsChangeSet) -> Result<(), ModuleError> {
+    fn try_apply_settings(&mut self, changes: SettingsChangeSet) -> Result<(), ModuleError> {
+        let mut applied = self.applied_settings.lock().unwrap();
+        for (key, value) in changes.changes {
+            applied.push((key.0.to_string(), value));
+        }
         Ok(())
     }
 }
@@ -892,6 +902,47 @@ fn start_on_boot_apply_success_commits() {
         .find(|r| r.key.as_ref() == "core.start_on_boot")
         .unwrap();
     assert_eq!(row.value, SettingValue::Bool(true));
+}
+
+#[test]
+fn module_setting_transaction_reaches_module() {
+    // 首个 module.* 设置路径:try-apply 直达模块、commit 进模型、
+    // 模块构造时的设置快照带默认值。
+    let applied = Arc::new(Mutex::new(Vec::new()));
+    let mut module = FakeModule::new("fake");
+    module.schema = vec![SettingSpec {
+        key: SettingKey("module.fake.reduce_noise".into()),
+        label: "fake bool".into(),
+        description: None,
+        kind: SettingKind::Bool,
+        default: SettingValue::Bool(true),
+        apply_policy: ApplyPolicy::Immediate,
+    }];
+    module.applied_settings = Arc::clone(&applied);
+    let (mut core, _spawner) = setup_with_config(module, test_config());
+
+    core.open_settings();
+    core.apply_setting("module.fake.reduce_noise", SettingValue::Bool(false))
+        .unwrap();
+    assert_eq!(
+        applied.lock().unwrap().as_slice(),
+        &[(
+            "module.fake.reduce_noise".to_string(),
+            SettingValue::Bool(false)
+        )]
+    );
+    let model = core.settings_model().unwrap();
+    let row = model
+        .rows
+        .iter()
+        .find(|r| r.key.as_ref() == "module.fake.reduce_noise")
+        .expect("module setting row");
+    assert_eq!(row.value, SettingValue::Bool(false));
+
+    // 未知模块设置 key 走 validate 拒绝。
+    assert!(core
+        .apply_setting("module.fake.nope", SettingValue::Bool(true))
+        .is_err());
 }
 
 #[test]
