@@ -5,6 +5,7 @@ members = [
     "crates/cue-core",
     "crates/cue-module-app",
     "crates/cue-module-bookmark",
+    "crates/cue-module-file",
     "crates/cue-protocol",
     "crates/cue-ui",
     "crates/cue-windows",
@@ -21,6 +22,7 @@ cue-ui = { path = "crates/cue-ui" }
 cue-windows = { path = "crates/cue-windows" }
 cue-module-app = { path = "crates/cue-module-app" }
 cue-module-bookmark = { path = "crates/cue-module-bookmark" }
+cue-module-file = { path = "crates/cue-module-file" }
 
 futures = "0.3"
 gpui = "0.2"

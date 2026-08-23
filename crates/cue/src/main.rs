@@ -10,6 +10,7 @@
 use cue_core::{Core, CoreConfig, CoreEffect, CoreEvent, HostEvent, ModuleRegistry, TaskSpawner};
 use cue_module_app::AppModule;
 use cue_module_bookmark::BookmarkModule;
+use cue_module_file::FileModule;
 use cue_protocol::Hotkey;
 use cue_ui::LauncherView;
 use cue_windows as win;
@@ -66,6 +67,10 @@ fn main() {
         registry
             .register(Box::new(BookmarkModule::new()))
             .expect("register bookmark module");
+        // §31–33、§118:FileModule,触发词 `/`(依赖本机 Everything 1.4)。
+        registry
+            .register(Box::new(FileModule::new()))
+            .expect("register file module");
 
         let storage_root = std::env::var("LOCALAPPDATA")
             .map(|p| PathBuf::from(p).join("CUE"))
