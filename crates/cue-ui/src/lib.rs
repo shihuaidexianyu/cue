@@ -23,9 +23,13 @@ use std::sync::Arc;
 type TextureCache = HashMap<usize, Arc<RenderImage>>;
 
 /// 视口内可见结果行数:窗口 420px - 内边距 12 - 输入行 36 - 分隔线 1,
-/// ÷ 行高 44px。结果可多于可见行数(result_limit=20),超出的行由
-/// 选择驱动的滚动窗口覆盖(键盘 launcher 不需要真滚动条)。
-const VISIBLE_ROWS: usize = 8;
+/// ÷ 行高 74px ≈ 5 行(宽松密度:图标 32px、标题 text_base)。结果可
+/// 多于可见行数(result_limit=20),超出的行由选择驱动的滚动窗口
+/// 覆盖(键盘 launcher 不需要真滚动条)。
+const VISIBLE_ROWS: usize = 5;
+
+/// 结果行高:74px × 5 行 = 370,恰填满结果区(371px)。
+const ROW_HEIGHT: f32 = 74.0;
 
 /// 契约:协议侧是 RGBA8 直线 alpha;GPUI atlas 存 BGRA(见 gpui
 /// 解码路径的逐像素 swap),上传时转换。契约违约(len != w*h*4)时
@@ -515,9 +519,9 @@ impl LauncherView {
     }
 
     fn render_icon_slot(textures: &TextureCache, row: &ResultPresentation) -> Div {
-        // icon 槽位:固定 32px,None 即留空,文字起点永不移动。
+        // icon 槽位:固定 44px,None 即留空,文字起点永不移动。
         let slot = div()
-            .w(px(32.0))
+            .w(px(44.0))
             .h_full()
             .flex_none()
             .flex()
@@ -532,8 +536,8 @@ impl LauncherView {
                 SystemIconId::Generic => "▪",
             }),
             Some(ResultIcon::Raster(icon)) => match textures.get(&texture_key(icon)) {
-                // 24px 显示尺寸;96px 源纹理由 GPUI 降采样。
-                Some(texture) => slot.child(img(Arc::clone(texture)).w(px(24.0)).h(px(24.0))),
+                // 32px 显示尺寸;96px 源纹理由 GPUI 降采样。
+                Some(texture) => slot.child(img(Arc::clone(texture)).w(px(32.0)).h(px(32.0))),
                 None => slot,
             },
         }
@@ -557,7 +561,7 @@ impl LauncherView {
             .overflow_hidden()
             .child(
                 div()
-                    .text_sm()
+                    .text_base()
                     .whitespace_nowrap()
                     .text_ellipsis()
                     .overflow_hidden()
@@ -576,11 +580,11 @@ impl LauncherView {
         }
 
         let mut container = div()
-            .h(px(44.0))
+            .h(px(ROW_HEIGHT))
             .flex()
             .items_center()
             .rounded_md()
-            .px(px(4.0))
+            .px(px(6.0))
             .overflow_hidden()
             .when(is_selected, |d| d.bg(rgb(0x2d4f67)))
             .child(Self::render_icon_slot(textures, row))

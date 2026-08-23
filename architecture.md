@@ -3531,7 +3531,7 @@ ResultPresentation 除 title 外全部可选（§13），布局不随字段有�
 规则：
 
 ```text
-icon 槽位永远占固定宽度（如 32px），None 即留空
+icon 槽位永远占固定宽度（如 44px），None 即留空
 文字起点永不移动
 行高固定，icon 在槽位内垂直居中
 subtitle 为 None 即第二行留空
