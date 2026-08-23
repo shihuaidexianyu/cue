@@ -27,9 +27,22 @@ cue-module-file = { path = "crates/cue-module-file" }
 cue-util-win = { path = "crates/cue-util-win" }
 
 futures = "0.3"
-gpui = "0.2"
+gpui = { version = "0.2", default-features = false, features = ["windows-manifest"] }
 toml = "1"
 windows = "0.62"
 windows-future = "0.3"
 pinyin = "0.10"
 serde_json = "1"
+
+# 日常开发只保留文件/行号信息，减少 PDB 生成、链接时间和 target 占用。
+[profile.dev]
+debug = "line-tables-only"
+
+# 第三方依赖通常不需要调试符号；工作区 crate 仍保留行号回溯。
+[profile.dev.package."*"]
+debug = false
+
+# 需要变量级调试时使用：cargo build --profile debugging
+[profile.debugging]
+inherits = "dev"
+debug = "full"
