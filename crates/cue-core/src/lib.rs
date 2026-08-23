@@ -91,6 +91,9 @@ pub struct Core {
     focused: bool,
     /// 待执行的 CoreEffect 出站队列。
     effects: Vec<CoreEffect>,
+    /// Core 拥有的 `module.<id>.trigger` 设置 key(§128):触发词归
+    /// Core 路由管——校验/生效都在 Core,不走模块 try_apply。
+    trigger_keys: std::collections::HashSet<String>,
 }
 
 impl Core {
@@ -123,12 +126,19 @@ impl Core {
             visible: false,
             focused: false,
             effects: Vec::new(),
+            trigger_keys: std::collections::HashSet::new(),
         };
         core.load_modules()?;
         Ok(core)
     }
 
     fn load_modules(&mut self) -> Result<(), ModuleError> {
+        // 触发词 spec(§128)需要 descriptor;先取一份快照脱离 registry 借用。
+        let launchers: Vec<(ModuleId, LauncherDescriptor)> = self
+            .registry
+            .launcher_descriptors()
+            .map(|(id, d)| (id.clone(), d))
+            .collect();
         for id in self.registry.ids() {
             // 先注册 schema,再 build_context——load 时的
             // ModuleSettings 快照才能带上该模块自己的默认值与持久化值。
@@ -138,6 +148,15 @@ impl Core {
                 .map(|m| m.settings_schema())
                 .unwrap_or_default();
             self.settings.register_module_specs(&id, schema);
+
+            // 非默认模块的触发词由 Core 合成设置行(路由归 Core)。
+            if let Some((_, desc)) = launchers.iter().find(|(mid, _)| mid == &id)
+                && !desc.is_default
+                && let Some(trigger) = &desc.trigger
+            {
+                let key = self.settings.register_trigger_spec(&id, trigger);
+                self.trigger_keys.insert(key);
+            }
 
             let epoch = self.registry.epoch(&id).unwrap_or(0);
             let ctx = self.build_context(&id, epoch);
@@ -374,6 +393,17 @@ impl Core {
         let policy = spec.apply_policy;
         match policy {
             ApplyPolicy::Immediate => {
+                // 触发词(§128):trim 归一 + Core 校验,不走模块 try_apply。
+                let candidate = if self.trigger_keys.contains(key) {
+                    let SettingValue::String(t) = &candidate else {
+                        return Err("type mismatch".into());
+                    };
+                    let t = t.trim().to_string();
+                    self.validate_trigger(key, &t)?;
+                    SettingValue::String(t)
+                } else {
+                    candidate
+                };
                 // 第二步:try-apply(core.* 由所有者执行;module.* 经 registry)。
                 if key == KEY_HOTKEY {
                     let SettingValue::Hotkey(h) = &candidate else {
@@ -385,6 +415,8 @@ impl Core {
                         return Err("type mismatch".into());
                     };
                     self.settings.try_apply_start_on_boot(*on)?;
+                } else if self.trigger_keys.contains(key) {
+                    // 触发词归 Core 路由:校验已在上方完成,无宿主副作用。
                 } else if key.starts_with("module.") {
                     let mut cs = SettingsChangeSet::default();
                     cs.changes
@@ -418,12 +450,14 @@ impl Core {
     // ------------------------------------------------------------------
 
     pub fn input_changed(&mut self, input: String) {
-        let (module_id, query) = {
-            let Some(s) = self.session.as_mut() else {
-                return;
-            };
+        if self.session.is_none() {
+            return;
+        }
+        // route 读 settings(生效触发词,§128),先算再借 session。
+        let (module_id, query) = self.route(&input);
+        {
+            let s = self.session.as_mut().expect("checked above");
             s.raw_input = input;
-            let (module_id, query) = route(&self.registry, &s.raw_input);
             if module_id != s.active_module {
                 s.active_module = module_id.clone();
             }
@@ -434,8 +468,7 @@ impl Core {
             s.selected = None;
             s.error = None;
             s.action_menu = None;
-            (module_id, query)
-        };
+        }
         self.run_query_with(module_id, query);
     }
 
@@ -595,11 +628,68 @@ impl Core {
     // Query / Activation
     // ------------------------------------------------------------------
 
+    /// Input Routing:Core 只解析 Module Trigger;
+    /// trigger 之后的剩余输入原样交给 Module(如 `ext:pdf` 语义不属于 Core)。
+    /// 触发词取生效值(设置覆盖 ?? 模块声明,§128)。
+    fn route(&self, input: &str) -> (ModuleId, String) {
+        for (id, descriptor) in self.registry.launcher_descriptors() {
+            if let Some(trigger) = self.effective_trigger_of(id, descriptor.trigger.as_deref())
+                && let Some(query) = match_trigger(input, &trigger)
+            {
+                return (id.clone(), query);
+            }
+        }
+        let default = self
+            .registry
+            .default_module()
+            .cloned()
+            .expect("registry has no default module");
+        (default, input.to_string())
+    }
+
+    /// 生效触发词 = 设置值(非空)?? 模块声明值(§128)。
+    fn effective_trigger_of(&self, id: &ModuleId, declared: Option<&str>) -> Option<String> {
+        let key = format!("module.{}.trigger", id.as_str());
+        match self.settings.value(&key) {
+            Some(SettingValue::String(s)) if !s.is_empty() => Some(s.clone()),
+            _ => declared.map(str::to_string),
+        }
+    }
+
+    /// 触发词校验(§128):非空、无空白、长度封顶、不与其他模块的
+    /// 生效触发词冲突。纯 Core 校验——触发词不走模块 try_apply。
+    fn validate_trigger(&self, self_key: &str, candidate: &str) -> Result<(), String> {
+        if candidate.is_empty() {
+            return Err("触发词不能为空".into());
+        }
+        if candidate.chars().any(char::is_whitespace) {
+            return Err("触发词不能包含空白字符".into());
+        }
+        if candidate.chars().count() > 16 {
+            return Err("触发词最长 16 个字符".into());
+        }
+        let self_id = module_id_of(self_key);
+        for (id, descriptor) in self.registry.launcher_descriptors() {
+            if self_id.as_ref() == Some(id) {
+                continue;
+            }
+            if let Some(other) = self.effective_trigger_of(id, descriptor.trigger.as_deref())
+                && other == candidate
+            {
+                return Err(format!(
+                    "触发词 \"{candidate}\" 已被模块 {} 使用",
+                    id.as_str()
+                ));
+            }
+        }
+        Ok(())
+    }
+
     fn run_query(&mut self) {
-        let Some(s) = self.session.as_ref() else {
+        let Some(raw) = self.session.as_ref().map(|s| s.raw_input.clone()) else {
             return;
         };
-        let (module_id, query) = route(&self.registry, &s.raw_input);
+        let (module_id, query) = self.route(&raw);
         self.run_query_with(module_id, query);
     }
 
@@ -852,23 +942,6 @@ impl Core {
             .ok_or_else(|| ModuleError::InvalidState(format!("module {id} vanished")))?
             .load(ctx)
     }
-}
-
-/// Input Routing:Core 只解析 Module Trigger;
-/// trigger 之后的剩余输入原样交给 Module(如 `ext:pdf` 语义不属于 Core)。
-fn route(registry: &ModuleRegistry, input: &str) -> (ModuleId, String) {
-    for (id, descriptor) in registry.launcher_descriptors() {
-        if let Some(trigger) = &descriptor.trigger
-            && let Some(query) = match_trigger(input, trigger)
-        {
-            return (id.clone(), query);
-        }
-    }
-    let default = registry
-        .default_module()
-        .cloned()
-        .expect("registry has no default module");
-    (default, input.to_string())
 }
 
 /// 触发词匹配规则:以字母/数字结尾的触发词(`b`、`ext`)要求

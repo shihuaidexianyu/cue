@@ -4402,3 +4402,53 @@ E2E  = 真机:无边框置顶全屏窗口盖住主屏 → 热键不唤起(截图
        取证);关闭全屏窗口 → 热键恢复唤起;基线(普通前台)
        唤起正常
 ```
+# 128. 触发词自定义(`module.<id>.trigger`)
+
+每个触发模块的触发词(`b` / `/` / `>` …)可在设置页修改——
+对标 Flow Launcher 的 per-plugin action keyword。触发词是
+**Core 路由状态**,不是模块语义:模块从不解析自己的触发词
+(§86),因此它不属于模块 schema。
+
+## 决议
+
+```text
+归属   = key 放在模块命名空间下展示(module.<id>.trigger),
+         但 spec 由 Core 合成(非模块 schema);Core 用
+         trigger_keys 集合登记所有权
+生效   = 生效触发词 = 设置值(非空)?? 模块声明值;
+         route 每次输入现读 SettingsHost——Immediate,
+         无 try-apply 回调、无宿主副作用
+事务   = apply_setting_inner 在 Immediate 分支内对
+         trigger_keys 做单例处理:trim 归一 + Core 校验,
+         跳过 module.try_apply_settings(§42 的 validate →
+         commit → persist 链不变)
+校验   = 非空(trim 后)、不含空白、≤16 字符、不与其他
+         模块的生效触发词冲突;失败不 commit,UI 留在
+         编辑态并回显错误
+匹配   = 语义不随值变:以字母/数字结尾的触发词要求词边界,
+         标点类逐字前缀匹配(match_trigger 按值的尾字符
+         自动分流,自定义值天然继承)
+默认模块 = App 无触发词(§82),不合成该行
+String 编辑 = 设置页第一种行内文本编辑:Enter 进入编辑态
+         (buffer 预填当前值),Enter 提交事务(失败留编辑态),
+         Esc 放弃;视图本地状态,同热键捕获模式
+容错   = 持久化值之间的历史冲突(如新版本引入的模块默认
+         触发词撞上用户旧自定义):registry 序先到先赢,
+         不 panic、不自动改写用户设置
+明确不做 = 空触发词禁用模块(模块启用/禁用是另一个特性)、
+           默认模块触发词、大小写归一(保持精确匹配,
+           用户设什么就是什么)
+```
+
+## 验证
+
+```text
+单测 = spec 合成(非默认模块有行、默认模块无行)、自定义
+       触发词改路由(旧值不再认领、新值命中、词边界规则
+       不变)、校验(空/含空白/超长/冲突全拒、值不被破坏)、
+       事务不碰模块 try_apply
+E2E  = 真机预写 settings.tsv(module.bookmark.trigger=bm)
+       → `bm github` 出书签结果(带 Edge 角标)、
+       `b github` 回落应用模块(无结果);用户原设置
+       文件备份后还原
+```

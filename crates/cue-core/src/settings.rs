@@ -110,6 +110,25 @@ impl SettingsHost {
         );
     }
 
+    /// Core 合成的触发词设置行(§128)。触发词是 Core 路由状态,
+    /// 不属于模块 schema,但放在模块命名空间下展示;
+    /// default = 模块声明值。返回完整 key 供 Core 登记所有权。
+    pub fn register_trigger_spec(&mut self, module_id: &ModuleId, default_trigger: &str) -> String {
+        let key = format!("module.{}.trigger", module_id.as_str());
+        self.register_specs(vec![SettingSpec {
+            key: SettingKey(Arc::from(key.as_str())),
+            label: "触发词".into(),
+            description: Some(
+                "在输入开头键入它进入该模块;以字母/数字结尾时后面需跟空格(如 `b github`),标点类直接前缀匹配(如 `/路径`)"
+                    .into(),
+            ),
+            kind: SettingKind::String,
+            default: SettingValue::String(default_trigger.to_string()),
+            apply_policy: ApplyPolicy::Immediate,
+        }]);
+        key
+    }
+
     fn register_specs(&mut self, specs: Vec<SettingSpec>) {
         let persisted = self.load_persisted();
         for spec in specs {

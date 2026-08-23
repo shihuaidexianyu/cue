@@ -83,6 +83,9 @@ pub struct LauncherView {
     /// 设置页的热键捕获态(视图本地):true 时下一次按键组合
     /// 成为 core.hotkey 候选。
     capturing_hotkey: bool,
+    /// 字符串行编辑态(视图本地,同热键捕获模式):
+    /// (设置 key, 编辑 buffer);Enter 提交事务,Esc 放弃。
+    editing_string: Option<(String, String)>,
     /// 测量探针:文本输入的时刻;下一次结果行非空时
     /// 打印 input→rows 时延(InputChanged → ResultState 提交的视图侧
     /// 上界,含事件泵与 present)。
@@ -123,6 +126,7 @@ impl LauncherView {
             effect_handler: None,
             icon_textures: HashMap::new(),
             capturing_hotkey: false,
+            editing_string: None,
             perf_input_at: None,
             scroll_offset: 0,
         }
@@ -250,8 +254,53 @@ impl LauncherView {
     // Path 行回车 = 用系统默认程序打开该路径(由 Core 的 host 回调执行)。
     // ------------------------------------------------------------------
 
-    fn on_settings_key_down(&mut self, event: &KeyDownEvent, _cx: &mut Context<Self>) {
+    fn on_settings_key_down(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
         let ks = &event.keystroke;
+        let modifiers = &ks.modifiers;
+        // 字符串行编辑态(§128 触发词):按键进 buffer,
+        // Enter 提交事务(校验失败留在编辑态,错误经模型回显),Esc 放弃。
+        if self.editing_string.is_some() {
+            match ks.key.as_str() {
+                "escape" => self.editing_string = None,
+                "enter" => {
+                    let (key, buffer) = self.editing_string.take().expect("checked above");
+                    if self
+                        .core
+                        .apply_setting(&key, SettingValue::String(buffer.clone()))
+                        .is_err()
+                    {
+                        self.editing_string = Some((key, buffer));
+                    }
+                }
+                "backspace" => {
+                    if let Some((_, buf)) = self.editing_string.as_mut() {
+                        buf.pop();
+                    }
+                }
+                "v" if modifiers.control && !modifiers.alt => {
+                    if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text())
+                        && let Some((_, buf)) = self.editing_string.as_mut()
+                    {
+                        buf.push_str(&text);
+                    }
+                }
+                "space" if !modifiers.control && !modifiers.alt => {
+                    if let Some((_, buf)) = self.editing_string.as_mut() {
+                        buf.push(' ');
+                    }
+                }
+                _ => {
+                    if !modifiers.control
+                        && !modifiers.alt
+                        && let (Some(text), Some((_, buf))) =
+                            (ks.key_char.clone(), self.editing_string.as_mut())
+                    {
+                        buf.push_str(&text);
+                    }
+                }
+            }
+            return;
+        }
         if self.capturing_hotkey {
             self.capturing_hotkey = false;
             if ks.key.as_str() == "escape" {
@@ -298,7 +347,11 @@ impl LauncherView {
                 // 打开失败(无默认关联等)的错误进 Core 模型回显。
                 let _ = self.core.open_setting_path(&key);
             }
-            // V1 没有 Integer/Enum/String 类设置;出现后再加编辑 UI。
+            (SettingKind::String, SettingValue::String(s)) => {
+                // 进入行内编辑态(§128 触发词;buffer 预填当前值)。
+                self.editing_string = Some((row.key.to_string(), s.clone()));
+            }
+            // V1 没有 Integer/Enum 类设置;出现后再加编辑 UI。
             _ => {}
         }
     }
@@ -390,7 +443,11 @@ impl LauncherView {
                 .py(px(4.0))
                 .text_xs()
                 .text_color(rgb(0x6a6a75))
-                .child("↑↓ 选择 · Enter 修改 · Esc 返回"),
+                .child(if self.editing_string.is_some() {
+                    "编辑中 · Enter 保存 · Esc 取消"
+                } else {
+                    "↑↓ 选择 · Enter 修改 · Esc 返回"
+                }),
         )
     }
 
@@ -411,7 +468,11 @@ impl LauncherView {
                 }
             }
             SettingValue::Integer(i) => i.to_string(),
-            SettingValue::String(s) | SettingValue::Enum(s) => s.clone(),
+            SettingValue::String(s) | SettingValue::Enum(s) => match &self.editing_string {
+                // 行内编辑态:渲染 buffer + 光标,不渲染已提交值。
+                Some((k, buf)) if k.as_str() == row.key.as_ref() => format!("{buf}▏"),
+                _ => s.clone(),
+            },
             SettingValue::Path(p) => p.display().to_string(),
         };
 

@@ -146,6 +146,10 @@ impl FakeModule {
     fn activated_handle(&self) -> Arc<Mutex<Vec<ActionId>>> {
         Arc::clone(&self.activated)
     }
+
+    fn applied_settings_handle(&self) -> Arc<Mutex<Vec<(String, SettingValue)>>> {
+        Arc::clone(&self.applied_settings)
+    }
 }
 
 fn make_items(titles: &[&str]) -> Vec<ModuleItem> {
@@ -314,6 +318,96 @@ fn alphanumeric_trigger_requires_word_boundary() {
         "baidu 不能被触发词 b 吞掉"
     );
     assert_eq!(bm_queries.lock().unwrap().as_slice(), ["gh", ""]);
+}
+
+// ---------------------------------------------------------------------
+// 触发词自定义(§128):设置行合成、路由改读生效值、校验
+// ---------------------------------------------------------------------
+
+#[test]
+fn trigger_spec_is_synthesized_for_non_default_modules() {
+    let default_mod = FakeModule::new("default");
+    let bm = FakeModule::with_trigger("bm", "b");
+    let (mut core, _spawner) = setup_many(vec![default_mod, bm]);
+
+    core.open_settings();
+    let model = core.settings_model().unwrap();
+    // 4 行 core.* + bm 的触发词行;默认模块(无触发词)没有该行。
+    assert_eq!(model.rows.len(), 5);
+    let keys: Vec<&str> = model.rows.iter().map(|r| r.key.as_ref()).collect();
+    assert!(keys.contains(&"module.bm.trigger"));
+    assert!(!keys.contains(&"module.default.trigger"));
+    let row = model
+        .rows
+        .iter()
+        .find(|r| r.key.as_ref() == "module.bm.trigger")
+        .unwrap();
+    assert_eq!(row.kind, SettingKind::String);
+    assert_eq!(row.value, SettingValue::String("b".to_string()));
+}
+
+#[test]
+fn custom_trigger_reroutes_input() {
+    let default_mod = FakeModule::new("default");
+    let default_queries = default_mod.queries_handle();
+    let bm = FakeModule::with_trigger("bm", "b");
+    let bm_queries = bm.queries_handle();
+    let bm_applied = bm.applied_settings_handle();
+    let (mut core, _spawner) = setup_many(vec![default_mod, bm]);
+    let mut rx = core.take_event_receiver();
+
+    // 改成双字母触发词(带空白,commit 时 trim 归一)。
+    core.apply_setting(
+        "module.bm.trigger",
+        SettingValue::String(" bk ".to_string()),
+    )
+    .unwrap();
+    // 触发词归 Core 路由——不经过模块 try_apply。
+    assert!(bm_applied.lock().unwrap().is_empty());
+
+    core.open_session();
+    core.input_changed("bk gh".into()); // 新触发词命中(词边界规则不变)
+    core.input_changed("b gh".into()); // 旧触发词不再认领
+    drain(&mut core, &mut rx);
+
+    assert_eq!(bm_queries.lock().unwrap().as_slice(), ["gh"]);
+    assert_eq!(default_queries.lock().unwrap().as_slice(), ["", "b gh"]);
+}
+
+#[test]
+fn trigger_validation_rejects_bad_values() {
+    let default_mod = FakeModule::new("default");
+    let bm = FakeModule::with_trigger("bm", "b");
+    let fm = FakeModule::with_trigger("fm", "/");
+    let (mut core, _spawner) = setup_many(vec![default_mod, bm, fm]);
+
+    // 空白(trim 后为空)、内含空白、超长、与其他模块生效触发词冲突。
+    assert!(
+        core.apply_setting("module.bm.trigger", SettingValue::String("   ".into()))
+            .is_err()
+    );
+    assert!(
+        core.apply_setting("module.bm.trigger", SettingValue::String("a b".into()))
+            .is_err()
+    );
+    assert!(
+        core.apply_setting("module.bm.trigger", SettingValue::String("x".repeat(17)))
+            .is_err()
+    );
+    assert!(
+        core.apply_setting("module.bm.trigger", SettingValue::String("/".into()))
+            .is_err()
+    );
+
+    // 全部拒绝:值未被破坏。
+    core.open_settings();
+    let model = core.settings_model().unwrap();
+    let row = model
+        .rows
+        .iter()
+        .find(|r| r.key.as_ref() == "module.bm.trigger")
+        .unwrap();
+    assert_eq!(row.value, SettingValue::String("b".to_string()));
 }
 
 // ---------------------------------------------------------------------
