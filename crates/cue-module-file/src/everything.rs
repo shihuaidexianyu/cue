@@ -367,7 +367,9 @@ fn read_len_wstr(bytes: &[u8], at: usize) -> Option<(String, usize)> {
     let end = start + len * 2;
     let raw = bytes.get(start..end)?;
     let wide: Vec<u16> = raw
-        .as_chunks::<2>().0.iter()
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|c| u16::from_le_bytes([c[0], c[1]]))
         .collect();
     // 跳过 NUL 终止符(协议必有;缺也不致命,不查)。
@@ -472,7 +474,9 @@ mod tests {
         assert_eq!(rd(20), REQUEST_FLAGS);
         assert_eq!(rd(24), SORT_NAME_ASCENDING);
         let tail: Vec<u16> = buf[28..]
-            .as_chunks::<2>().0.iter()
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|c| u16::from_le_bytes([c[0], c[1]]))
             .collect();
         assert_eq!(tail, vec![0x63, 0x75, 0x65, 0]); // "cue\0"

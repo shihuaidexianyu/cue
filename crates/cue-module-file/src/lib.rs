@@ -203,9 +203,12 @@ pub struct FileModule {
     descriptor: ModuleDescriptor,
     /// load 时启动(专用 IPC 线程);未 load 时 None → query 报 Unavailable。
     backend: Option<EverythingBackend>,
-    /// 文件夹 / 通用文件图标(load 后台线程一次性提取;同一 Arc
-    /// 复用,UI 按 rgba 指针缓存纹理)。
+    /// 文件夹 / 通用文件图标(worker 启动时最先提取;同一 Arc
+    /// 复用,UI 按 rgba 指针缓存纹理)。具体文件的真实图标走
+    /// worker 的按路径/扩展名缓存。
     icons: Arc<OnceLock<icon::FileIcons>>,
+    /// 真实图标提取队列(load 后才有)。
+    icon_worker: Option<icon::IconWorker>,
     /// 最近一次 query 返回的 item id:图标晚到时据此发
     /// PresentationInvalidated,让 Core 重画可见行。
     last_items: Arc<Mutex<Vec<ItemId>>>,
@@ -225,6 +228,7 @@ impl FileModule {
             },
             backend: None,
             icons: Arc::new(OnceLock::new()),
+            icon_worker: None,
             last_items: Arc::new(Mutex::new(Vec::new())),
             exclude_noise: true,
             exclude: Arc::new(Mutex::new(ExcludeState {
@@ -243,14 +247,46 @@ impl Default for FileModule {
     }
 }
 
+impl FileModule {
+    /// 图标:非文件夹先试真实图标(worker 按路径/扩展名缓存,
+    /// 未命中登记提取、本帧走通用);文件夹与各种兜底走
+    /// 通用图标,再退 SystemIcon。
+    fn icon_for(&self, entry: &FileEntry) -> ResultIcon {
+        if !entry.is_dir
+            && let Some(worker) = &self.icon_worker
+            && let Some(icon) = worker.get_or_queue(Path::new(entry.path.as_ref()), false)
+        {
+            return icon;
+        }
+        match self.icons.get() {
+            Some(icons) => {
+                // IconImage.rgba 是 Arc<[u8]>,clone 保持指针不变——
+                // UI 按该指针缓存纹理。
+                let img = if entry.is_dir {
+                    &icons.folder
+                } else {
+                    &icons.file
+                };
+                ResultIcon::Raster((**img).clone())
+            }
+            None => ResultIcon::SystemIcon(if entry.is_dir {
+                SystemIconId::Folder
+            } else {
+                SystemIconId::File
+            }),
+        }
+    }
+}
+
 impl Module for FileModule {
     fn descriptor(&self) -> &ModuleDescriptor {
         &self.descriptor
     }
 
-    /// load 廉价:只起两个线程——Everything IPC 线程(窗口与消息泵都在
-    /// 线程内)与图标提取线程(两次 SHGetFileInfoW,毫秒级)。名单文件
-    /// 播种 + 首读是两次小文件 IO(缺失才写),微秒级。
+    /// load 廉价:起两条线程——Everything IPC 线程(窗口与消息泵都在
+    /// 线程内)与图标 worker(先提两枚通用图标,随后串行服务按文件
+    /// 真实图标的提取队列)。名单文件播种 + 首读是两次小文件 IO
+    /// (缺失才写),微秒级。
     fn load(&mut self, ctx: ModuleContext) -> Result<(), ModuleError> {
         if let Some(SettingValue::Bool(v)) = ctx.settings.get("exclude_noise_paths") {
             self.exclude_noise = *v;
@@ -285,28 +321,11 @@ impl Module for FileModule {
             g.logger = Some(ctx.logger.clone());
         }
         self.backend = Some(EverythingBackend::start(ctx.logger.clone()));
-
-        let icons = Arc::clone(&self.icons);
-        let last_items = Arc::clone(&self.last_items);
-        let sink = ctx.events.clone();
-        let logger = ctx.logger.clone();
-        std::thread::spawn(move || {
-            let _com = cue_util_win::com::ComGuard::new();
-            match icon::load_file_icons() {
-                Some(loaded) => {
-                    if icons.set(loaded).is_ok() {
-                        let items = std::mem::take(&mut *last_items.lock().unwrap());
-                        if !items.is_empty() {
-                            sink.send(ModuleEvent::PresentationInvalidated { items });
-                        }
-                    }
-                }
-                None => logger.log(
-                    LogLevel::Warn,
-                    "file: 系统图标提取失败,行图标走 SystemIcon 兜底",
-                ),
-            }
-        });
+        self.icon_worker = Some(icon::IconWorker::new(
+            Arc::clone(&self.icons),
+            Arc::clone(&self.last_items),
+            ctx.events.clone(),
+        ));
         Ok(())
     }
 
@@ -416,23 +435,7 @@ impl LauncherModule for FileModule {
                 .size
                 .map(|s| ResultAccessory::Text(format_size(s).into()))
         };
-        p.icon = Some(match self.icons.get() {
-            Some(icons) => {
-                // IconImage.rgba 是 Arc<[u8]>,clone 保持指针不变——
-                // UI 按该指针缓存纹理。
-                let img = if entry.is_dir {
-                    &icons.folder
-                } else {
-                    &icons.file
-                };
-                ResultIcon::Raster((**img).clone())
-            }
-            None => ResultIcon::SystemIcon(if entry.is_dir {
-                SystemIconId::Folder
-            } else {
-                SystemIconId::File
-            }),
-        });
+        p.icon = Some(self.icon_for(entry));
         p
     }
 
