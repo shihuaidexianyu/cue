@@ -1,9 +1,9 @@
-//! cue-core —— 薄的 Host Runtime(architecture.md §5)。
+//! cue-core —— 薄的 Host Runtime。
 //!
-//! 单线程状态机,运行在 UI 线程上(§91):
+//! 单线程状态机,运行在 UI 线程上:
 //! 异步工作以 Future 形式离开 Core,以事件形式回到 Core。
 //!
-//! 北极星(§91):**Core 不取消异步工作;Core 通过 SessionId、ModuleEpoch
+//! 北极星:**Core 不取消异步工作;Core 通过 SessionId、ModuleEpoch
 //! 和 Generation 判定异步结果是否仍然有效。**
 
 mod effects;
@@ -30,23 +30,23 @@ use futures::channel::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use std::path::PathBuf;
 use std::sync::Arc;
 
-/// Core 事件队列的生产端(§96)。可克隆、可跨线程;
+/// Core 事件队列的生产端。可克隆、可跨线程;
 /// host 事件、query 完成、activation 完成、module 自发事件都从这里回流。
 pub type CoreEventSender = UnboundedSender<CoreEvent>;
 
 pub struct CoreConfig {
-    /// §43 存储根(由编排层解析,如 `%LOCALAPPDATA%\CUE`)。
+    /// 存储根(由编排层解析,如 `%LOCALAPPDATA%\CUE`)。
     pub storage_root: PathBuf,
-    /// §50 usage 持久化文件;None = 纯内存(测试)。
+    /// usage 持久化文件;None = 纯内存(测试)。
     pub usage_file: Option<PathBuf>,
-    /// §48 设置持久化文件;None = 纯内存(测试)。
+    /// 设置持久化文件;None = 纯内存(测试)。
     pub settings_file: Option<PathBuf>,
-    /// §94 Core/UI 请求预算。V1 为固定值,不来自任何 `module.*` 设置。
+    /// Core/UI 请求预算。V1 为固定值,不来自任何 `module.*` 设置。
     pub result_limit: usize,
-    /// §53 core.hotkey 的同步 try-apply 回调(同步例外,§112)。
+    /// core.hotkey 的同步 try-apply 回调。
     /// None(测试)时热键 try-apply 视为通过。
     pub apply_hotkey: Option<ApplyHotkey>,
-    /// core.start_on_boot 的同步 try-apply 回调(写登录启动项,同 §53 模式)。
+    /// core.start_on_boot 的同步 try-apply 回调(写登录启动项,同模式)。
     /// None(测试)时 try-apply 视为通过。
     pub apply_start_on_boot: Option<ApplyStartOnBoot>,
 }
@@ -73,14 +73,14 @@ pub struct Core {
     session: Option<SessionState>,
     next_session_id: u64,
     usage: UsageStore,
-    /// §5.6 Settings Host:设置的唯一所有者(§48)。
+    /// Settings Host:设置的唯一所有者。
     settings: SettingsHost,
-    /// §41 设置视图状态;Some 时 UI 渲染设置页而非搜索页。
+    /// 设置视图状态;Some 时 UI 渲染设置页而非搜索页。
     settings_view: Option<SettingsViewState>,
-    /// 窗口可见 / 聚焦状态(§53 toggle 的依据),由 host/UI 事件维护。
+    /// 窗口可见 / 聚焦状态(toggle 的依据),由 host/UI 事件维护。
     visible: bool,
     focused: bool,
-    /// §112 待执行的 CoreEffect 出站队列。
+    /// 待执行的 CoreEffect 出站队列。
     effects: Vec<CoreEffect>,
 }
 
@@ -93,7 +93,7 @@ impl Core {
         let (event_tx, event_rx) = mpsc::unbounded();
         let usage = UsageStore::new(config.usage_file.clone());
         // Settings Host 必须先于 load_modules:ModuleContext 的设置快照
-        // 依赖它(§48 设置只存在这里)。apply_* 回调的所有权移交 host。
+        // 依赖它(设置只存在这里)。apply_* 回调的所有权移交 host。
         let settings = SettingsHost::new(
             config.settings_file.clone(),
             config.apply_hotkey.take(),
@@ -120,7 +120,7 @@ impl Core {
 
     fn load_modules(&mut self) -> Result<(), ModuleError> {
         for id in self.registry.ids() {
-            // 先收编 schema(§38),再 build_context——load 时的
+            // 先注册 schema,再 build_context——load 时的
             // ModuleSettings 快照才能带上该模块自己的默认值与持久化值。
             let schema = self
                 .registry
@@ -167,12 +167,12 @@ impl Core {
         }
     }
 
-    /// 取走事件队列消费端(只能取一次)。由 UI 线程的泵消费(§96)。
+    /// 取走事件队列消费端(只能取一次)。由 UI 线程的泵消费。
     pub fn take_event_receiver(&mut self) -> UnboundedReceiver<CoreEvent> {
         self.event_rx.take().expect("event receiver already taken")
     }
 
-    /// 事件队列生产端,供编排层接入 host 事件(§112)。
+    /// 事件队列生产端,供编排层接入 host 事件。
     pub fn event_sender(&self) -> CoreEventSender {
         self.event_tx.clone()
     }
@@ -182,7 +182,7 @@ impl Core {
     }
 
     // ------------------------------------------------------------------
-    // §112 状态迁移(Host/UI 事件入口)
+    // 状态迁移(Host/UI 事件入口)
     // ------------------------------------------------------------------
 
     pub fn open_session(&mut self) {
@@ -199,7 +199,7 @@ impl Core {
         self.focused = true;
         self.effects.push(CoreEffect::ShowLauncher);
         self.effects.push(CoreEffect::FocusInput);
-        // 空查询:§115 —— 打开后由 Module 决定空查询展示什么(usage Top Apps 等)。
+        // 空查询——打开后由 Module 决定空查询展示什么(usage Top Apps 等)。
         self.run_query();
     }
 
@@ -211,7 +211,7 @@ impl Core {
         }
     }
 
-    /// §53 toggle:隐藏 → 打开;可见且聚焦 → 关闭;可见未聚焦 → 聚焦。
+    /// toggle:隐藏 → 打开;可见且聚焦 → 关闭;可见未聚焦 → 聚焦。
     /// 设置页开着时,热键等价 Esc(关闭设置)。
     pub fn hotkey_pressed(&mut self) {
         if self.settings_view.is_some() {
@@ -226,7 +226,7 @@ impl Core {
         }
     }
 
-    /// §113:第二实例请求 show / focus。
+    /// 第二实例请求 show / focus。
     pub fn show_requested(&mut self) {
         if self.settings_view.is_some() {
             self.focused = true;
@@ -255,11 +255,11 @@ impl Core {
     }
 
     // ------------------------------------------------------------------
-    // §41 Settings UI 的 Core 侧:出模型、收变更,永不渲染。
+    // Settings UI 的 Core 侧:出模型、收变更,永不渲染。
     // ------------------------------------------------------------------
 
-    /// 打开设置视图(托盘菜单入口,§116)。设置不是 module session:
-    /// 搜索会话静默退场(其未完成的 query 由 §96 ticket 自然失效)。
+    /// 打开设置视图(托盘菜单入口)。设置不是 module session:
+    /// 搜索会话静默退场(其未完成的 query 由 ticket 自然失效)。
     pub fn open_settings(&mut self) {
         if self.settings_view.is_some() {
             return;
@@ -305,12 +305,12 @@ impl Core {
         }
     }
 
-    /// 当前生效的热键(§53;编排层启动注册时读取)。
+    /// 当前生效的热键(编排层启动注册时读取)。
     pub fn hotkey(&self) -> Hotkey {
         self.settings.hotkey()
     }
 
-    /// §42 事务入口:校验 → try-apply → commit → persist。
+    /// 事务入口:校验 → try-apply → commit → persist。
     /// 失败不 commit、返回错误;UI 展示错误并保留旧值显示。
     pub fn apply_setting(&mut self, key: &str, candidate: SettingValue) -> Result<(), String> {
         let result = self.apply_setting_inner(key, candidate);
@@ -371,15 +371,15 @@ impl Core {
                 self.settings.mark_restart_required();
             }
             ApplyPolicy::ReloadModule => {
-                // §42 允许 V1 只实现 Immediate 与 RestartApplication。
-                return Err("V1 不支持 ReloadModule 策略(§42)".into());
+                // 允许 V1 只实现 Immediate 与 RestartApplication。
+                return Err("V1 不支持 ReloadModule 策略".into());
             }
         }
         Ok(())
     }
 
     // ------------------------------------------------------------------
-    // 输入与选择(§5.2 / §5.5 / §102)
+    // 输入与选择
     // ------------------------------------------------------------------
 
     pub fn input_changed(&mut self, input: String) {
@@ -392,7 +392,7 @@ impl Core {
             if module_id != s.active_module {
                 s.active_module = module_id.clone();
             }
-            // §102:输入变化立即清空——stale 结果永不可激活;
+            // 输入变化立即清空——stale 结果永不可激活;
             // 动作菜单引用旧选中项的动作快照,一并关闭。
             s.generation += 1;
             s.results.clear();
@@ -422,7 +422,7 @@ impl Core {
         self.input_changed(input);
     }
 
-    /// §115:粘贴允许 Unicode(IME 禁用只针对 composition)。
+    /// 粘贴允许 Unicode(IME 禁用只针对 composition)。
     pub fn paste(&mut self, text: &str) {
         let cleaned: String = text
             .chars()
@@ -467,7 +467,7 @@ impl Core {
     }
 
     // ------------------------------------------------------------------
-    // §18 次级动作菜单(Tab 打开):状态在 session 上,键盘路由由
+    // 次级动作菜单(Tab 打开):状态在 session 上,键盘路由由
     // UI 按 in_action_menu() 决定(同设置页模式)。
     // ------------------------------------------------------------------
 
@@ -531,7 +531,7 @@ impl Core {
         menu.selected = menu.selected.saturating_sub(1);
     }
 
-    /// 菜单的 UI 行模型(Core 出模型,UI 只渲染,同 §41 设置页)。
+    /// 菜单的 UI 行模型(Core 出模型,UI 只渲染,同设置页)。
     pub fn action_menu_model(&self) -> Option<ActionMenuModel> {
         let menu = self.session.as_ref()?.action_menu.as_ref()?;
         Some(ActionMenuModel {
@@ -557,7 +557,7 @@ impl Core {
     }
 
     // ------------------------------------------------------------------
-    // Query / Activation(§94–96、§103)
+    // Query / Activation
     // ------------------------------------------------------------------
 
     fn run_query(&mut self) {
@@ -575,7 +575,7 @@ impl Core {
         let ticket = QueryTicket {
             session_id: s.id,
             module_id: module_id.clone(),
-            // query 在那个模块实例上发起,epoch 取发起时的当前值(§96)。
+            // query 在那个模块实例上发起,epoch 取发起时的当前值。
             module_epoch: self.registry.epoch(&module_id).unwrap_or(0),
             generation: s.generation,
         };
@@ -586,7 +586,7 @@ impl Core {
         let Some(module) = self.registry.module_mut(&module_id) else {
             return;
         };
-        // 创建 Future 必须 < 1 ms、不得触碰 IO(§93);真正的执行在 executor 上。
+        // 创建 Future 必须 < 1 ms、不得触碰 IO;真正的执行在 executor 上。
         let fut = module.query(ctx);
         let tx = self.event_tx.clone();
         self.spawner.spawn(Box::pin(async move {
@@ -600,7 +600,7 @@ impl Core {
     }
 
     /// Enter on 动作菜单:以菜单选中的 ActionId 激活当前选中项。
-    /// 菜单先关——失败时用户看到的是结果列表 + 错误横幅(§115)。
+    /// 菜单先关——失败时用户看到的是结果列表 + 错误横幅。
     pub fn activate_action_menu_selection(&mut self) {
         let Some(s) = self.session.as_mut() else {
             return;
@@ -642,7 +642,7 @@ impl Core {
     }
 
     // ------------------------------------------------------------------
-    // 事件处理(§96 ticket 校验;§103 activation 处置)
+    // 事件处理(ticket 校验; activation 处置)
     // ------------------------------------------------------------------
 
     /// 处理一个回流事件。返回 true 表示可见状态发生了变化(UI 应重绘)。
@@ -670,8 +670,8 @@ impl Core {
         let Some(s) = self.session.as_mut() else {
             return false;
         };
-        // §96:四项全部匹配才接受。epoch 与 registry 当前值比较——
-        // reload 之后旧实例的结果必死(§49)。
+        // 四项全部匹配才接受。epoch 与 registry 当前值比较——
+        // reload 之后旧实例的结果必死。
         let current_epoch = self.registry.epoch(&s.active_module).unwrap_or(u64::MAX);
         if ticket.session_id != s.id
             || ticket.module_id != s.active_module
@@ -684,7 +684,7 @@ impl Core {
             Ok(resp) => {
                 let mut items = resp.items;
                 items.truncate(self.config.result_limit);
-                // §115:非空默认选中第 0 项。
+                // 非空默认选中第 0 项。
                 s.selected = if items.is_empty() { None } else { Some(0) };
                 s.results = items;
                 s.error = None;
@@ -696,7 +696,7 @@ impl Core {
             }
         }
         // 结果集在菜单打开期间被替换:菜单的动作快照属于旧选中项,
-        // 继续用会把旧动作打到新结果上——关掉(§102 同旨)。
+        // 继续用会把旧动作打到新结果上——关掉。
         s.action_menu = None;
         true
     }
@@ -706,11 +706,11 @@ impl Core {
         ticket: &ActivationTicket,
         outcome: ModuleOutcome,
     ) -> bool {
-        // §103:usage 总是记录(激活真实发生过)。
+        // usage 总是记录(激活真实发生过)。
         if let Some(req) = &outcome.usage {
             self.usage.record(&ticket.module_id, req);
         }
-        // session 处置只对发起它的那个 session 生效(§103)。
+        // session 处置只对发起它的那个 session 生效。
         let Some(s) = self.session.as_mut() else {
             return false;
         };
@@ -725,7 +725,7 @@ impl Core {
                 }
             }
             OutcomeStatus::Failed(e) => {
-                // §115:失败默认 KeepOpen + 错误展示。
+                // 失败默认 KeepOpen + 错误展示。
                 s.error = Some(e.clone());
             }
         }
@@ -741,7 +741,7 @@ impl Core {
         let Some(s) = self.session.as_ref() else {
             return false;
         };
-        // §109:epoch 与 registry 当前值比较,旧实例事件一律丢弃;
+        // epoch 与 registry 当前值比较,旧实例事件一律丢弃;
         // 非 active module 同样丢弃。
         let current_epoch = self.registry.epoch(module_id).unwrap_or(u64::MAX);
         if *module_id != s.active_module || module_epoch != current_epoch {
@@ -767,7 +767,7 @@ impl Core {
     }
 
     // ------------------------------------------------------------------
-    // 供 UI 读取(§5.5 / §13)
+    // 供 UI 读取
     // ------------------------------------------------------------------
 
     pub fn is_visible(&self) -> bool {
@@ -778,7 +778,7 @@ impl Core {
         self.session.as_ref()
     }
 
-    /// 对当前 active module 执行 present()。UI 只对可见行调用(§105 < 1 ms)。
+    /// 对当前 active module 执行 present()。UI 只对可见行调用(< 1 ms)。
     pub fn present(&self, item: &ModuleItem) -> Option<ResultPresentation> {
         let s = self.session.as_ref()?;
         self.registry
@@ -786,12 +786,12 @@ impl Core {
             .map(|m| m.present(item))
     }
 
-    /// §112:取走待执行的 CoreEffect,由编排层执行。
+    /// 取走待执行的 CoreEffect,由编排层执行。
     pub fn take_effects(&mut self) -> Vec<CoreEffect> {
         std::mem::take(&mut self.effects)
     }
 
-    /// §50 usage 查询(主要供测试与 Settings UI)。
+    /// usage 查询(主要供测试与 Settings UI)。
     pub fn usage_stat(
         &self,
         module: &ModuleId,
@@ -801,8 +801,8 @@ impl Core {
         self.usage.stat(module, item_key, action)
     }
 
-    /// 测试与 §42 ReloadModule 策略用:替换模块实例并递增 epoch。
-    /// 旧实例的在途 query / 事件随 epoch 失效(§96、§109);
+    /// 测试与 ReloadModule 策略用:替换模块实例并递增 epoch。
+    /// 旧实例的在途 query / 事件随 epoch 失效;
     /// Core 不自动重查——session 中的旧结果保留到下一次输入变化。
     pub fn reload_module(&mut self, module: Box<dyn LauncherModule>) -> Result<(), ModuleError> {
         let id = module.descriptor().id.clone();
@@ -819,7 +819,7 @@ impl Core {
     }
 }
 
-/// §5.2 Input Routing:Core 只解析 Module Trigger;
+/// Input Routing:Core 只解析 Module Trigger;
 /// trigger 之后的剩余输入原样交给 Module(如 `ext:pdf` 语义不属于 Core)。
 fn route(registry: &ModuleRegistry, input: &str) -> (ModuleId, String) {
     for (id, descriptor) in registry.launcher_descriptors() {
@@ -836,7 +836,7 @@ fn route(registry: &ModuleRegistry, input: &str) -> (ModuleId, String) {
     (default, input.to_string())
 }
 
-/// §5.2 触发词匹配规则:以字母/数字结尾的触发词(`b`、`ext`)要求
+/// 触发词匹配规则:以字母/数字结尾的触发词(`b`、`ext`)要求
 /// 词边界——trigger 之后必须是空白或输入结束,否则 `baidu` 会被 `b`
 /// 吞掉;边界空白不进查询(`b  github` 的查询是 `github`)。以标点
 /// 结尾的触发词(`/`)逐字前缀匹配,查询原样传递。
@@ -853,7 +853,7 @@ fn match_trigger(input: &str, trigger: &str) -> Option<String> {
     Some(rest.to_string())
 }
 
-/// §18 动作菜单的 UI 行模型(Core 出模型,UI 只渲染,同 §41 设置页)。
+/// 动作菜单的 UI 行模型(Core 出模型,UI 只渲染,同设置页)。
 pub struct ActionMenuModel {
     /// 菜单归属的选中项标题(UI 头部展示)。
     pub item_title: Arc<str>,
@@ -867,7 +867,7 @@ pub struct ActionMenuRow {
     pub shortcut: Option<String>,
 }
 
-/// §42 校验:kind 与值类型必须匹配。
+/// 校验:kind 与值类型必须匹配。
 fn kind_matches(kind: SettingKind, v: &SettingValue) -> bool {
     matches!(
         (kind, v),
@@ -887,7 +887,7 @@ fn module_id_of(key: &str) -> Option<ModuleId> {
     Some(ModuleId::new(id))
 }
 
-/// §109:sink 在 load 时绑定 (ModuleId, ModuleEpoch)。
+/// sink 在 load 时绑定 (ModuleId, ModuleEpoch)。
 struct CoreEventSink {
     tx: CoreEventSender,
     module_id: ModuleId,
@@ -904,7 +904,7 @@ impl ModuleEventSend for CoreEventSink {
     }
 }
 
-/// §64 统一 logger 的最小实现(写 stderr;日志文件随后续迭代落地)。
+/// 统一 logger 的最小实现(写 stderr;日志文件随后续迭代落地)。
 struct StderrLogger {
     module: String,
 }

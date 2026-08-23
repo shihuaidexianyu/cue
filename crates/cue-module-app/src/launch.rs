@@ -1,4 +1,4 @@
-//! 启动(§29):Win32 = ShellExecuteEx(cue-util-win);Packaged =
+//! 启动:Win32 = ShellExecuteEx(cue-util-win);Packaged =
 //! IApplicationActivationManager::ActivateApplication(AUMID)。
 //! 绝不走 AppsFolder。
 
@@ -26,7 +26,7 @@ pub fn launch(target: &LaunchTarget) -> Result<(), ModuleError> {
     }
 }
 
-/// §18 以管理员身份运行:仅 Win32 目标——packaged 应用由系统代理激活,
+/// 以管理员身份运行:仅 Win32 目标——packaged 应用由系统代理激活,
 /// 没有可提权的 exe,actions() 也不为它们声明此动作。
 pub fn launch_elevated(target: &LaunchTarget) -> Result<(), ModuleError> {
     match target {
@@ -45,7 +45,7 @@ pub fn launch_elevated(target: &LaunchTarget) -> Result<(), ModuleError> {
     }
 }
 
-/// §18 打开所在位置:仅 Win32 目标(packaged 同上)。
+/// 打开所在位置:仅 Win32 目标(packaged 同上)。
 pub fn reveal_location(target: &LaunchTarget) -> Result<(), ModuleError> {
     match target {
         LaunchTarget::Win32 { exe, .. } => {

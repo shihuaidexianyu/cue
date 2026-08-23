@@ -1,4 +1,4 @@
-//! 显示器放置(§54):显示在当前用户活跃 monitor。
+//! 显示器放置:显示在当前用户活跃 monitor。
 
 use windows::Win32::Foundation::{HWND, RECT};
 use windows::Win32::Graphics::Gdi::{

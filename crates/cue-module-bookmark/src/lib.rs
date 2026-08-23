@@ -1,11 +1,11 @@
-//! cue-module-bookmark —— BookmarkModule(§117)。
+//! cue-module-bookmark —— BookmarkModule。
 //!
-//! Chromium 系(Edge/Chrome)书签搜索:触发词 `b`(§5.2 词边界规则:
+//! Chromium 系(Edge/Chrome)书签搜索:触发词 `b`(词边界规则:
 //! 字母触发的模块只吃 `b<空格>` 或裸 `b`,不吞 `baidu`)。数据源是
 //! `<User Data>/<profile>/{Bookmarks,AccountBookmarks}` JSON(无锁,浏览器运行中可读);
-//! 刷新走 mtime 指纹,无 watcher(§56 精神)。打开从哪来回哪开——
+//! 刷新走 mtime 指纹,无 watcher。打开从哪来回哪开——
 //! 来源浏览器 exe 带 URL 启动(exe 缺失退回系统默认浏览器)。
-//! Firefox(places.sqlite)不在范围——§117 依赖决策:不为它引入 rusqlite。
+//! Firefox(places.sqlite)不在范围——不为它引入 rusqlite。
 
 mod catalog;
 mod chromium;
@@ -18,15 +18,15 @@ use cue_protocol::*;
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 
-/// §18 次级动作 ID(顺序即菜单顺序;PRIMARY = 打开)。
+/// 次级动作 ID(顺序即菜单顺序;PRIMARY = 打开)。
 const ACTION_COPY_URL: ActionId = ActionId(1);
 
-/// §117:BookmarkModule,trigger `b`。
+/// BookmarkModule,trigger `b`。
 pub struct BookmarkModule {
     descriptor: ModuleDescriptor,
     catalog: Arc<catalog::CatalogCache>,
-    /// 浏览器图标(每浏览器一张,load 后台线程一次性提取;§14 要求
-    /// 同一 Arc 复用,UI 按 rgba 指针缓存纹理)。
+    /// 浏览器图标(每浏览器一张,load 后台线程一次性提取;同一 Arc
+    /// 复用,UI 按 rgba 指针缓存纹理)。
     icons: Arc<OnceLock<HashMap<Browser, Arc<IconImage>>>>,
     usage: Option<UsageReader>,
 }
@@ -52,7 +52,7 @@ impl Default for BookmarkModule {
     }
 }
 
-/// §28 公式复制自 cue-module-app(Rule of Three 第二次使用):
+/// 公式复制自 cue-module-app(Rule of Three 第二次使用):
 /// UsageBonus = min(count,20)*2;24h 内 +10,7d 内 +5。
 fn usage_bonus(usage: Option<&UsageReader>, entry: &catalog::BookmarkEntry) -> i32 {
     let Some(stat) = usage.and_then(|u| u.stat(&entry.item_key, ActionId::PRIMARY)) else {
@@ -77,7 +77,7 @@ fn search(
     limit: usize,
 ) -> Vec<ModuleItem> {
     if query.is_empty() {
-        // §115 同款:空查询 = usage Top Bookmarks;无 usage 不显示"推荐"。
+        // 空查询 = usage Top Bookmarks;无 usage 不显示"推荐"。
         return top_used(entries, usage, limit);
     }
     let q = query.to_lowercase();
@@ -98,12 +98,12 @@ fn search(
     scored
         .into_iter()
         // payload 直接用 catalog 的 Arc:零拷贝,条目生命周期由
-        // Arc 所有权表达(§11)。
+        // Arc 所有权表达。
         .map(|(_, e)| ModuleItem::new(ItemId(e.item_id()), e.clone()))
         .collect()
 }
 
-/// 空查询:按 (count, last_used) 排的 Top Bookmarks(§52、§115)。
+/// 空查询:按 (count, last_used) 排的 Top Bookmarks。
 fn top_used(
     entries: &[Arc<catalog::BookmarkEntry>],
     usage: Option<&UsageReader>,
@@ -136,7 +136,7 @@ impl Module for BookmarkModule {
 
     /// load 廉价:只启动一个后台线程——首次 catalog 解析(冷读可能
     /// 触发 AV 扫描,实测首个查询付出 3.2 s)与图标提取都在线程内完成,
-    /// 之后的 query 只付指纹比对(§56/§77、§99)。
+    /// 之后的 query 只付指纹比对。
     fn load(&mut self, ctx: ModuleContext) -> Result<(), ModuleError> {
         self.usage = Some(ctx.usage.clone());
 
@@ -160,7 +160,7 @@ impl Module for BookmarkModule {
                 ),
             );
             if icons.set(loaded).is_ok() {
-                // 图标只到一次;让 Core 重跑可见行的 present()(§109)。
+                // 图标只到一次;让 Core 重跑可见行的 present()。
                 let items = catalog
                     .entries()
                     .iter()
@@ -195,7 +195,7 @@ impl LauncherModule for BookmarkModule {
         }
     }
 
-    /// §93:创建不触碰 IO;刷新(mtime 指纹 + 必要时重解析)在
+    /// 创建不触碰 IO;刷新(mtime 指纹 + 必要时重解析)在
     /// future 内、后台执行器上跑。
     fn query(&mut self, ctx: QueryContext) -> QueryFuture {
         let catalog = Arc::clone(&self.catalog);
@@ -228,14 +228,14 @@ impl LauncherModule for BookmarkModule {
                 .get()
                 .and_then(|m| m.get(&entry.browser))
                 // IconImage.rgba 是 Arc<[u8]>,clone 保持指针不变——
-                // UI 按该指针缓存纹理(§14)。
+                // UI 按该指针缓存纹理。
                 .map(|i| ResultIcon::Raster((**i).clone()))
                 .unwrap_or(ResultIcon::SystemIcon(SystemIconId::Generic)),
         );
         p
     }
 
-    /// §18:打开 / 复制链接。
+    /// 打开 / 复制链接。
     fn actions(&self, _item: &ModuleItem) -> Vec<ActionDescriptor> {
         vec![
             ActionDescriptor {
@@ -251,7 +251,7 @@ impl LauncherModule for BookmarkModule {
         ]
     }
 
-    /// 打开 = 从哪来回哪开(§117):来源浏览器 exe 带 URL 启动;
+    /// 打开 = 从哪来回哪开:来源浏览器 exe 带 URL 启动;
     /// exe 缺失(浏览器已卸载等)退回系统默认浏览器。
     fn activate(&mut self, item: &ModuleItem, action: ActionId) -> ActivationFuture {
         let entry = item.downcast_ref::<Arc<catalog::BookmarkEntry>>().cloned();
@@ -271,7 +271,7 @@ impl LauncherModule for BookmarkModule {
             match result {
                 Ok(()) => ModuleOutcome::success(
                     SessionDisposition::Close,
-                    // §51:usage 身份 = {browser}:{url}。
+                    // usage 身份 = {browser}:{url}。
                     Some(UsageRecordRequest {
                         item_key: entry.item_key.to_string(),
                         action_id: action,
@@ -308,7 +308,7 @@ mod tests {
         }
     }
 
-    /// §18:打开 / 复制链接,顺序即菜单顺序。
+    /// 打开 / 复制链接,顺序即菜单顺序。
     #[test]
     fn actions_are_open_and_copy_url() {
         let m = BookmarkModule::new();
@@ -353,7 +353,7 @@ mod tests {
             entry("甲", "https://a.example/", Browser::Edge),
             entry("乙", "https://b.example/", Browser::Edge),
         ];
-        // 无 usage → 空(§115:不显示推荐内容)
+        // 无 usage → 空(不显示推荐内容)
         assert!(search(&entries, None, "", 10).is_empty());
         let mut map = std::collections::HashMap::new();
         map.insert(

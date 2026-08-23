@@ -1,7 +1,7 @@
 //! 开机自启(登录启动项):HKCU 下 Run 键的 `CUE` 值。
 //!
 //! 每用户安装、无需管理员权限;只写当前用户 hive,卸载/关闭时
-//! 删除同名值。core.start_on_boot 设置的事务回调由编排层注入(§42)。
+//! 删除同名值。core.start_on_boot 设置的事务回调由编排层注入。
 
 use std::path::Path;
 use windows::core::w;

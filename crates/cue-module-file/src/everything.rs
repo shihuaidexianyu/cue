@@ -1,4 +1,4 @@
-//! Everything 1.4 IPC 客户端(§99):专用线程 + 容量 1 的 latest-wins
+//! Everything 1.4 IPC 客户端:专用线程 + 容量 1 的 latest-wins
 //! 请求槽 + WM_COPYDATA 同步往返。
 //!
 //! 协议逐字节对齐官方 SDK(`ipc/everything_ipc.h`、`src/Everything.c`,
@@ -12,7 +12,7 @@
 //!   回声我们给的 id(官方 dll 用 0),负载为 pack(1) 的 LIST2
 //!   (5 个 u32 头 + ITEM2[numitems](flags, data_offset) + 变长数据);
 //! - 变长数据按 request flag 位升序排列:字符串 = u32 字符数(不含
-//!   NUL)+ 文本;SIZE/DATE = 8 字节。所有读取先查边界(§63)。
+//!   NUL)+ 文本;SIZE/DATE = 8 字节。所有读取先查边界。
 //!
 //! 应答窗口必须在发查询的线程上创建并用消息泵等待——应答是"发送"
 //! 消息,只有泵(GetMessage)才会派发它(官方 dll 同款流程)。超时由
@@ -54,7 +54,7 @@ const REPLY_CLASS: &[u16] = &[
 /// FILETIME(1601 纪元,100ns 单位)→ Unix 纪元的差值。
 const FILETIME_UNIX_EPOCH_DELTA: u64 = 116_444_736_000_000_000;
 
-/// §32:业务对象只留在模块内部;Core 只见 ItemId。
+/// 业务对象只留在模块内部;Core 只见 ItemId。
 #[derive(Clone, Debug)]
 pub struct FileEntry {
     /// Everything 返回的全路径(原样,即 usage 的 item_key)。
@@ -121,14 +121,14 @@ pub(crate) fn test_entry(path: &str, is_dir: bool, size: Option<u64>) -> FileEnt
 }
 
 /// 一次 IPC 往返的请求;被更新的请求顶掉时,旧 sender 直接 drop——
-/// 其 rx 以 Canceled 结束(§99 latest-wins;Core 反正会按 ticket 丢弃)。
+/// 其 rx 以 Canceled 结束(latest-wins;Core 反正会按 ticket 丢弃)。
 struct Request {
     search: String,
     max_results: u32,
     reply: oneshot::Sender<Result<Vec<FileEntry>, ModuleError>>,
 }
 
-/// §99:专用 IPC 线程 + latest-wins 槽。clone 廉价(内部全 Arc)。
+/// 专用 IPC 线程 + latest-wins 槽。clone 廉价(内部全 Arc)。
 #[derive(Clone)]
 pub struct EverythingBackend {
     slot: Arc<(Mutex<Option<Request>>, Condvar)>,
@@ -136,8 +136,8 @@ pub struct EverythingBackend {
 }
 
 impl EverythingBackend {
-    /// 启动专用线程(窗口与消息泵都在线程内)。线程随进程生命(§99;
-    /// 模块 unload 不回收,同 AppModule catalog 线程的处理)。
+    /// 启动专用线程(窗口与消息泵都在线程内)。线程随进程生命
+    /// (模块 unload 不回收,同 AppModule catalog 线程的处理)。
     pub fn start(logger: cue_protocol::ModuleLogger) -> Self {
         let backend = Self {
             slot: Arc::new((Mutex::new(None), Condvar::new())),
@@ -150,7 +150,7 @@ impl EverythingBackend {
     }
 
     /// 投递一个查询:覆盖槽内旧请求(如有),立即返回 async 等待句柄。
-    /// 调用本身不触碰 IO(§93)。
+    /// 调用本身不触碰 IO。
     pub fn query(
         &self,
         search: String,
@@ -312,7 +312,7 @@ fn build_query(reply: HWND, search: &str, max_results: u32) -> Vec<u8> {
 }
 
 /// LIST2 解析:5 个 u32 头 + ITEM2[numitems](各 8 字节)+ 变长数据。
-/// 变长字段按 request flag 位升序;一切读取查边界(§63,外部数据永不 panic)。
+/// 变长字段按 request flag 位升序;一切读取查边界(外部数据永不 panic)。
 fn parse_list2(bytes: &[u8]) -> Result<Vec<FileEntry>, ModuleError> {
     fn bad(reason: &str) -> ModuleError {
         ModuleError::QueryFailed(format!("Everything 应答格式异常:{reason}"))
@@ -543,7 +543,7 @@ mod tests {
         );
     }
 
-    /// §63:截断/畸形应答一律 Err,不 panic。
+    /// 截断/畸形应答一律 Err,不 panic。
     #[test]
     fn list2_never_panics_on_garbage() {
         assert!(parse_list2(&[]).is_err());

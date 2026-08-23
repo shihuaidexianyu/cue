@@ -1,12 +1,12 @@
 use cue_protocol::{ActionDescriptor, ItemId, ModuleError, ModuleId, ModuleItem};
 
-/// Session 标识。跨 session 的旧结果由它保证必死(§96)——
+/// Session 标识。跨 session 的旧结果由它保证必死——
 /// generation 在每个 session 内从 0 递增即可。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct SessionId(pub u64);
 
-/// §18 次级动作菜单(Tab 打开):打开时对选中项快照
-/// `Module::actions`(同步、廉价);输入变化或新结果提交即关(§102)。
+/// 次级动作菜单(Tab 打开):打开时对选中项快照
+/// `Module::actions`(同步、廉价);输入变化或新结果提交即关。
 pub struct ActionMenuState {
     pub actions: Vec<ActionDescriptor>,
     pub selected: usize,
@@ -14,12 +14,12 @@ pub struct ActionMenuState {
     pub item_title: std::sync::Arc<str>,
 }
 
-/// §5.1 SessionState。
+/// SessionState。
 pub struct SessionState {
     pub id: SessionId,
     pub raw_input: String,
     pub active_module: ModuleId,
-    /// session 内单调递增;输入每次变化 +1(§102)。
+    /// session 内单调递增;输入每次变化 +1。
     pub generation: u64,
     pub results: Vec<ModuleItem>,
     pub selected: Option<usize>,

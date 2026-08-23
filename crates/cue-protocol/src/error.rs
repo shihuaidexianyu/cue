@@ -1,8 +1,8 @@
 use std::fmt;
 
-/// §61 Module 错误模型。V1 不需要复杂的 error hierarchy。
+/// Module 错误模型。V1 不需要复杂的 error hierarchy。
 ///
-/// Module 与 Core 同进程,外部数据失败必须返回本类型而不是 panic(§63)。
+/// Module 与 Core 同进程,外部数据失败必须返回本类型而不是 panic。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ModuleError {
     Unavailable(String),

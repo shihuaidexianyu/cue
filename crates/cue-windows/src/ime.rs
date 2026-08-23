@@ -1,10 +1,10 @@
-//! §107 输入法:**首选候选实现,Phase 1 spike 验证对象**。
+//! 输入法:**首选候选实现,Phase 1 spike 验证对象**。
 //!
 //! 产品决定已固定(Launcher 输入框强制英文输入),本模块是候选实现:
 //! 1. `ActivateKeyboardLayout` 把 UI 线程切到英文布局;
 //! 2. `ImmAssociateContext(hwnd, NULL)` 使 IME 不附加到搜索框。
 //!
-//! **一次唤醒必须成对**(v0.2 修正):show 之前记录用户(前台线程)的
+//! **一次唤醒必须成对**:show 之前记录用户(前台线程)的
 //! 布局,hide 之前恢复——否则在系统默认的全局输入法模式下,
 //! 用户的其他应用会被留在英文。
 //!
@@ -22,7 +22,7 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId};
 
-/// 唤醒时记录的用户原布局(前台线程 HKL),hide 时恢复(§107)。
+/// 唤醒时记录的用户原布局(前台线程 HKL),hide 时恢复。
 static SAVED_LAYOUT: AtomicIsize = AtomicIsize::new(0);
 
 /// ShowLauncher 流程,**必须在窗口抢到前台之前**调用:
@@ -52,7 +52,7 @@ pub fn enter_english_mode(hwnd: HWND) -> Result<(), Error> {
 
 /// HideLauncher 流程,**在窗口仍处前台时**调用才有效:
 /// 全局输入法模式下,布局切换沿前台线程传播,藏窗之后再恢复就晚了。
-/// 失焦隐藏路径调用时窗口已不在前台,恢复不保证生效(§107 已知边界)。
+/// 失焦隐藏路径调用时窗口已不在前台,恢复不保证生效(已知边界)。
 pub fn restore_saved_layout() {
     let saved = SAVED_LAYOUT.swap(0, Ordering::SeqCst);
     if saved != 0 {

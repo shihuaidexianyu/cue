@@ -1,8 +1,8 @@
-//! cue-ui —— GPUI 界面(architecture.md §57、§108)。
+//! cue-ui —— GPUI 界面。
 //!
 //! 固定网格布局:icon 槽位永远占固定宽度,`None` 即留空,文字起点永不移动。
 //! cue-ui 不认识 Module,不认识 Win32;CoreEffect 的执行经由注入的
-//! effect handler 交给编排层(cue binary,§112)。
+//! effect handler 交给编排层(cue binary)。
 
 use cue_core::{
     ActionMenuModel, ActionMenuRow, Core, CoreEffect, CoreEvent, SettingsModel, SettingsRow,
@@ -18,7 +18,7 @@ use gpui::*;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-/// §14:GPU 纹理按 `Arc` 指针缓存——module 对同一缓存图标复用同一
+/// GPU 纹理按 `Arc` 指针缓存——module 对同一缓存图标复用同一
 /// `Arc<[u8]>`,指针即缓存 key,同一张图只转换/上传一次。
 type TextureCache = HashMap<usize, Arc<RenderImage>>;
 
@@ -27,9 +27,9 @@ type TextureCache = HashMap<usize, Arc<RenderImage>>;
 /// 选择驱动的滚动窗口覆盖(键盘 launcher 不需要真滚动条)。
 const VISIBLE_ROWS: usize = 8;
 
-/// §14 契约:协议侧是 RGBA8 直线 alpha;GPUI atlas 存 BGRA(见 gpui
+/// 契约:协议侧是 RGBA8 直线 alpha;GPUI atlas 存 BGRA(见 gpui
 /// 解码路径的逐像素 swap),上传时转换。契约违约(len != w*h*4)时
-/// 放弃本张图标而非 panic(§63)。
+/// 放弃本张图标而非 panic。
 fn raster_to_texture(icon: &IconImage) -> Option<Arc<RenderImage>> {
     let mut bgra = icon.rgba.to_vec();
     for px in bgra.chunks_exact_mut(4) {
@@ -45,7 +45,7 @@ fn texture_key(icon: &IconImage) -> usize {
     Arc::as_ptr(&icon.rgba) as *const u8 as usize
 }
 
-/// 设置页热键捕获:GPUI keystroke → 协议 Hotkey(§53 OS-neutral 描述)。
+/// 设置页热键捕获:GPUI keystroke → 协议 Hotkey(OS-neutral 描述)。
 /// 纯修饰键或不可映射键名返回 None(视图继续等待下一次按键)。
 fn capture_candidate(ks: &Keystroke) -> Option<Hotkey> {
     let key = ProtoKey::parse(ks.key.as_str())?;
@@ -72,13 +72,13 @@ pub struct LauncherView {
     error: Option<String>,
     /// FocusInput 效果的视图侧标记:在下一帧 render 时落到窗口焦点上。
     want_focus: bool,
-    /// §112:CoreEffect 的外部执行器(由编排层注入;FocusInput 同时走视图侧)。
+    /// CoreEffect 的外部执行器(由编排层注入;FocusInput 同时走视图侧)。
     effect_handler: Option<Box<dyn FnMut(CoreEffect)>>,
     icon_textures: TextureCache,
-    /// §41 设置页的热键捕获态(视图本地):true 时下一次按键组合
+    /// 设置页的热键捕获态(视图本地):true 时下一次按键组合
     /// 成为 core.hotkey 候选。
     capturing_hotkey: bool,
-    /// §114 测量探针(§79):文本输入的时刻;下一次结果行非空时
+    /// 测量探针:文本输入的时刻;下一次结果行非空时
     /// 打印 input→rows 时延(InputChanged → ResultState 提交的视图侧
     /// 上界,含事件泵与 present)。
     perf_input_at: Option<std::time::Instant>,
@@ -92,8 +92,7 @@ impl LauncherView {
         let mut core_rx = core.take_event_receiver();
         let focus = cx.focus_handle();
 
-        // §96:Core 事件泵。事件在 UI 线程消费,驱动状态机并重绘。
-        // §96:Core 事件泵。事件在 UI 线程消费,驱动状态机并重绘。
+        // Core 事件泵。事件在 UI 线程消费,驱动状态机并重绘。
         // 注意:必须是 async closure(lending AsyncFnOnce),`|..| async move {}`
         // 形式无法对 &mut AsyncApp 的 HRTB 泛化。
         cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
@@ -136,7 +135,7 @@ impl LauncherView {
     fn after_core_change(&mut self, changed: bool, cx: &mut Context<Self>) {
         if changed {
             self.refresh_snapshot();
-            // §114 探针:结果行首次非空即输入→结果可见的上界。
+            // 探针:结果行首次非空即输入→结果可见的上界。
             if let Some(t0) = self.perf_input_at.take_if(|_| !self.rows.is_empty()) {
                 eprintln!("[perf] input->rows in {:?}", t0.elapsed());
             }
@@ -152,7 +151,7 @@ impl LauncherView {
         cx.notify();
     }
 
-    /// 快照:Core 状态 → 可直接渲染的行。present 只对当前结果调用(§105)。
+    /// 快照:Core 状态 → 可直接渲染的行。present 只对当前结果调用。
     fn refresh_snapshot(&mut self) {
         let Some(session) = self.core.session() else {
             self.input.clear();
@@ -184,17 +183,17 @@ impl LauncherView {
     }
 
     // ------------------------------------------------------------------
-    // 键盘(§59):统一由 Core 处理,视图只翻译按键。
+    // 键盘:统一由 Core 处理,视图只翻译按键。
     // ------------------------------------------------------------------
 
     fn on_key_down(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
-        // §41:设置页与搜索页是两套键盘语义,Core 状态决定路由。
+        // 设置页与搜索页是两套键盘语义,Core 状态决定路由。
         if self.core.in_settings() {
             self.on_settings_key_down(event);
             self.after_core_change(true, cx);
             return;
         }
-        // §18:动作菜单打开时是第三套语义(模态)。
+        // 动作菜单打开时是第三套语义(模态)。
         if self.core.in_action_menu() {
             self.on_action_menu_key_down(event);
             self.after_core_change(true, cx);
@@ -214,7 +213,7 @@ impl LauncherView {
                 self.core.backspace();
             }
             "v" if modifiers.control && !modifiers.alt => {
-                // §115:允许粘贴 Unicode(IME 禁用只针对 composition)。
+                // 允许粘贴 Unicode(IME 禁用只针对 composition)。
                 if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
                     self.perf_input_at = Some(std::time::Instant::now());
                     self.core.paste(&text);
@@ -240,7 +239,7 @@ impl LauncherView {
     }
 
     // ------------------------------------------------------------------
-    // 设置页键盘(§41):↑↓ 选择,Enter/Space 修改,Esc 返回。
+    // 设置页键盘:↑↓ 选择,Enter/Space 修改,Esc 返回。
     // 热键行进入捕获态:下一次组合键即候选,事务结果由 Core 模型回显。
     // ------------------------------------------------------------------
 
@@ -253,7 +252,7 @@ impl LauncherView {
             }
             if let Some(hotkey) = capture_candidate(ks) {
                 // 失败(如无修饰键、注册冲突):Core 保留旧值并把错误
-                // 放进模型(§42),无需视图侧处理。
+                // 放进模型,无需视图侧处理。
                 let _ = self
                     .core
                     .apply_setting(KEY_HOTKEY, SettingValue::Hotkey(hotkey));
@@ -287,13 +286,13 @@ impl LauncherView {
             (SettingKind::Hotkey, _) => {
                 self.capturing_hotkey = true;
             }
-            // V1 没有 Integer/String/Enum/Path 类设置;出现后按 §39 再加编辑 UI。
+            // V1 没有 Integer/String/Enum/Path 类设置;出现后再加编辑 UI。
             _ => {}
         }
     }
 
     // ------------------------------------------------------------------
-    // 动作菜单键盘(§18):↑↓ 选择,Enter 执行,Esc/Tab 返回。
+    // 动作菜单键盘:↑↓ 选择,Enter 执行,Esc/Tab 返回。
     // 模态:其余按键关掉菜单并被吞掉(不落进搜索输入)。
     // ------------------------------------------------------------------
 
@@ -308,7 +307,7 @@ impl LauncherView {
     }
 
     // ------------------------------------------------------------------
-    // 渲染(§108 固定网格)
+    // 渲染(固定网格)
     // ------------------------------------------------------------------
 
     fn render_input(&self) -> Div {
@@ -327,7 +326,7 @@ impl LauncherView {
     }
 
     // ------------------------------------------------------------------
-    // 设置页渲染(§41):模型来自 Core,视图只做布局。
+    // 设置页渲染:模型来自 Core,视图只做布局。
     // ------------------------------------------------------------------
 
     fn render_settings(&self, model: &SettingsModel) -> Div {
@@ -436,7 +435,7 @@ impl LauncherView {
     }
 
     // ------------------------------------------------------------------
-    // 动作菜单渲染(§18):整体替换结果区(同设置页模式),
+    // 动作菜单渲染:整体替换结果区(同设置页模式),
     // 头部标注菜单归属的选中项。
     // ------------------------------------------------------------------
 
@@ -492,7 +491,7 @@ impl LauncherView {
     }
 
     fn render_icon_slot(textures: &TextureCache, row: &ResultPresentation) -> Div {
-        // icon 槽位:固定 32px,None 即留空,文字起点永不移动(§108)。
+        // icon 槽位:固定 32px,None 即留空,文字起点永不移动。
         let slot = div()
             .w(px(32.0))
             .h_full()
@@ -509,7 +508,7 @@ impl LauncherView {
                 SystemIconId::Generic => "▪",
             }),
             Some(ResultIcon::Raster(icon)) => match textures.get(&texture_key(icon)) {
-                // 24px 显示尺寸;96px 源纹理由 GPUI 降采样(§14)。
+                // 24px 显示尺寸;96px 源纹理由 GPUI 降采样。
                 Some(texture) => slot.child(img(Arc::clone(texture)).w(px(24.0)).h(px(24.0))),
                 None => slot,
             },
@@ -566,7 +565,7 @@ impl Render for LauncherView {
             window.focus(&self.focus);
         }
 
-        // 先把本帧出现的 Raster 图标全部转成纹理(§14:按 Arc 指针
+        // 先把本帧出现的 Raster 图标全部转成纹理(按 Arc 指针
         // 缓存,同一图标只上传一次)。字段级拆分借用,rows 只读、
         // textures 只写,互不冲突。
         {
@@ -603,15 +602,15 @@ impl Render for LauncherView {
 
         let in_settings = self.core.in_settings();
         let body: Div = if let Some(model) = self.core.settings_model() {
-            // §41:设置模式整体替换搜索区(输入行也不再显示,见下方 chrome)。
+            // 设置模式整体替换搜索区(输入行也不再显示,见下方 chrome)。
             self.render_settings(&model)
         } else if let Some(menu) = self.core.action_menu_model() {
-            // §18:动作菜单整体替换结果区(输入行保留,可见查询上下文)。
+            // 动作菜单整体替换结果区(输入行保留,可见查询上下文)。
             self.render_action_menu(&menu)
         } else {
             let mut col = div().flex().flex_col();
             if let Some(error) = &self.error {
-                // §115:激活失败 session 保持打开——错误做成横幅叠加在
+                // 激活失败 session 保持打开——错误做成横幅叠加在
                 // 结果列表上方,用户仍可 ↑↓ 选择其他项重试。
                 col = col.child(
                     div()
@@ -623,7 +622,7 @@ impl Render for LauncherView {
                 );
             }
             if self.rows.is_empty() {
-                // §58:没有结果时的空态。
+                // 没有结果时的空态。
                 col = col.child(
                     div()
                         .py(px(12.0))

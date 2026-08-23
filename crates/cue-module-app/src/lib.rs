@@ -1,6 +1,6 @@
-//! cue-module-app —— AppModule(§27–30、§51、§56)。
+//! cue-module-app —— AppModule。
 //!
-//! V1 唯一必装模块(§65):User/Common Start Menu + UWP/MSIX 发现,
+//! V1 唯一必装模块:User/Common Start Menu + UWP/MSIX 发现,
 //! 拼音(全拼 + 首字母)+ fuzzy 搜索,usage ranking,异步图标。
 //! Core 不知道什么是 .lnk、拼音、AUMID——全部语义在本 crate。
 
@@ -20,14 +20,14 @@ use icon::IconPipeline;
 use ready::CatalogCell;
 use std::sync::Arc;
 
-/// §18 次级动作 ID(顺序即菜单顺序;PRIMARY = 打开)。
+/// 次级动作 ID(顺序即菜单顺序;PRIMARY = 打开)。
 const ACTION_RUN_AS_ADMIN: ActionId = ActionId(1);
 const ACTION_OPEN_LOCATION: ActionId = ActionId(2);
 
-/// §65:AppModule 是 V1 的 required default module。
+/// AppModule 是 V1 的 required default module。
 pub struct AppModule {
     descriptor: ModuleDescriptor,
-    /// §56 spike:发现不满足冷启动预算,catalog 由后台线程一次性
+    /// spike:发现不满足冷启动预算,catalog 由后台线程一次性
     /// 构建(进程启动时唯一一次,无 watcher);query future 等就绪。
     catalog: Arc<CatalogCell>,
     usage: Option<UsageReader>,
@@ -55,7 +55,7 @@ impl Default for AppModule {
     }
 }
 
-/// §28:Score = StringMatch + UsageBonus + RecencyBonus(+ AliasBonus,
+/// Score = StringMatch + UsageBonus + RecencyBonus(+ AliasBonus,
 /// V1 无 aliases UI,恒 0)。具体公式属于本模块。
 fn usage_bonus(usage: Option<&UsageReader>, entry: &AppEntry) -> i32 {
     let Some(stat) = usage.and_then(|u| u.stat(&entry.item_key, ActionId::PRIMARY)) else {
@@ -80,7 +80,7 @@ fn search(
     limit: usize,
 ) -> Vec<ModuleItem> {
     if query.is_empty() {
-        // §115:空查询 = usage Top Apps;无 usage 数据时空列表,
+        // 空查询 = usage Top Apps;无 usage 数据时空列表,
         // 不显示任何"推荐内容"。
         return top_used(entries, usage, limit);
     }
@@ -105,7 +105,7 @@ fn search(
         .collect()
 }
 
-/// §115 空查询:按 (count, last_used) 排的 Top Apps(§52)。
+/// 空查询:按 (count, last_used) 排的 Top Apps。
 fn top_used(entries: &[AppEntry], usage: Option<&UsageReader>, limit: usize) -> Vec<ModuleItem> {
     let Some(usage) = usage else {
         return Vec::new();
@@ -132,9 +132,9 @@ impl Module for AppModule {
         &self.descriptor
     }
 
-    /// §56:load 只做廉价初始化——catalog 发现(Win32 COM / WinRT)
-    /// 实测阻塞至秒级,不满足 §77 冷启动预算,移入 module 自有线程
-    /// (§99)。图标提取本来就不在 load 内(§109)。
+    /// load 只做廉价初始化——catalog 发现(Win32 COM / WinRT)
+    /// 实测阻塞至秒级,不满足 冷启动预算,移入 module 自有线程
+    /// 图标提取本来就不在 load 内。
     fn load(&mut self, ctx: ModuleContext) -> Result<(), ModuleError> {
         self.usage = Some(ctx.usage.clone());
         self.icons = Some(IconPipeline::new(ctx.events.clone()));
@@ -151,7 +151,7 @@ impl Module for AppModule {
             let n_packaged = entries.len() - n_start_menu;
             catalog::dedup(&mut entries);
             entries.sort_by(|a, b| a.name_lower.cmp(&b.name_lower));
-            // §56/§77 冷启动 spike:构建耗时就地记录。
+            // 冷启动 spike:构建耗时就地记录。
             logger.log(
                 LogLevel::Info,
                 &format!(
@@ -188,8 +188,8 @@ impl LauncherModule for AppModule {
         }
     }
 
-    /// §93:创建 future 不触碰 IO;catalog 就绪前 future 挂起
-    /// (不阻塞 UI 线程),过期完成由 Core 的 ticket 判定丢弃(§96)。
+    /// 创建 future 不触碰 IO;catalog 就绪前 future 挂起
+    /// (不阻塞 UI 线程),过期完成由 Core 的 ticket 判定丢弃。
     fn query(&mut self, ctx: QueryContext) -> QueryFuture {
         let cell = Arc::clone(&self.catalog);
         let usage = self.usage.clone();
@@ -220,13 +220,13 @@ impl LauncherModule for AppModule {
                 .icons
                 .as_ref()
                 .and_then(|icons| icons.get_or_queue(item.id(), &entry.icon_key(), exe)),
-            // §109:packaged logo 走 WinRT 资源,V1 用 SystemIcon 兜底。
+            // packaged logo 走 WinRT 资源,V1 用 SystemIcon 兜底。
             LaunchTarget::Packaged { .. } => Some(ResultIcon::SystemIcon(SystemIconId::App)),
         };
         p
     }
 
-    /// §18:打开 / 以管理员身份运行 / 打开所在位置。后两个仅 Win32
+    /// 打开 / 以管理员身份运行 / 打开所在位置。后两个仅 Win32
     /// 目标——packaged 应用由系统代理激活,没有可提权/可定位的 exe。
     fn actions(&self, item: &ModuleItem) -> Vec<ActionDescriptor> {
         let mut actions = vec![ActionDescriptor {
@@ -291,7 +291,7 @@ mod tests {
         ModuleItem::new(ItemId(1), AppEntry::new("TestApp", target))
     }
 
-    /// §18:Win32 应用有完整动作集(打开/以管理员身份运行/打开所在位置),
+    /// Win32 应用有完整动作集(打开/以管理员身份运行/打开所在位置),
     /// packaged 应用只有打开——后两个动作没有可作用的 exe。
     #[test]
     fn actions_depend_on_target_kind() {
@@ -316,7 +316,7 @@ mod tests {
     }
 
     /// packaged 目标走到次级动作只能来自 Core 与模块的版本错配——
-    /// 明确报错,不静默降级(§63)。
+    /// 明确报错,不静默降级。
     #[test]
     fn secondary_actions_reject_packaged() {
         let target = LaunchTarget::Packaged {

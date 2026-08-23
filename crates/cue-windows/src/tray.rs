@@ -1,8 +1,8 @@
-//! §116 托盘图标:进程存活的唯一常驻可见信号,V1 唯一的退出路径。
+//! 托盘图标:进程存活的唯一常驻可见信号,V1 唯一的退出路径。
 //!
 //! 图标优先用 exe 内嵌的品牌资源(crate::icon,assets/cue.ico);
 //! 资源缺失时退回运行时生成的 32×32 圆角方块。左键唤起,右键菜单
-//! "显示 / 设置 / 退出"(§116 不为托盘做更多)。
+//! "显示 / 设置 / 退出"(托盘不做更多)。
 
 use crate::host::{HostMsg, WM_CUE_TRAY, WM_CUE_TRAY_CMD};
 use std::sync::atomic::{AtomicIsize, Ordering};
@@ -19,7 +19,7 @@ const TRAY_CMD_SHOW: usize = 1;
 const TRAY_CMD_SETTINGS: usize = 2;
 const TRAY_CMD_QUIT: usize = 3;
 
-/// 已挂图标的 host hwnd;退出时据此 NIM_DELETE(§116 不留幽灵图标)。
+/// 已挂图标的 host hwnd;退出时据此 NIM_DELETE(不留幽灵图标)。
 static TRAY_HOST: AtomicIsize = AtomicIsize::new(0);
 
 pub fn add(host: HWND) -> Result<(), Error> {
@@ -89,7 +89,7 @@ unsafe fn show_menu(host: HWND) {
         let _ = AppendMenuW(menu, MF_STRING, TRAY_CMD_SETTINGS, w!("设置"));
         let _ = AppendMenuW(menu, MF_STRING, TRAY_CMD_QUIT, w!("退出 CUE"));
         // MSDN 托盘菜单模式:弹出前把 owner 设为前台,
-        // 否则点击别处菜单不收起。owner 需为普通窗口(§116)。
+        // 否则点击别处菜单不收起。owner 需为普通窗口。
         let _ = SetForegroundWindow(host);
         let mut pt = POINT::default();
         let _ = GetCursorPos(&mut pt);

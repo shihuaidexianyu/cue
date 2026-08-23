@@ -4,7 +4,7 @@ use crate::settings::{SettingsChangeSet, SettingsSchema};
 use std::fmt;
 use std::sync::Arc;
 
-/// §8 Module ID:稳定、唯一、不依赖显示名称。
+/// Module ID:稳定、唯一、不依赖显示名称。
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct ModuleId(Arc<str>);
 
@@ -34,17 +34,16 @@ impl From<&str> for ModuleId {
     }
 }
 
-/// §8
 pub struct ModuleDescriptor {
     pub id: ModuleId,
     pub name: &'static str,
     pub version: &'static str,
 }
 
-/// §7 基础 Module trait。
+/// 基础 Module trait。
 ///
 /// `try_apply_settings` 命名即语义:先 try-apply,成功才由 Core commit;
-/// 失败不 commit(§42)。
+/// 失败不 commit。
 pub trait Module {
     fn descriptor(&self) -> &ModuleDescriptor;
 

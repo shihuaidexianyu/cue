@@ -25,7 +25,7 @@ WizardStyle=modern
 ; setup.exe 与向导用品牌图标;"应用和功能"里的卸载条目用安装后的 exe 图标。
 SetupIconFile=..\assets\cue.ico
 UninstallDisplayIcon={app}\cue.exe
-; 运行中的 CUE 持有单实例 mutex(§113)——安装/卸载前 Inno 会提示关闭;
+; 运行中的 CUE 持有单实例 mutex——安装/卸载前 Inno 会提示关闭;
 ; CloseApplications 走 Restart Manager 兜底自动关。
 AppMutex=Local\CUE.SingleInstance
 CloseApplications=yes
@@ -48,7 +48,7 @@ Name: "{autoprograms}\CUE"; Filename: "{app}\cue.exe"; Comment: "CUE —— 轻�
 
 [Registry]
 ; 勾选"开机自动启动"才写 Run 键;卸载时删除。与应用内
-; 设置→开机自启(§36)写的是同一个键,两边天然一致。
+; 设置→开机自启写的是同一个键,两边天然一致。
 Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueName: "CUE"; ValueData: """{app}\cue.exe"""; Tasks: autostart; Flags: uninsdeletevalue
 
 [Run]

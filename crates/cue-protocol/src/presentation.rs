@@ -1,9 +1,9 @@
 use std::sync::Arc;
 
-/// §13 Result Presentation。Module 决定展示什么,Core/GPUI 决定怎么画。
+/// Result Presentation。Module 决定展示什么,Core/GPUI 决定怎么画。
 ///
 /// v0.2:文本统一 `Arc<str>`——`SharedString` 是 GPUI re-export 类型,
-/// 会违反 §71 的依赖方向;到 GPUI 类型的转换留在 ui crate。
+/// 会违反依赖方向;到 GPUI 类型的转换留在 ui crate。
 #[derive(Clone, Debug)]
 pub struct ResultPresentation {
     pub title: Arc<str>,
@@ -25,7 +25,7 @@ impl ResultPresentation {
     }
 }
 
-/// §14 ResultIcon —— 协议自有位图,不是 GPUI 类型(§71)。
+/// ResultIcon —— 协议自有位图,不是 GPUI 类型。
 #[derive(Clone, Debug)]
 pub enum ResultIcon {
     Raster(IconImage),
@@ -33,7 +33,7 @@ pub enum ResultIcon {
     SystemIcon(SystemIconId),
 }
 
-/// §14 像素契约:RGBA8、row-major、sRGB、straight(非预乘)alpha,
+/// 像素契约:RGBA8、row-major、sRGB、straight(非预乘)alpha,
 /// `rgba.len() == width * height * 4`。
 /// 若 GPUI 纹理需要预乘 alpha 或其他通道序,由 ui 在上传时转换一次。
 ///
@@ -51,7 +51,7 @@ impl IconImage {
         debug_assert_eq!(
             rgba.len() as u64,
             width as u64 * height as u64 * 4,
-            "§14: rgba.len() == width * height * 4"
+            "rgba.len() == width * height * 4"
         );
         Self {
             rgba,
@@ -61,7 +61,7 @@ impl IconImage {
     }
 }
 
-/// §14 SystemIcon 逃生口。V1 只保留最小集合。
+/// SystemIcon 逃生口。V1 只保留最小集合。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SystemIconId {
     App,
@@ -70,13 +70,12 @@ pub enum SystemIconId {
     Generic,
 }
 
-/// §15
 #[derive(Clone, Debug)]
 pub struct ResultBadge {
     pub text: Arc<str>,
 }
 
-/// §16 右侧辅助信息。
+/// 右侧辅助信息。
 #[derive(Clone, Debug)]
 pub enum ResultAccessory {
     Text(Arc<str>),

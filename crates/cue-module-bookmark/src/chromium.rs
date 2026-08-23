@@ -1,4 +1,4 @@
-//! Chromium 系书签数据源(§117):
+//! Chromium 系书签数据源:
 //! `<User Data>/<profile>/{Bookmarks,AccountBookmarks}` JSON。
 //!
 //! 对齐 Flow Launcher BrowserBookmark 插件的发现方式:枚举 User Data
@@ -7,7 +7,7 @@
 //! 改写它而不再维护 `Bookmarks`,两者 JSON 同构、可同时存在),递归
 //! 遍历 `roots`(`folder`/`workspace` 容器、Opera `custom_root`)。
 //! JSON 无锁,浏览器运行中可直接读;Firefox(places.sqlite)不在
-//! V1.x 范围(§117 依赖决策)。
+//! V1.x 范围。
 
 use std::path::PathBuf;
 
@@ -26,7 +26,7 @@ impl Browser {
         }
     }
 
-    /// usage 身份前缀(§51):打开动作按来源浏览器区分(从哪来回哪开),
+    /// usage 身份前缀:打开动作按来源浏览器区分(从哪来回哪开),
     /// item_key = `{key}:{url}`。
     pub fn key(self) -> &'static str {
         match self {
@@ -45,7 +45,7 @@ impl Browser {
         Some(local.join(rel))
     }
 
-    /// 浏览器 exe 候选路径(行图标提取用,§117)。
+    /// 浏览器 exe 候选路径(行图标提取用)。
     pub fn exe_path(self) -> Option<PathBuf> {
         let mut candidates: Vec<PathBuf> = Vec::new();
         let push_env = |candidates: &mut Vec<PathBuf>, var: &str, rel: &str| {
@@ -82,12 +82,12 @@ pub struct BookmarkFile {
 }
 
 /// 每个 profile 目录下的书签文件名:本地书签 + 账号书签。同一 URL
-/// 若两边都有,按 §30"宁可重复"原则各出一行(item_key 相同,usage
+/// 若两边都有,按 "宁可重复"原则各出一行(item_key 相同,usage
 /// 自然合并)。
 const BOOKMARK_FILE_NAMES: [&str; 2] = ["Bookmarks", "AccountBookmarks"];
 
 /// 枚举所有已安装浏览器的所有 profile 的书签文件。
-/// 纯 readdir/stat,亚毫秒级;每次查询都可安全重跑(§117 刷新策略)。
+/// 纯 readdir/stat,亚毫秒级;每次查询都可安全重跑(刷新策略)。
 pub fn discover_files() -> Vec<BookmarkFile> {
     let mut out = Vec::new();
     for browser in BROWSERS {
@@ -136,7 +136,7 @@ fn scan_user_data(browser: Browser, user_data: &std::path::Path, out: &mut Vec<B
 }
 
 /// 从 URL 取域名(展示/搜索键):去 scheme,截到第一个 `/ : ?`。
-/// 手写而不引 url crate——§72,这里只需要域名。
+/// 手写而不引 url crate:这里只需要域名。
 pub fn domain_of(url: &str) -> &str {
     let after_scheme = url.split_once("://").map(|(_, rest)| rest).unwrap_or(url);
     let end = after_scheme
@@ -146,7 +146,7 @@ pub fn domain_of(url: &str) -> &str {
 }
 
 /// 解析一个 Bookmarks 文件,产出 (title, url) 对。坏 JSON / 缺字段
-/// 一律跳过而非报错(§63:外部数据永不 panic)。
+/// 一律跳过而非报错(外部数据永不 panic)。
 pub fn parse_bookmarks(json: &str) -> Vec<(String, String)> {
     let Ok(value) = serde_json::from_str::<serde_json::Value>(json) else {
         return Vec::new();

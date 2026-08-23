@@ -2,11 +2,11 @@ use crate::hotkey::Hotkey;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-/// 设置 key。带完整命名空间(`core.*` / `module.<module-id>.*`,§40)。
+/// 设置 key。带完整命名空间(`core.*` / `module.<module-id>.*`)。
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct SettingKey(pub Arc<str>);
 
-/// §39。V1 不建立复杂表单 framework。
+/// V1 不建立复杂表单 framework。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SettingKind {
     Bool,
@@ -17,7 +17,7 @@ pub enum SettingKind {
     Hotkey,
 }
 
-/// 设置值。注意 `core.*` 的设置值必须是 OS-neutral 数据描述(§111)。
+/// 设置值。注意 `core.*` 的设置值必须是 OS-neutral 数据描述。
 #[derive(Clone, Debug, PartialEq)]
 pub enum SettingValue {
     Bool(bool),
@@ -28,7 +28,7 @@ pub enum SettingValue {
     Hotkey(Hotkey),
 }
 
-/// §38。`apply_policy` 是每个设置的事务挂载点(§42),不可省略。
+/// `apply_policy` 是每个设置的事务挂载点,不可省略。
 #[derive(Clone, Debug)]
 pub struct SettingSpec {
     pub key: SettingKey,
@@ -41,7 +41,6 @@ pub struct SettingSpec {
 
 pub type SettingsSchema = Vec<SettingSpec>;
 
-/// §42
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ApplyPolicy {
     Immediate,

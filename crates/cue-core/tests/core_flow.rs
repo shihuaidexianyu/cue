@@ -1,4 +1,4 @@
-//! §106 可测试性:异步模型的注入点(Spawner、事件队列)同时是测试点。
+//! 可测试性:异步模型的注入点(Spawner、事件队列)同时是测试点。
 //! 这些测试不启动 GPUI、不创建窗口。
 
 use cue_core::*;
@@ -9,7 +9,7 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
 // ---------------------------------------------------------------------
-// 手动 Spawner(§97 测试实现):不真正执行,只排队;
+// 手动 Spawner(测试实现):不真正执行,只排队;
 // poll_all 把队列中的 future 各 poll 一次,未完成的保留——
 // 从而精确控制"哪些完成、哪些仍在途",且永远不会阻塞。
 // ---------------------------------------------------------------------
@@ -279,7 +279,7 @@ fn selected(core: &Core) -> Option<usize> {
 }
 
 // ---------------------------------------------------------------------
-// §5.2 路由:字母触发词的词边界规则
+// 路由:字母触发词的词边界规则
 // ---------------------------------------------------------------------
 
 #[test]
@@ -306,7 +306,7 @@ fn alphanumeric_trigger_requires_word_boundary() {
 }
 
 // ---------------------------------------------------------------------
-// §96 ticket 校验
+// ticket 校验
 // ---------------------------------------------------------------------
 
 #[test]
@@ -322,7 +322,7 @@ fn open_session_runs_empty_query_and_selects_first() {
 
     assert!(core.is_visible());
     assert_eq!(results(&core), 2);
-    // §115:非空默认选中第 0 项。
+    // 非空默认选中第 0 项。
     assert_eq!(selected(&core), Some(0));
 
     let effects = core.take_effects();
@@ -371,7 +371,7 @@ fn cross_session_same_generation_is_dropped() {
     drain(&mut core, &mut rx);
     assert_eq!(results(&core), 1);
 
-    // session A 的结果带着相同的 generation 到达——session_id 拦截(§96)。
+    // session A 的结果带着相同的 generation 到达——session_id 拦截。
     tx_a.send(ready_items(&["A", "A2"])).unwrap();
     spawner.poll_all();
     drain(&mut core, &mut rx);
@@ -387,7 +387,7 @@ fn module_epoch_is_dropped_after_reload() {
 
     core.open_session();
 
-    // reload:epoch 递增,旧实例的在途 query 必死(§49、§96)。
+    // reload:epoch 递增,旧实例的在途 query 必死。
     let new_module = FakeModule::new("fake");
     new_module.push_ready(&["Fresh"]);
     core.reload_module(Box::new(new_module)).unwrap();
@@ -405,7 +405,7 @@ fn module_epoch_is_dropped_after_reload() {
 }
 
 // ---------------------------------------------------------------------
-// §102 / §115 输入与选择
+// 输入与选择
 // ---------------------------------------------------------------------
 
 #[test]
@@ -422,7 +422,7 @@ fn input_change_clears_results_immediately() {
     assert_eq!(results(&core), 1);
     assert_eq!(selected(&core), Some(0));
 
-    // §102:输入变化立即清空,stale 结果永不可激活。
+    // 输入变化立即清空,stale 结果永不可激活。
     core.input_changed("x".into());
     assert_eq!(results(&core), 0);
     assert_eq!(selected(&core), None);
@@ -450,7 +450,7 @@ fn selection_clamps_at_edges() {
 }
 
 // ---------------------------------------------------------------------
-// §103 activation
+// activation
 // ---------------------------------------------------------------------
 
 #[test]
@@ -469,10 +469,10 @@ fn activation_close_records_usage_and_hides() {
     spawner.poll_all();
     drain(&mut core, &mut rx);
 
-    // success + Close → session 关闭(§103)。
+    // success + Close → session 关闭。
     assert!(core.session().is_none());
     assert!(core.take_effects().contains(&CoreEffect::HideLauncher));
-    // usage 总是记录(§103)。
+    // usage 总是记录。
     let stat = core
         .usage_stat(&ModuleId::from_static("fake"), "Alpha", ActionId::PRIMARY)
         .expect("usage recorded");
@@ -514,7 +514,7 @@ fn activation_from_old_session_does_not_close_new_session() {
     spawner.poll_all();
     drain(&mut core, &mut rx);
 
-    // usage 仍然记录(§103),但 session B 不被误关(§103 / v0.2 P0 修复)。
+    // usage 仍然记录,但 session B 不被误关。
     assert!(core.session().is_some());
     assert!(!core.take_effects().contains(&CoreEffect::HideLauncher));
     assert!(core
@@ -543,14 +543,14 @@ fn failed_activation_keeps_session_open_with_error() {
     spawner.poll_all();
     drain(&mut core, &mut rx);
 
-    // §115:失败默认 KeepOpen + 错误展示。
+    // 失败默认 KeepOpen + 错误展示。
     assert!(core.session().is_some());
     assert!(core.session().unwrap().error.is_some());
     assert!(!core.take_effects().contains(&CoreEffect::HideLauncher));
 }
 
 // ---------------------------------------------------------------------
-// §18 次级动作菜单(Tab)
+// 次级动作菜单(Tab)
 // ---------------------------------------------------------------------
 
 fn three_actions() -> Vec<ActionDescriptor> {
@@ -656,7 +656,7 @@ fn menu_enter_activates_with_chosen_action_id() {
     drain(&mut core, &mut rx);
 
     assert_eq!(*activated.lock().unwrap(), [ActionId(1)]);
-    // success + Close → session 关闭;usage 记在 ActionId(1) 名下(§103)。
+    // success + Close → session 关闭;usage 记在 ActionId(1) 名下。
     assert!(core.session().is_none());
     assert!(core
         .usage_stat(&ModuleId::from_static("fake"), "Alpha", ActionId(1))
@@ -698,13 +698,13 @@ fn input_change_closes_menu() {
     core.open_action_menu();
     assert!(core.in_action_menu());
 
-    // §102:输入变化,stale 结果与动作快照一并失效。
+    // 输入变化,stale 结果与动作快照一并失效。
     core.input_changed("x".into());
     assert!(!core.in_action_menu());
 }
 
 // ---------------------------------------------------------------------
-// §109 Module 自发事件
+// Module 自发事件
 // ---------------------------------------------------------------------
 
 #[test]
@@ -745,7 +745,7 @@ fn presentation_invalidated_only_for_visible_items() {
 }
 
 // ---------------------------------------------------------------------
-// §53 toggle / §54 失焦
+// toggle / 失焦
 // ---------------------------------------------------------------------
 
 #[test]
@@ -767,7 +767,7 @@ fn hotkey_toggles_and_focus_loss_hides() {
     assert!(!core.is_visible());
     assert!(core.take_effects().contains(&CoreEffect::HideLauncher));
 
-    // 再次打开,失焦 → 隐藏(§54 hide_on_focus_loss 默认 true)
+    // 再次打开,失焦 → 隐藏(hide_on_focus_loss 默认 true)
     core.hotkey_pressed();
     assert!(core.is_visible());
     spawner.poll_all();
@@ -799,7 +799,7 @@ fn present_delegates_to_active_module() {
 }
 
 // ---------------------------------------------------------------------
-// §42 设置事务:validate → try-apply → commit → persist
+// 设置事务:validate → try-apply → commit → persist
 // ---------------------------------------------------------------------
 
 fn setup_with_config(module: FakeModule, config: CoreConfig) -> (Core, Arc<ManualSpawner>) {
@@ -812,7 +812,7 @@ fn setup_with_config(module: FakeModule, config: CoreConfig) -> (Core, Arc<Manua
 
 #[test]
 fn hotkey_apply_failure_keeps_old_value() {
-    // try-apply 失败(热键被占用):不 commit,旧值保留(§42/§53)。
+    // try-apply 失败(热键被占用):不 commit,旧值保留。
     let mut config = test_config();
     config.apply_hotkey = Some(Box::new(|_| Err("occupied by another app".to_string())));
     let (mut core, _spawner) = setup_with_config(FakeModule::new("fake"), config);
@@ -850,7 +850,7 @@ fn hotkey_apply_success_commits() {
 
 #[test]
 fn start_on_boot_apply_failure_keeps_old_value() {
-    // try-apply 失败(注册表写入被拒):不 commit,旧值保留(§42)。
+    // try-apply 失败(注册表写入被拒):不 commit,旧值保留。
     let mut config = test_config();
     config.apply_start_on_boot = Some(Box::new(|_| Err("registry denied".to_string())));
     let (mut core, _spawner) = setup_with_config(FakeModule::new("fake"), config);
@@ -948,7 +948,7 @@ fn settings_view_lifecycle_and_effects() {
     assert!(!core.in_settings());
     assert!(core.take_effects().contains(&CoreEffect::HideLauncher));
 
-    // Bool 切换立即生效并体现在 Core 行为上(§54)。
+    // Bool 切换立即生效并体现在 Core 行为上。
     core.open_settings();
     core.settings_select_next(); // hide_on_focus_loss 行
     core.apply_setting("core.hide_on_focus_loss", SettingValue::Bool(false))

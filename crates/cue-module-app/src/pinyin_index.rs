@@ -1,9 +1,9 @@
-//! 拼音索引(§27):全拼 + 首字母。load 期预计算,查询期零 IO。
+//! 拼音索引:全拼 + 首字母。load 期预计算,查询期零 IO。
 
 use pinyin::ToPinyin;
 
 /// 返回 (全拼键, 首字母键)。ASCII 字符不进拼音键——
-/// 英文名已由 `name_lower` 键覆盖(§27 示例中 "naraka" 这类
+/// 英文名已由 `name_lower` 键覆盖(示例中 "naraka" 这类
 /// 英文名/alias 的价值由 name_lower 承担)。
 pub fn keys(name: &str) -> (String, String) {
     let mut full = String::new();

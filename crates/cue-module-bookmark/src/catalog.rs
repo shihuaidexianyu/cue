@@ -1,6 +1,6 @@
-//! 书签 catalog(§117):条目模型 + mtime 指纹刷新。
+//! 书签 catalog:条目模型 + mtime 指纹刷新。
 //!
-//! 刷新纪律:无 watcher(§56 精神)——每次查询在模块后台 future 里
+//! 刷新规则:无 watcher——每次查询在模块后台 future 里
 //! 重跑发现 + stat,指纹(路径, mtime, 长度)变了才重解析。46 KB
 //! 量级 JSON 解析亚毫秒,热路径(UI/唤醒)零 IO。
 
@@ -14,7 +14,7 @@ use std::time::SystemTime;
 #[derive(Clone, Debug)]
 pub struct BookmarkEntry {
     pub title: Arc<str>,
-    /// 排序键(§27 同款:name 小写)。
+    /// 排序键(name 小写)。
     pub title_lower: Arc<str>,
     pub pinyin_full: String,
     pub pinyin_initials: String,
@@ -23,7 +23,7 @@ pub struct BookmarkEntry {
     pub browser: Browser,
     /// 非 Default profile 的目录名;Default 为空串(不标注)。
     pub profile: Arc<str>,
-    /// §51 usage 身份:`{browser}:{url}`——从哪来回哪开之后,不同来源
+    /// usage 身份:`{browser}:{url}`——从哪来回哪开之后,不同来源
     /// 浏览器是不同启动动作,usage 分开计。
     pub item_key: Arc<str>,
     id: u64,
@@ -59,7 +59,7 @@ impl CatalogCache {
     }
 
     /// 发现 + stat;指纹不同则重解析全部(解析极廉价,不做增量)。
-    /// 单个文件损坏跳过该文件(§63),其余照常。
+    /// 单个文件损坏跳过该文件,其余照常。
     pub fn refresh_if_changed(&self) {
         let files = chromium::discover_files();
         let fingerprints: Fingerprints = files

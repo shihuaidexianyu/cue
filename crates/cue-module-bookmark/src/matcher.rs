@@ -1,8 +1,8 @@
-//! fuzzy 匹配与打分(§27、§28)。复制自 cue-module-app(Rule of Three
-//! 第二次使用,§72 允许重复;第三个消费者(FileModule)落地时下沉 util crate。
+//! fuzzy 匹配与打分。复制自 cue-module-app(Rule of Three
+//! 第二次使用, 允许重复;第三个消费者(FileModule)落地时下沉 util crate。
 //! 打分倾向:前缀命中 > 连续命中 > 词首命中 > 离散命中;键越短越好。
 //! 手写实现而非引入 nucleo:catalog 规模(千级)× 键数(3)下,
-//! 线性扫描远低于 §79 的 P95 < 15 ms 预算(§72 克制原则)。
+//! 线性扫描远低于搜索 P95 < 15 ms 的预算。
 
 /// 对单个键做子序列 fuzzy 打分。不匹配(非子序列)返回 None。
 pub fn fuzzy_score(query: &str, key: &str) -> Option<i32> {

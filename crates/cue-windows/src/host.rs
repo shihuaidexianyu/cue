@@ -2,11 +2,11 @@
 //! (WM_HOTKEY、第二实例唤醒、失焦通知、托盘回调),与 GPUI 窗口完全解耦——
 //! 主线程消息循环(GPUI 驱动)会把投递到本窗口的消息分发到我们的 WndProc。
 //!
-//! 不是 message-only 窗口:托盘菜单要求 owner 可设为前台(§116),
+//! 不是 message-only 窗口:托盘菜单要求 owner 可设为前台,
 //! message-only 窗口做不到。
 //!
 //! 失焦检测用 `SetWinEventHook(EVENT_SYSTEM_FOREGROUND, WINEVENT_OUTOFCONTEXT)`:
-//! 无需子类化 GPUI 窗口,前台窗口变化且不是 Launcher 时通知 Core(§54)。
+//! 无需子类化 GPUI 窗口,前台窗口变化且不是 Launcher 时通知 Core。
 
 use std::sync::atomic::{AtomicIsize, Ordering};
 use windows::core::{w, Error, PCWSTR};
@@ -15,26 +15,26 @@ use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Accessibility::{SetWinEventHook, UnhookWinEvent, HWINEVENTHOOK};
 use windows::Win32::UI::WindowsAndMessaging::*;
 
-/// Host 上报给编排层的事件(由 cue binary 翻译成 Core 的 HostEvent,§112)。
+/// Host 上报给编排层的事件(由 cue binary 翻译成 Core 的 HostEvent)。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HostMsg {
     HotkeyPressed,
-    /// 第二实例请求 show / focus(§113),或托盘左键/菜单"显示"(§116)。
+    /// 第二实例请求 show / focus,或托盘左键/菜单"显示"。
     ShowRequested,
-    /// 托盘菜单"设置"(§41 设置页入口)。
+    /// 托盘菜单"设置"(设置页入口)。
     OpenSettings,
-    /// 托盘菜单"退出"(§116):进程唯一的正常退出路径。
+    /// 托盘菜单"退出":进程唯一的正常退出路径。
     QuitRequested,
-    /// 前台焦点离开 Launcher 窗口(§54)。
+    /// 前台焦点离开 Launcher 窗口。
     FocusLost,
 }
 
-/// 窗口类名。同时是第二实例 `FindWindow` 的定位依据(§113)。
+/// 窗口类名。同时是第二实例 `FindWindow` 的定位依据。
 pub const HOST_WINDOW_CLASS: PCWSTR = w!("CUE.HostWindow");
 
 pub const WM_CUE_SHOW: u32 = WM_APP + 1;
 pub const WM_CUE_FOCUS_LOST: u32 = WM_APP + 2;
-/// 托盘图标回调消息(§116),lparam 为鼠标消息。
+/// 托盘图标回调消息,lparam 为鼠标消息。
 pub const WM_CUE_TRAY: u32 = WM_APP + 3;
 /// 托盘菜单命令的延迟分发消息(见 tray::show_menu):wParam 为命令 id。
 /// TrackPopupMenu 返回后菜单窗口仍在拆除,Windows 会把前台还给原前台
@@ -64,7 +64,7 @@ pub struct HostWindow {
 
 impl HostWindow {
     /// 在调用线程(必须是带消息循环的主线程)创建隐藏顶层窗口。
-    /// 永不 ShowWindow;顶层是为了托盘菜单的前台 owner 要求(§116)。
+    /// 永不 ShowWindow;顶层是为了托盘菜单的前台 owner 要求。
     pub fn create(handler: Box<dyn Fn(HostMsg) + Send>) -> Result<Self, Error> {
         unsafe {
             let hinstance = GetModuleHandleW(None)?;
@@ -102,7 +102,7 @@ impl HostWindow {
     }
 }
 
-/// §116 退出路径:结束主线程消息循环,GPUI 的 run 随 WM_QUIT 返回,
+/// 退出路径:结束主线程消息循环,GPUI 的 run 随 WM_QUIT 返回,
 /// 进程正常退出(热键随进程释放;托盘图标由编排层先 remove)。
 pub fn request_quit() {
     unsafe {
@@ -153,7 +153,7 @@ unsafe extern "system" fn host_wnd_proc(
 }
 
 // ---------------------------------------------------------------------
-// 失焦钩子(§54)
+// 失焦钩子
 // ---------------------------------------------------------------------
 
 pub struct FocusHook(HWINEVENTHOOK);

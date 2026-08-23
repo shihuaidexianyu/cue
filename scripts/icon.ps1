@@ -15,7 +15,7 @@ $work = Join-Path $env:TEMP "cue-icon-gen"
 Remove-Item -Recurse -Force $work -ErrorAction SilentlyContinue | Out-Null
 New-Item -ItemType Directory -Force $work | Out-Null
 
-# --- 找 Edge(§117 目标平台必有) ---
+# --- 找 Edge(目标平台必有) ---
 $edge = @(
     "${env:ProgramFiles(x86)}\Microsoft\Edge\Application\msedge.exe",
     "$env:ProgramFiles\Microsoft\Edge\Application\msedge.exe"

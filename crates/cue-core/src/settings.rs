@@ -1,22 +1,22 @@
-//! §5.6 Settings Host:设置的唯一所有者(§48)。
+//! Settings Host:设置的唯一所有者。
 //!
 //! 职责边界:本模块只管"规格表 + 当前值 + 持久化 + core.* 的
-//! try-apply 回调";事务编排(校验 → try-apply → commit → persist,
-//! §42)由 Core::apply_setting 驱动,module.* 的 try-apply 由 Core
+//! try-apply 回调";事务编排(校验 → try-apply → commit → persist)
+//! 由 Core::apply_setting 驱动,module.* 的 try-apply 由 Core
 //! 经 registry 调 `Module::try_apply_settings`。
 //!
 //! 持久化:`<storage_root>/settings.tsv`,版本头 + 整体重写 + tmp
-//! rename(与 usage 同一纪律):坏行跳过、头不符整个忽略、IO 失败
-//! 仅告警——设置文件损坏永远不构成启动失败(§63)。
+//! rename(与 usage 同一规则):坏行跳过、头不符整个忽略、IO 失败
+//! 仅告警——设置文件损坏永远不构成启动失败。
 
 use cue_protocol::*;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-/// §53 / §112 同步例外:core.hotkey 的 try-apply 由 Core 直接调用
+/// 同步例外:core.hotkey 的 try-apply 由 Core 直接调用
 /// Host 注入的这个函数(先注册新的,成功再注销旧的)。是函数,不是
-/// HostPlatform trait(§110)。Core 是 UI 线程单线程状态机(§91),
+/// HostPlatform trait。Core 是 UI 线程单线程状态机,
 /// 回调只在 UI 线程被调用,不要求 Send。
 pub type ApplyHotkey = Box<dyn FnMut(&Hotkey) -> Result<(), String>>;
 
@@ -30,15 +30,15 @@ pub const KEY_HOTKEY: &str = "core.hotkey";
 pub const KEY_HIDE_ON_FOCUS_LOSS: &str = "core.hide_on_focus_loss";
 pub const KEY_START_ON_BOOT: &str = "core.start_on_boot";
 
-/// §41 给 UI 的渲染模型:Core 出模型,cue-ui 只渲染——
+/// 给 UI 的渲染模型:Core 出模型,cue-ui 只渲染——
 /// Module 永远不画 GPUI(禁止 `render_settings_gpui`)。
 #[derive(Clone, Debug)]
 pub struct SettingsModel {
     pub rows: Vec<SettingsRow>,
     pub selected: usize,
-    /// try-apply 失败信息(旧值保留,§42)。
+    /// try-apply 失败信息(旧值保留)。
     pub error: Option<Arc<str>>,
-    /// §42 RestartApplication:有改动待重启生效。
+    /// RestartApplication:有改动待重启生效。
     pub restart_required: bool,
 }
 
@@ -83,13 +83,13 @@ impl SettingsHost {
             apply_start_on_boot,
             restart_required: false,
         };
-        // §36 core.*:V1 三项,都是 Immediate。
+        // core.*:V1 三项,都是 Immediate。
         host.register_specs(core_specs());
         host
     }
 
-    /// 模块 load 之后收编其 schema(§37/§40)。key 必须带
-    /// `module.<id>.` 前缀;不符的条目跳过(不 panic,§63)。
+    /// 模块 load 之后注册其 schema。key 必须带
+    /// `module.<id>.` 前缀;不符的条目跳过(不 panic)。
     pub fn register_module_specs(&mut self, module_id: &ModuleId, schema: SettingsSchema) {
         let prefix = format!("module.{}.", module_id.as_str());
         self.register_specs(
@@ -142,7 +142,7 @@ impl SettingsHost {
         }
     }
 
-    /// 模块设置快照(§49 ModuleContext.settings):短 key(去掉
+    /// 模块设置快照(ModuleContext.settings):短 key(去掉
     /// `module.<id>.` 前缀)——模块知道自己的 id,不需要全限定名。
     pub fn values_for_module(&self, module_id: &ModuleId) -> ModuleSettings {
         let prefix = format!("module.{}.", module_id.as_str());
@@ -157,7 +157,7 @@ impl SettingsHost {
         ModuleSettings::new(map)
     }
 
-    /// §42 Immediate 的 core.hotkey try-apply:同步回调,失败不 commit。
+    /// Immediate 的 core.hotkey try-apply:同步回调,失败不 commit。
     pub fn try_apply_hotkey(&mut self, hotkey: &Hotkey) -> Result<(), String> {
         match self.apply_hotkey.as_mut() {
             Some(f) => f(hotkey),
@@ -174,7 +174,7 @@ impl SettingsHost {
         }
     }
 
-    /// commit + persist(§42 顺序的最后两步,永远一起)。
+    /// commit + persist(顺序的最后两步,永远一起)。
     pub fn commit(&mut self, key: &str, value: SettingValue) {
         self.values.insert(key.to_string(), value);
         self.persist();
@@ -216,7 +216,7 @@ impl SettingsHost {
     }
 
     // ------------------------------------------------------------------
-    // 持久化(版本头 + 整体重写 + tmp rename,与 usage 同一纪律)
+    // 持久化(版本头 + 整体重写 + tmp rename,与 usage 同一规则)
     // ------------------------------------------------------------------
 
     fn load_persisted(&self) -> HashMap<String, String> {
@@ -256,13 +256,13 @@ impl SettingsHost {
     }
 }
 
-/// §36 Core settings(V1)。
+/// Core settings(V1)。
 fn core_specs() -> Vec<SettingSpec> {
     vec![
         SettingSpec {
             key: SettingKey(Arc::from(KEY_HOTKEY)),
             label: "全局热键".into(),
-            description: Some("唤起 / 隐藏 Launcher(toggle 语义固定,§53)".into()),
+            description: Some("唤起 / 隐藏 Launcher(toggle 语义固定)".into()),
             kind: SettingKind::Hotkey,
             default: SettingValue::Hotkey(Hotkey::default()),
             apply_policy: ApplyPolicy::Immediate,
@@ -270,7 +270,7 @@ fn core_specs() -> Vec<SettingSpec> {
         SettingSpec {
             key: SettingKey(Arc::from(KEY_HIDE_ON_FOCUS_LOSS)),
             label: "失焦隐藏".into(),
-            description: Some("前台焦点离开时自动隐藏窗口(§54);关闭后失焦仅退出聚焦态".into()),
+            description: Some("前台焦点离开时自动隐藏窗口;关闭后失焦仅退出聚焦态".into()),
             kind: SettingKind::Bool,
             default: SettingValue::Bool(true),
             apply_policy: ApplyPolicy::Immediate,

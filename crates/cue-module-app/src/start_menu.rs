@@ -1,4 +1,4 @@
-//! User / Common Start Menu 的 .lnk 发现(§29)。不扫盘找 exe(§56)。
+//! User / Common Start Menu 的 .lnk 发现。不扫盘找 exe。
 
 use crate::catalog::{AppEntry, LaunchTarget};
 use cue_protocol::{LogLevel, ModuleLogger};
@@ -9,7 +9,7 @@ use windows::Win32::System::Com::{CoCreateInstance, IPersistFile, CLSCTX_INPROC_
 use windows::Win32::UI::Shell::{IShellLinkW, ShellLink};
 
 /// 枚举两个 Start Menu 根,解析全部 .lnk,返回未去重的 entry。
-/// 单个 lnk 失败只跳过并计数——外部数据永不 panic(§63)。
+/// 单个 lnk 失败只跳过并计数——外部数据永不 panic。
 pub fn discover(logger: &ModuleLogger) -> Vec<AppEntry> {
     let _com = ComGuard::new();
     let mut out = Vec::new();

@@ -11,8 +11,8 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 /// 枚举本进程的顶层窗口,返回 GPUI 主窗口的 HWND。
 ///
 /// 按类名过滤:GPUI 0.2 的主窗口类名是 `Zed::Window`。host window
-/// 也是本进程的顶层(隐藏)窗口(§116),不过滤就会张冠李戴;
-/// 也不过滤可见性——Launcher 窗口创建时就是隐藏的(§54)。
+/// 也是本进程的顶层(隐藏)窗口,不过滤就会张冠李戴;
+/// 也不过滤可见性——Launcher 窗口创建时就是隐藏的。
 pub fn find_main_window_hwnd() -> Option<HWND> {
     struct Search {
         pid: u32,
@@ -79,7 +79,7 @@ pub fn hide(hwnd: HWND) {
     }
 }
 
-/// 渲染预热(§114):boot 后离屏显示并强制同步一帧,把 DirectX /
+/// 渲染预热:boot 后离屏显示并强制同步一帧,把 DirectX /
 /// DirectWrite 管线、字体与字形缓存的惰性初始化从首次唤起路径挪走
 /// (实测首唤 406 ms vs 稳态 ~95 ms)。GPUI 在 WM_PAINT 里完成整帧
 /// 渲染,所以 InvalidateRect + UpdateWindow 即可驱动预热。

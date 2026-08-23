@@ -1,8 +1,8 @@
 // release 用 GUI 子系统:双击/开始菜单/自启不再给进程挂控制台窗口。
 // debug 保留控制台(cargo run 可见 [boot]/[perf] 探针);release 下
-// 探针仍可由父进程重定向 stderr 捕获(§114 E2E 正是这么测的)。
+// 探针仍可由父进程重定向 stderr 捕获(E2E 正是这么测的)。
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
-//! cue —— Launcher 可执行文件,唯一的 composition root(§70、§112)。
+//! cue —— Launcher 可执行文件,唯一的 composition root。
 //!
 //! 编排:HostEvent → Core → CoreEffect → cue-ui / cue-windows。
 //! 只有本 crate 同时认识 Core、GPUI 和 Win32。
@@ -21,14 +21,14 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
 
-/// §97:生产环境 TaskSpawner,把 Core 的异步工作挂到 GPUI 后台线程池。
+/// 生产环境 TaskSpawner,把 Core 的异步工作挂到 GPUI 后台线程池。
 struct GpuiSpawner {
     executor: BackgroundExecutor,
 }
 
 impl TaskSpawner for GpuiSpawner {
     fn spawn(&self, fut: BoxFuture<'static, ()>) {
-        // §91 北极星:Core 不做物理取消——spawn 即移交,detach 后
+        // 北极星:Core 不做物理取消——spawn 即移交,detach 后
         // 结果有效性由 SessionId / ModuleEpoch / Generation 判定。
         self.executor.spawn(fut).detach();
     }
@@ -37,16 +37,16 @@ impl TaskSpawner for GpuiSpawner {
 const WINDOW_WIDTH: i32 = 640;
 const WINDOW_HEIGHT: i32 = 420;
 
-/// 开发期热键覆盖:`CUE_HOTKEY="ctrl+alt+k"`(格式同设置值,§53)。
+/// 开发期热键覆盖:`CUE_HOTKEY="ctrl+alt+k"`(格式同设置值)。
 /// 只影响本次进程的初始注册,不写入 settings.tsv——调试覆盖不应
-/// 变成持久配置。正式修改走托盘 → 设置(§41)。
+/// 变成持久配置。正式修改走托盘 → 设置。
 fn parse_hotkey_env() -> Option<Hotkey> {
     std::env::var("CUE_HOTKEY").ok()?.parse().ok()
 }
 
 fn main() {
     let boot_started = std::time::Instant::now();
-    // §113:单实例必须在最早时机——任何状态文件被打开之前。
+    // 单实例必须在最早时机——任何状态文件被打开之前。
     // 第二实例:signal_first_instance 已在 acquire 内完成,直接退出。
     let single_instance = match win::single_instance::acquire() {
         win::single_instance::AcquireOutcome::Primary(guard) => guard,
@@ -59,15 +59,15 @@ fn main() {
         });
 
         let mut registry = ModuleRegistry::new();
-        // §65:AppModule 是 V1 的 required default module。
+        // AppModule 是 V1 的 required default module。
         registry
             .register(Box::new(AppModule::new()))
             .expect("register app module");
-        // §117:BookmarkModule,触发词 `b`(词边界规则见 §5.2)。
+        // BookmarkModule,触发词 `b`(词边界规则)。
         registry
             .register(Box::new(BookmarkModule::new()))
             .expect("register bookmark module");
-        // §31–33、§118:FileModule,触发词 `/`(依赖本机 Everything 1.4)。
+        // FileModule,触发词 `/`(依赖本机 Everything 1.4)。
         registry
             .register(Box::new(FileModule::new()))
             .expect("register file module");
@@ -76,7 +76,7 @@ fn main() {
             .map(|p| PathBuf::from(p).join("CUE"))
             .unwrap_or_else(|_| PathBuf::from("CUE"));
 
-        // §53:apply_hotkey 回调与初始注册共用同一个 HotkeyManager。
+        // apply_hotkey 回调与初始注册共用同一个 HotkeyManager。
         // Core::new 先于 host window(manager 需要 host hwnd)——
         // 用共享槽打破构造顺序环;槽只在 UI 线程访问。
         let hotkey_slot: Rc<RefCell<Option<win::hotkey::HotkeyManager>>> =
@@ -128,10 +128,10 @@ fn main() {
         .expect("core init");
         let core_tx = core.event_sender();
 
-        // Host window(Win32 消息入口)→ Core 事件队列(§112)。
+        // Host window(Win32 消息入口)→ Core 事件队列。
         let host = win::host::HostWindow::create(Box::new(move |msg| {
             eprintln!("[host] {msg:?}");
-            // §116:托盘"退出"是唯一正常退出路径——先删托盘图标
+            // 托盘"退出"是唯一正常退出路径——先删托盘图标
             // (不留幽灵图标),再结束消息循环;热键随进程释放。
             if msg == win::host::HostMsg::QuitRequested {
                 win::tray::remove();
@@ -149,10 +149,10 @@ fn main() {
         }))
         .expect("host window");
 
-        // §116:托盘图标是进程存活的唯一常驻可见信号。
+        // 托盘图标是进程存活的唯一常驻可见信号。
         win::tray::add(host.hwnd()).expect("tray icon");
 
-        // 热键管理器入槽;初始注册 = env 覆盖(仅本次进程)或设置值(§53)。
+        // 热键管理器入槽;初始注册 = env 覆盖(仅本次进程)或设置值。
         *hotkey_slot.borrow_mut() = Some(win::hotkey::HotkeyManager::new(host.hwnd()));
         let initial_hotkey = parse_hotkey_env().unwrap_or_else(|| core.hotkey());
         let registered = hotkey_slot
@@ -165,10 +165,10 @@ fn main() {
         if let Err(e) = registered {
             eprintln!("[warn] hotkey registration failed: {e}");
         }
-        // §77 冷启动预算(< 500 ms)的常驻探针:进程入口 → 热键就绪。
+        // 冷启动预算(< 500 ms)的常驻探针:进程入口 → 热键就绪。
         eprintln!("[boot] hotkey ready in {:?}", boot_started.elapsed());
 
-        // §54:常驻但默认隐藏——窗口创建时不可见,等待 ShowLauncher 效果。
+        // 常驻但默认隐藏——窗口创建时不可见,等待 ShowLauncher 效果。
         let bounds = Bounds::centered(
             None,
             size(px(WINDOW_WIDTH as f32), px(WINDOW_HEIGHT as f32)),
@@ -196,9 +196,9 @@ fn main() {
         win::window::set_brand_icon(hwnd); // alt-tab / 任务栏图标(资源 id 1)
         let focus_hook = win::host::install_focus_hook().expect("focus hook");
 
-        // §112:CoreEffect → Win32 执行。FocusInput 的视图侧焦点
+        // CoreEffect → Win32 执行。FocusInput 的视图侧焦点
         // 由 LauncherView 自己在 render 时消费(见 cue-ui)。
-        // ever_shown 同时是 §114 渲染预热的护栏:会话开过就不必预热。
+        // ever_shown 同时是渲染预热的护栏:会话开过就不必预热。
         let ever_shown = Rc::new(std::cell::Cell::new(false));
         let ever_shown_fx = ever_shown.clone();
         window_handle
@@ -213,12 +213,12 @@ fn main() {
                                 WINDOW_WIDTH,
                                 WINDOW_HEIGHT,
                             );
-                            // §107:必须在抢到前台之前记录用户的输入法布局。
+                            // 必须在抢到前台之前记录用户的输入法布局。
                             let _ = win::ime::enter_english_mode(hwnd);
                             win::window::show_and_focus(hwnd);
                         }
                         CoreEffect::HideLauncher => {
-                            // §107:窗口仍在前台时恢复用户布局;
+                            // 窗口仍在前台时恢复用户布局;
                             // 失焦隐藏路径是尽力而为(已知边界)。
                             win::ime::restore_saved_layout();
                             win::window::hide(hwnd);
@@ -231,8 +231,8 @@ fn main() {
             })
             .expect("wire effect handler");
 
-        // §114:首次唤起的 406 ms 是 GPU/字体管线的惰性初始化。
-        // 空闲时离屏预热一帧,把它从唤起热路径(§55)上挪走。
+        // 首次唤起的 406 ms 是 GPU/字体管线的惰性初始化。
+        // 空闲时离屏预热一帧,把它从唤起热路径上挪走。
         // 若用户抢先唤起,ever_shown 护栏让预热直接跳过。
         cx.spawn(async move |cx| {
             cx.background_executor()

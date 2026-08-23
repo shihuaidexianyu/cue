@@ -1,9 +1,9 @@
-//! 图标管线(§14、§109):异步提取,Arc 复用,完成后推
+//! 图标管线:异步提取,Arc 复用,完成后推
 //! `PresentationInvalidated` 让 Core 重跑可见行的 present()。
 //! 提取本身由 cue-util-win::icon 提供;Packaged app 的 logo 在 WinRT
 //! 资源里,V1 用 SystemIcon 兜底,不提取。
 //!
-//! 线程模型(§99):module 自有 worker 线程串行提取,负缓存防重试风暴。
+//! 线程模型:module 自有 worker 线程串行提取,负缓存防重试风暴。
 
 use cue_protocol::{IconImage, ItemId, ModuleEvent, ModuleEventSink, ResultIcon};
 use cue_util_win::com::ComGuard;
@@ -51,13 +51,13 @@ impl IconPipeline {
         }
     }
 
-    /// present() 热路径(§105 < 1 ms,无 IO):命中返回缓存图标;
-    /// 未命中登记 Pending 并投递提取请求,本帧返回 None(§108 留空槽位)。
+    /// present() 热路径(< 1 ms,无 IO):命中返回缓存图标;
+    /// 未命中登记 Pending 并投递提取请求,本帧返回 None(留空槽位)。
     pub fn get_or_queue(&self, item_id: ItemId, key: &str, exe: &Path) -> Option<ResultIcon> {
         let mut cache = self.cache.lock().unwrap();
         match cache.get(key) {
             // IconImage 内 rgba 是 Arc<[u8]>,clone 保持指针不变——
-            // UI 按该指针缓存纹理(§14)。
+            // UI 按该指针缓存纹理。
             Some(Slot::Ready(icon)) => Some(ResultIcon::Raster((**icon).clone())),
             Some(Slot::Pending) | Some(Slot::Failed) => None,
             None => {
@@ -106,7 +106,7 @@ fn worker_loop(
                     cache.insert(req.key, Slot::Ready(Arc::new(icon)));
                     ready.push(req.item_id);
                 }
-                // 负缓存:失败不重试(图标缺失不是致命问题,§63)
+                // 负缓存:失败不重试(图标缺失不是致命问题)
                 None => {
                     cache.insert(req.key, Slot::Failed);
                 }

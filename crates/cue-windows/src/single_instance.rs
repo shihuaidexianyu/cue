@@ -1,4 +1,4 @@
-//! §113 单实例:named mutex 检测 + 薄 IPC(PostMessage 到第一实例的
+//! 单实例:named mutex 检测 + 薄 IPC(PostMessage 到第一实例的
 //! host window)请求 show/focus + 退出。
 //!
 //! 锁定一个全局假设:settings 与 usage store 永远单写者。
@@ -56,7 +56,7 @@ fn signal_first_instance() {
                 // 第二实例通常由用户输入(Start Menu / 快捷键)启动,
                 // 此刻拥有前台权限;先把权限移交给第一实例,
                 // 否则第一实例的 SetForegroundWindow 会被系统拒绝,
-                // 窗口 show 出来立刻被失焦隐藏(§54)。
+                // 窗口 show 出来立刻被失焦隐藏。
                 let mut pid = 0u32;
                 GetWindowThreadProcessId(host, Some(&mut pid));
                 if pid != 0 {

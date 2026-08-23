@@ -1,6 +1,6 @@
-//! §53 OS-neutral 热键描述。
+//! OS-neutral 热键描述。
 //!
-//! 禁止把 Win32 常量(`MOD_*`、`VK_*`)作为设置值存进 Core(§111);
+//! 禁止把 Win32 常量(`MOD_*`、`VK_*`)作为设置值存进 Core;
 //! 翻译到平台 API 属于 Host。
 
 /// 修饰键。位掩码语义,用 bool 字段表达,便于序列化与 UI 渲染。
@@ -64,7 +64,7 @@ pub enum Key {
     Char(char),
 }
 
-/// §53 全局热键设置值。
+/// 全局热键设置值。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Hotkey {
     pub modifiers: Modifiers,
@@ -72,7 +72,7 @@ pub struct Hotkey {
 }
 
 impl Default for Hotkey {
-    /// §53 默认 Alt+Space。
+    /// 默认 Alt+Space。
     fn default() -> Self {
         Self {
             modifiers: Modifiers::ALT,
@@ -185,7 +185,7 @@ impl std::fmt::Display for Hotkey {
 }
 
 /// 解析失败(空修饰键、未知键名、多余键位都拒绝——设置值必须
-/// 可注册,§42 的"取值校验"在解析层完成大半)。
+/// 可注册,"取值校验"在解析层完成大半)。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HotkeyParseError(pub String);
 

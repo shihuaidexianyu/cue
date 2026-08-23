@@ -1,4 +1,4 @@
-//! 系统图标提取(§14):`SHGetFileInfoW(SHGFI_SYSICONINDEX)` →
+//! 系统图标提取:`SHGetFileInfoW(SHGFI_SYSICONINDEX)` →
 //! `SHGetImageList(SHIL_JUMBO)`(256px)→ HICON → `DrawIconEx` 进
 //! 32bpp top-down DIB → BGRA→RGBA,单尺寸 96px(UI 降采样,纹理按
 //! Arc 指针缓存,故缓存只存 Arc)。
@@ -18,7 +18,7 @@ use windows::Win32::UI::Shell::{
 };
 use windows::Win32::UI::WindowsAndMessaging::*;
 
-/// §14:单尺寸 96px。
+/// 单尺寸 96px。
 pub const ICON_SIZE: u32 = 96;
 
 /// 提取磁盘上真实文件的系统图标(exe / lnk 目标等)。
@@ -64,7 +64,7 @@ fn extract_shell_icon(
     }
 }
 
-/// HICON → 96×96 RGBA(straight alpha,§14 像素契约)。
+/// HICON → 96×96 RGBA(straight alpha 像素契约)。
 /// GDI 32bpp DIB 为 BGRA,逐像素交换 R/B。
 fn hicon_to_rgba(hicon: HICON, size: u32) -> Option<IconImage> {
     unsafe {
@@ -194,7 +194,7 @@ mod tests {
     use windows::Win32::Storage::FileSystem::{FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL};
 
     /// 系统图标冒烟:虚拟(按属性,不触盘)与真实(explorer.exe)两条
-    /// 提取路径,验证 §14 像素契约。合并为一个测试:SHGetImageList 的
+    /// 提取路径,验证像素契约。合并为一个测试:SHGetImageList 的
     /// 系统图像列表是进程级共享状态,并行提取会偶发失败(生产侧各
     /// 提取点本就串行/低频,无此问题)。
     #[test]

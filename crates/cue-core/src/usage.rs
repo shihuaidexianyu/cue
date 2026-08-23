@@ -6,13 +6,13 @@ use std::time::{Duration, SystemTime};
 
 type UsageKey = (ModuleId, String, ActionId);
 
-/// §50 聚合 Usage store(Phase 4 起带持久化)。
+/// 聚合 Usage store(Phase 4 起带持久化)。
 ///
 /// V1 只存 `count + last_used`,不存 event log——排序只需要
-/// frequency + recency(§52),这是刻意取舍。
+/// frequency + recency,这是刻意取舍。
 ///
 /// 这是 Core 中唯一共享加锁的状态:Module 的后台 Future 也会
-/// 读取它做 ranking,因此内部用 RwLock;Core 其余状态一律不加锁(§91)。
+/// 读取它做 ranking,因此内部用 RwLock;Core 其余状态一律不加锁。
 ///
 /// 持久化:整体重写 + tmp rename。记录频率 = 用户启动应用的节奏,
 /// 聚合后文件有界(每行一条统计),写穿比 flush 调度更简单且抗崩溃。
@@ -23,7 +23,7 @@ type UsageKey = (ModuleId, String, ActionId);
 /// <module_id>\t<action>\t<count>\t<unix_secs>\t<item_key>
 /// ```
 ///
-/// 文件是外部数据(§63):坏行跳过、头不匹配整个忽略、IO 失败
+/// 文件是外部数据:坏行跳过、头不匹配整个忽略、IO 失败
 /// 只告警——usage 丢失永远不构成启动/运行失败。
 #[derive(Clone, Default)]
 pub struct UsageStore {
@@ -43,7 +43,7 @@ impl UsageStore {
         }
     }
 
-    /// §103:activation 完成时调用(usage 总是记录)。
+    /// activation 完成时调用(usage 总是记录)。
     pub fn record(&self, module: &ModuleId, req: &UsageRecordRequest) {
         {
             let mut map = self.inner.write().expect("usage store poisoned");
@@ -67,7 +67,7 @@ impl UsageStore {
             .copied()
     }
 
-    /// 绑定 module id 的 reader,随 ModuleContext 发给 Module(§49)。
+    /// 绑定 module id 的 reader,随 ModuleContext 发给 Module。
     pub fn reader_for(&self, module: &ModuleId) -> UsageReader {
         Arc::new(ModuleUsageReader {
             module: module.clone(),

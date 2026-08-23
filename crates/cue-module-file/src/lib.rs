@@ -1,15 +1,15 @@
-//! cue-module-file —— FileModule(§31–33、§118)。
+//! cue-module-file —— FileModule。
 //!
-//! `/` 触发的文件搜索:触发词是标点,verbatim 匹配(§5.2 词边界只约束
+//! `/` 触发的文件搜索:触发词是标点,verbatim 匹配(词边界只约束
 //! 字母触发);`/` 之后的输入原样作为 Everything 搜索串——查询语法
-//! (子串、`ext:`、路径过滤等)归模块与 Everything,Core 不解析(§3)。
-//! 数据源是本机已安装运行的 Everything 1.4(§31 依赖决策:依赖第三方
-//! 服务,不自建索引、不链 Everything.dll),IPC 走 WM_COPYDATA(§99:
-//! 专用线程 + latest-wins 槽)。文件与文件夹同一模态(§33);FileEntry
-//! 只在模块内部,Core 只见 ItemId(§32)。
+//! (子串、`ext:`、路径过滤等)归模块与 Everything,Core 不解析。
+//! 数据源是本机已安装运行的 Everything 1.4(依赖第三方服务,
+//! 不自建索引、不链 Everything.dll),IPC 走 WM_COPYDATA(专用
+//! 线程 + latest-wins 槽)。文件与文件夹同一模态;FileEntry
+//! 只在模块内部,Core 只见 ItemId。
 //!
-//! 空查询返回空:UsageRead 只能按键查、不能枚举,给不出 Top Files
-//! (§50);不显示任何推荐内容(§115 精神)。排序保持 Everything 的
+//! 空查询返回空:UsageRead 只能按键查、不能枚举,给不出 Top Files,
+//! 不显示任何推荐内容。排序保持 Everything 的
 //! NAME_ASCENDING(SDK 保证该序无性能损失),V1 不做 usage 重排。
 
 mod everything;
@@ -19,20 +19,20 @@ use cue_protocol::*;
 use everything::{EverythingBackend, FileEntry};
 use std::sync::{Arc, Mutex, OnceLock};
 
-/// §18 次级动作 ID(顺序即菜单顺序;PRIMARY = 打开)。
+/// 次级动作 ID(顺序即菜单顺序;PRIMARY = 打开)。
 const ACTION_REVEAL: ActionId = ActionId(1);
 const ACTION_COPY_PATH: ActionId = ActionId(2);
 
-/// §31:FileModule,trigger `/`。
+/// FileModule,trigger `/`。
 pub struct FileModule {
     descriptor: ModuleDescriptor,
     /// load 时启动(专用 IPC 线程);未 load 时 None → query 报 Unavailable。
     backend: Option<EverythingBackend>,
-    /// 文件夹 / 通用文件图标(load 后台线程一次性提取;§14 要求同一
-    /// Arc 复用,UI 按 rgba 指针缓存纹理)。
+    /// 文件夹 / 通用文件图标(load 后台线程一次性提取;同一 Arc
+    /// 复用,UI 按 rgba 指针缓存纹理)。
     icons: Arc<OnceLock<icon::FileIcons>>,
     /// 最近一次 query 返回的 item id:图标晚到时据此发
-    /// PresentationInvalidated(§109),让 Core 重画可见行。
+    /// PresentationInvalidated,让 Core 重画可见行。
     last_items: Arc<Mutex<Vec<ItemId>>>,
 }
 
@@ -63,7 +63,7 @@ impl Module for FileModule {
     }
 
     /// load 廉价:只起两个线程——Everything IPC 线程(窗口与消息泵都在
-    /// 线程内,§99)与图标提取线程(两次 SHGetFileInfoW,毫秒级)。
+    /// 线程内)与图标提取线程(两次 SHGetFileInfoW,毫秒级)。
     fn load(&mut self, ctx: ModuleContext) -> Result<(), ModuleError> {
         self.backend = Some(EverythingBackend::start(ctx.logger.clone()));
 
@@ -92,7 +92,7 @@ impl Module for FileModule {
     }
 
     fn unload(&mut self) {
-        // IPC 线程随进程生命(§99,同 AppModule catalog 线程);
+        // IPC 线程随进程生命(同 AppModule catalog 线程);
         // icons OnceLock 不重建:幂等无害。
     }
 
@@ -113,10 +113,10 @@ impl LauncherModule for FileModule {
         }
     }
 
-    /// §93:创建不触碰 IO——只往 latest-wins 槽投一个请求,future 内
+    /// 创建不触碰 IO——只往 latest-wins 槽投一个请求,future 内
     /// await 应答。空查询直接返回空(见模块头注释)。
     fn query(&mut self, ctx: QueryContext) -> QueryFuture {
-        // 标点触发的剩余输入不去空白(§5.2);Everything 语义上前导
+        // 标点触发的剩余输入不去空白;Everything 语义上前导
         // 空白无意义,trim 掉。
         let search = ctx.query.trim().to_string();
         if search.is_empty() {
@@ -133,7 +133,7 @@ impl LauncherModule for FileModule {
             let entries = backend
                 .query(search, limit as u32)
                 .await
-                // oneshot Canceled = 被更新的输入顶掉(§99 latest-wins);
+                // oneshot Canceled = 被更新的输入顶掉(latest-wins);
                 // Core 反正会按 ticket 丢弃这个过期完成。
                 .map_err(|_| ModuleError::QueryFailed("IPC 请求被取代".into()))??;
             let items: Vec<ModuleItem> = entries
@@ -163,7 +163,7 @@ impl LauncherModule for FileModule {
         p.icon = Some(match self.icons.get() {
             Some(icons) => {
                 // IconImage.rgba 是 Arc<[u8]>,clone 保持指针不变——
-                // UI 按该指针缓存纹理(§14)。
+                // UI 按该指针缓存纹理。
                 let img = if entry.is_dir {
                     &icons.folder
                 } else {
@@ -180,7 +180,7 @@ impl LauncherModule for FileModule {
         p
     }
 
-    /// §18:打开 / 打开所在文件夹 / 复制路径。
+    /// 打开 / 打开所在文件夹 / 复制路径。
     fn actions(&self, _item: &ModuleItem) -> Vec<ActionDescriptor> {
         vec![
             ActionDescriptor {
@@ -202,7 +202,7 @@ impl LauncherModule for FileModule {
     }
 
     /// Open = ShellExecute 默认动词:文件由系统关联程序打开,文件夹
-    /// 进资源管理器。usage 身份 = 全路径(§51,稳定启动标识)。
+    /// 进资源管理器。usage 身份 = 全路径(稳定启动标识)。
     fn activate(&mut self, item: &ModuleItem, action: ActionId) -> ActivationFuture {
         let entry = item.downcast_ref::<FileEntry>().cloned();
         Box::pin(async move {
@@ -273,7 +273,7 @@ mod tests {
         assert_eq!(format_size(3 * 1024u64.pow(4)), "3.0 TB");
     }
 
-    /// §18:打开 / 打开所在文件夹 / 复制路径,顺序即菜单顺序。
+    /// 打开 / 打开所在文件夹 / 复制路径,顺序即菜单顺序。
     #[test]
     fn actions_are_open_reveal_copy() {
         let m = FileModule::new();
@@ -320,7 +320,7 @@ mod tests {
         assert!(p.subtitle.is_none());
     }
 
-    /// 空查询(含纯空白)返回空,不触碰 backend(§50 给不出 Top Files)。
+    /// 空查询(含纯空白)返回空,不触碰 backend(给不出 Top Files)。
     #[test]
     fn empty_query_returns_empty_without_backend() {
         let mut m = FileModule::new();
@@ -345,7 +345,7 @@ mod tests {
         assert!(matches!(r, Err(ModuleError::Unavailable(_))));
     }
 
-    /// `/  cue` 这种带前导空白的剩余输入(§5.2 标点触发不去空白),
+    /// `/ cue` 这种带前导空白的剩余输入(标点触发不去空白),
     /// 模块内 trim——Everything 语义上前导空白无意义。
     #[test]
     fn query_trims_whitespace() {

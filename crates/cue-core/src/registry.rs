@@ -2,13 +2,13 @@ use cue_protocol::{LauncherDescriptor, LauncherModule, ModuleError, ModuleId};
 use std::collections::HashMap;
 use std::fmt;
 
-/// §5.3 Module Registry。V1 直接存 `Box<dyn LauncherModule>`——
+/// Module Registry。V1 直接存 `Box<dyn LauncherModule>`——
 /// stable Rust 无法在 `dyn Module` 上运行时查询"是否同时是
 /// LauncherModule"(无 trait upcasting),而 V1 所有 Module 都是
-/// LauncherModule。不解决不存在的问题(§72)。
+/// LauncherModule。不解决不存在的问题。
 pub struct ModuleRegistry {
     modules: HashMap<ModuleId, ModuleSlot>,
-    /// 保持注册顺序,路由按序匹配 trigger(§5.2)。
+    /// 保持注册顺序,路由按序匹配 trigger。
     order: Vec<ModuleId>,
     default_module: Option<ModuleId>,
     next_epoch: u64,
@@ -16,8 +16,8 @@ pub struct ModuleRegistry {
 
 struct ModuleSlot {
     module: Box<dyn LauncherModule>,
-    /// §49:每次 load 分配,单调递增。unload / reload 后旧实例的
-    /// 在途 query 与自发事件全部失效(§96、§109)。
+    /// 每次 load 分配,单调递增。unload / reload 后旧实例的
+    /// 在途 query 与自发事件全部失效。
     epoch: u64,
 }
 
@@ -117,7 +117,7 @@ impl ModuleRegistry {
         self.default_module.as_ref()
     }
 
-    /// 路由按注册顺序给出 (ModuleId, LauncherDescriptor) 供 Core 匹配(§5.2)。
+    /// 路由按注册顺序给出 (ModuleId, LauncherDescriptor) 供 Core 匹配。
     pub fn launcher_descriptors(&self) -> impl Iterator<Item = (&ModuleId, LauncherDescriptor)> {
         self.order.iter().map(move |id| {
             let slot = &self.modules[id];

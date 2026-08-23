@@ -1,6 +1,6 @@
-//! cue-protocol —— Core ↔ Module 协议(architecture.md §86)。
+//! cue-protocol —— Core ↔ Module 协议。
 //!
-//! 本 crate 只包含数据类型与 trait 定义,不含任何平台代码(§111)。
+//! 本 crate 只包含数据类型与 trait 定义,不含任何平台代码。
 //! Core 与所有 Module 都依赖它;它不依赖任何 crate。
 
 mod action;

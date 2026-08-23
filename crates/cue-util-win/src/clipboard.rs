@@ -1,6 +1,6 @@
-//! 一次性写剪贴板(§18 "Copy path" / "Copy link"):OpenClipboard →
+//! 一次性写剪贴板("Copy path" / "Copy link"):OpenClipboard →
 //! EmptyClipboard → SetClipboardData(CF_UNICODETEXT)。这是单次写入,
-//! 不是 §76 明确不做的 clipboard manager(历史/监听)。
+//! 不做 clipboard manager(历史/监听)。
 
 use cue_protocol::ModuleError;
 use windows::Win32::Foundation::{GlobalFree, HANDLE};

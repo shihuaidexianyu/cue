@@ -1,7 +1,7 @@
-//! 全局热键(§53)。
+//! 全局热键。
 //!
 //! 事务式替换:先 `RegisterHotKey` 新的,成功后再 `UnregisterHotKey` 旧的——
-//! 失败时旧热键仍然有效,Core 保留旧值(§42 的 try-apply 同步回调即调用这里)。
+//! 失败时旧热键仍然有效,Core 保留旧值(try-apply 同步回调即调用这里)。
 //! 注册一律带 `MOD_NOREPEAT`,避免长按自动重复触发 toggle 造成闪烁。
 
 use cue_protocol::{Hotkey, Key};
@@ -24,7 +24,7 @@ pub struct HotkeyManager {
     /// 接收 WM_HOTKEY 的窗口(host window,见 host.rs)。
     hwnd: HWND,
     active: Option<(Hotkey, i32)>,
-    /// §53:用两个(递增的)HOTKEY_ID 做事务式替换,
+    /// 用两个(递增的)HOTKEY_ID 做事务式替换,
     /// 避免与旧注册在同一 id 上的语义纠缠。
     next_id: i32,
 }
@@ -66,7 +66,7 @@ impl HotkeyManager {
     }
 }
 
-/// OS-neutral Hotkey → Win32 常量。翻译只存在于本 crate(§111)。
+/// OS-neutral Hotkey → Win32 常量。翻译只存在于本 crate。
 fn to_win32(hotkey: &Hotkey) -> Result<(HOT_KEY_MODIFIERS, u32), HotkeyError> {
     let m = &hotkey.modifiers;
     if m.is_empty() {

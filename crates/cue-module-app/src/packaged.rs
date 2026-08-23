@@ -1,4 +1,4 @@
-//! UWP/MSIX 发现(§29):PackageManager → GetAppListEntriesAsync → AppListEntry。
+//! UWP/MSIX 发现:PackageManager → GetAppListEntriesAsync → AppListEntry。
 //!
 //! **Package ≠ App**:枚举单位是 AppListEntry(一个 package 可含 0..n 个
 //! application);不解析 manifest,不走 shell:AppsFolder(脏数据)。
@@ -19,7 +19,7 @@ pub fn discover(logger: &ModuleLogger) -> Vec<AppEntry> {
             entries
         }
         Err(e) => {
-            // WinRT 可用性属于环境事实,不构成 load 失败(§63)。
+            // WinRT 可用性属于环境事实,不构成 load 失败。
             logger.log(
                 LogLevel::Warn,
                 &format!("packaged discovery unavailable: {e}"),
