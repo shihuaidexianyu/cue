@@ -54,6 +54,14 @@ fn logical_to_physical(logical: i32, dpi: u32) -> i32 {
 /// 窗口时用 `CW_USEDEFAULT`,请求的尺寸只存在它内部的
 /// `initial_placement` 里、仅由 GPUI 自己的 `activate()` 补设;
 /// 我们走原生 `ShowWindow` 唤起,那条路径永远不会执行。
+///
+/// **两步 SetWindowPos,杜绝跨 DPI 双重缩放**:第一步移动+显示但
+/// 不带尺寸——窗口跨入不同 DPI 显示器时,Windows 在此同步派发
+/// WM_DPICHANGED,GPUI 会把 suggested rect(旧尺寸 × 缩放比)
+/// 应用上去;第二步在同一显示器上设最终尺寸,不再触发
+/// WM_DPICHANGED,尺寸定音。单次带尺寸调用时,suggested rect
+/// 会把我们已按目标 DPI 换算好的尺寸再缩一次——这正是
+/// "首次唤起尺寸错、第二次才正常"的根因。
 pub fn place_on_active_monitor(hwnd: HWND, logical_w: i32, logical_h: i32) {
     let (monitor, work) = active_monitor();
     let dpi = monitor_dpi(monitor, hwnd);
@@ -65,6 +73,15 @@ pub fn place_on_active_monitor(hwnd: HWND, logical_w: i32, logical_h: i32) {
     // 窗口过高时保证底边不超出工作区。
     let y = (work.top + area_h / 4).min(work.bottom - h).max(work.top);
     unsafe {
+        let _ = SetWindowPos(
+            hwnd,
+            Some(HWND_TOPMOST),
+            x,
+            y,
+            0,
+            0,
+            SWP_NOSIZE | SWP_SHOWWINDOW,
+        );
         let _ = SetWindowPos(hwnd, Some(HWND_TOPMOST), x, y, w, h, SWP_SHOWWINDOW);
     }
 }
