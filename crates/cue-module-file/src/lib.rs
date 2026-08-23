@@ -46,11 +46,45 @@ pub const KEY_EXCLUDE_FILE: &str = "module.file.excluded_paths_file";
 /// 名单文件名(模块 data 目录下)。
 const EXCLUDE_FILE_NAME: &str = "excluded-paths.toml";
 
-/// 默认名单片段:全系统(node_modules 等依赖目录,任意位置都排除;
-/// 口径对齐 VS Code search.exclude 默认)+ 按 USERPROFILE 展开的
-/// AppData(Windows Search 默认即不索引)与各工具缓存目录。
+/// 默认名单片段(§125):系统目录(含 ProgramData)+ 目录锚定的
+/// 通用 `\AppData\`(任意用户配置,含多配置/沙箱配置)+ 依赖目录
+/// (口径对齐 VS Code search.exclude 默认)+ 按 USERPROFILE 展开
+/// 的工具缓存(项目级同名目录多是配置而非缓存,不按通用排除)。
 /// 片段都以 `\` 结尾,锚定"目录"而非名字碰巧包含它的文件。
 fn default_fragments() -> Vec<String> {
+    let mut frags: Vec<String> = [
+        r"C:\Windows\",
+        r"C:\Program Files\",
+        r"C:\Program Files (x86)\",
+        r"C:\ProgramData\",
+        r"\$Recycle.Bin\",
+        r"\AppData\",
+        r"\node_modules\",
+        r"\.git\",
+        r"\.svn\",
+        r"\.hg\",
+        r"\__pycache__\",
+        r"\.venv\",
+        r"\bower_components\",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+    if let Some(home) = std::env::var_os("USERPROFILE") {
+        let home = PathBuf::from(home);
+        for d in [
+            ".vscode", ".cursor", ".cargo", ".rustup", ".gradle", ".m2", ".npm", ".nuget",
+            ".docker", ".android",
+        ] {
+            frags.push(format!("{}\\", home.join(d).to_string_lossy()));
+        }
+    }
+    frags
+}
+
+/// 旧版默认名单(§121,仅用于存量升级判定):AppData 与工具缓存
+/// 都按 USERPROFILE 展开,其他配置的同名目录管不到;无 ProgramData。
+fn legacy_default_fragments() -> Vec<String> {
     let mut frags: Vec<String> = [
         r"C:\Windows\",
         r"C:\Program Files\",
@@ -77,6 +111,22 @@ fn default_fragments() -> Vec<String> {
         }
     }
     frags
+}
+
+/// 存量一次性升级(§125):文件内容恰为旧版默认名单(用户一个
+/// 片段都没动过)时重写为新默认;用户增删过任何片段即不触碰。
+/// 读取/解析失败、写入失败都不致命(沿用现状)。返回是否升级。
+fn upgrade_seed_if_legacy(path: &Path) -> bool {
+    let Ok(content) = std::fs::read_to_string(path) else {
+        return false;
+    };
+    let Ok(frags) = parse_fragments(&content) else {
+        return false;
+    };
+    if frags != legacy_default_fragments() {
+        return false;
+    }
+    seed_exclude_file(path).is_ok()
 }
 
 /// 首启播种:注释头(格式与逃生口说明)+ 默认片段。片段都是
@@ -285,8 +335,8 @@ impl Module for FileModule {
 
     /// load 廉价:起两条线程——Everything IPC 线程(窗口与消息泵都在
     /// 线程内)与图标 worker(先提两枚通用图标,随后串行服务按文件
-    /// 真实图标的提取队列)。名单文件播种 + 首读是两次小文件 IO
-    /// (缺失才写),微秒级。
+    /// 真实图标的提取队列)。名单文件播种 + 存量升级判定 + 首读是
+    /// 几次小文件 IO(缺失才写;内容恰为旧默认才重写),微秒级。
     fn load(&mut self, ctx: ModuleContext) -> Result<(), ModuleError> {
         if let Some(SettingValue::Bool(v)) = ctx.settings.get("exclude_noise_paths") {
             self.exclude_noise = *v;
@@ -300,6 +350,13 @@ impl Module for FileModule {
             ctx.logger.log(
                 LogLevel::Warn,
                 &format!("file: 排除名单播种失败({e}),沿用内置默认"),
+            );
+        }
+        // 存量一次性升级:内容恰为旧默认(用户没改过)才重写(§125)。
+        if file.exists() && upgrade_seed_if_legacy(&file) {
+            ctx.logger.log(
+                LogLevel::Info,
+                "file: 排除名单为旧版默认,已升级为新默认(通用 \\AppData\\ + ProgramData)",
             );
         }
         {
@@ -682,6 +739,40 @@ mod tests {
         let clause = build_clause(&content).expect("seed parses");
         assert!(clause.contains(r#"!"\node_modules\""#));
         assert!(clause.contains(r#"\AppData\""#));
+        assert!(clause.contains(r#"!"C:\ProgramData\""#));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// 存量升级(§125):内容恰为旧默认 → 重写为新默认(幂等);
+    /// 用户增删过片段 → 不触碰。
+    #[test]
+    fn upgrade_rewrites_only_untouched_legacy_seed() {
+        let dir = std::env::temp_dir().join(format!("cue-file-upgrade-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("list.toml");
+
+        // 伪造一份旧默认名单(旧 seed 的写盘格式)。
+        let mut legacy = String::from("# 旧默认\nexcluded = [\n");
+        for f in legacy_default_fragments() {
+            legacy.push_str(&format!("  '{f}',\n"));
+        }
+        legacy.push_str("]\n");
+        std::fs::write(&file, &legacy).unwrap();
+
+        assert!(upgrade_seed_if_legacy(&file));
+        let upgraded = parse_fragments(&std::fs::read_to_string(&file).unwrap()).unwrap();
+        assert_eq!(upgraded, default_fragments());
+        assert!(upgraded.iter().any(|f| f == r"\AppData\"));
+        // 幂等:新默认 ≠ 旧默认,不再触发。
+        assert!(!upgrade_seed_if_legacy(&file));
+
+        // 用户增删过片段 → 不动。
+        let custom = legacy.replace("  '\\node_modules\\',", "  '\\custom\\',");
+        assert_ne!(custom, legacy);
+        std::fs::write(&file, &custom).unwrap();
+        assert!(!upgrade_seed_if_legacy(&file));
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), custom);
+
         std::fs::remove_dir_all(&dir).ok();
     }
 
