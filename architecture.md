@@ -835,6 +835,10 @@ pub struct ResultBadge {
 
 视觉样式由 Core/UI 决定。
 
+V1 落地注记：badges 保留在协议里（§13 结构不变），但 V1 渲染层
+暂忽略该字段——行渲染只画 title / subtitle / icon / accessory。
+第一个真实消费者出现时再定视觉样式，不提前画。
+
 ---
 
 # 16. Accessory
@@ -1314,6 +1318,10 @@ PackageManager
 IApplicationActivationManager::ActivateApplication(AUMID)
 ```
 
+实现注记（V1 落地）：实际调用是 `FindPackages()`——无参即当前
+用户的全部包，语义等价且免去拼用户 SID；类型过滤对结果无实质
+影响（没有 AppListEntry 的包在下一步自然跳过），简单路径胜出。
+
 注意：**Package ≠ App**。一个 package 可含 0..n 个 application，枚举单位是 AppListEntry，不是 Package，也不是自己解析每个 manifest。
 
 不采用：
@@ -1588,6 +1596,11 @@ Esc 取消捕获），Esc 返回。try-apply 失败：错误显示在视图内�
 
 V1 的编辑 UI 只覆盖 Bool 与 Hotkey 两种 kind；Integer / String /
 Enum / Path 出现时按 §39 再加，不提前建表单 framework。
+
+编辑面的后续落地（仍无表单 framework）：String 行内编辑随
+§128 的触发词设置落地（Enter 进编辑态、Enter 提交、Esc 放弃）；
+Path 行随 §122 落地，其 Enter = 用系统默认程序打开路径值，
+不是值变更、不走 §42 事务。
 ```
 
 ---
@@ -1893,9 +1906,9 @@ Host 实现注记：
 注册必须带 MOD_NOREPEAT：
 避免长按自动重复触发 toggle，造成窗口 show/hide 闪烁
 
-用两个 HOTKEY_ID（ACTIVE / STAGING）做事务式替换：
-新组合先在 STAGING id 注册成功，
-再注销 ACTIVE 的旧注册并交换两个 id 的角色
+用单调递增的 HOTKEY_ID 做事务式替换（实现定型，替代本节
+原稿的 ACTIVE / STAGING 双 id 角色互换——语义相同，无需
+角色状态）：新组合在新 id 注册成功，再注销旧 id 的旧注册
 ```
 
 V1 只支持单一全局热键组合（修饰键 + 普通键）。
@@ -1914,6 +1927,8 @@ Launcher Window：
 - Activation success → hide
 - Lost focus 可配置是否 hide
 - 显示在当前用户活跃 monitor
+- 置顶（HWND_TOPMOST，随唤起时的放置设置，§130）：launcher 语义
+  是覆盖在当前工作之上的一层，不该被普通窗口遮住
 
 ---
 
@@ -2299,12 +2314,16 @@ cue/
     │   ├── icon.rs
     │   └── launch.rs
     │
-    └── cue-module-file/        # V1.x，暂不创建（§31）
-        ├── lib.rs
-        ├── everything.rs
-        ├── search.rs
-        ├── presentation.rs
-        └── open.rs
+    ├── cue-module-file/        # ~~V1.x，暂不创建（§31）~~ 已落地（§118）
+    │   ├── lib.rs
+    │   ├── everything.rs
+    │   ├── search.rs
+    │   ├── presentation.rs
+    │   └── open.rs
+    │
+    ├── cue-module-bookmark/    # V1.x 已落地（§117）
+    ├── cue-module-system/      # V1.x 已落地（§126）
+    └── cue-util-win/           # 模块间共享 Win32 助手（§72–73 下沉）
 ```
 
 ---
@@ -2341,7 +2360,7 @@ fn compose_app() -> Launcher {
         Box::new(AppModule::new())
     );
 
-    // FileModule 随 V1.x 加入（§31）
+    // V1.x 的 Bookmark / File / System 模块同样只在此注册
 
     Launcher::new(registry)
 }
@@ -2367,12 +2386,22 @@ cue (binary)
 ├── cue-ui
 ├── cue-windows
 ├── cue-module-app
-└── cue-module-file (V1.x)
+├── cue-module-bookmark (V1.x)
+├── cue-module-file (V1.x)
+└── cue-module-system (V1.x)
 
 cue-module-app
-└── cue-protocol
+├── cue-protocol
+└── cue-util-win
 
-cue-module-file
+cue-module-bookmark / cue-module-file
+├── cue-protocol
+└── cue-util-win
+
+cue-module-system
+└── cue-protocol        # 目前不需要 cue-util-win,按需再加
+
+cue-util-win
 └── cue-protocol
 
 cue-core
@@ -2499,7 +2528,8 @@ Core 不应成为杂物库。
 - monitor placement
 - shell open / launch
 - Single instance（§113）
-- startup support可后置
+- ~~startup support可后置~~（已落地：开机自启 core.start_on_boot §36；
+  托盘图标与唯一退出路径 §116）
 
 ## App Module
 
@@ -2527,7 +2557,7 @@ Core 不应成为杂物库。
 - ~~Open containing folder~~（已落地,§119）
 - ~~secondary actions UI~~（已落地,§119）
 - Page Module
-- custom trigger configuration
+- ~~custom trigger configuration~~（已落地,§128）
 - advanced settings
 - themes
 - animation polish
@@ -3495,6 +3525,10 @@ spike 要验证的风险：GPUI 的 Windows 后端自己维护 IME 状态，从�
 已知边界：失焦隐藏路径（§54）执行恢复时窗口已不在前台，
 恢复对该路径不保证生效。这是 Win32 输入法模型的固有限制，
 不为此引入更重的机制（如向他人窗口投递 WM_INPUTLANGCHANGEREQUEST）。
+
+托盘"退出"（§116）是另一条绕过 hide 的路径：quit 分支在结束
+消息循环前同样执行恢复——可见状态下退出时不恢复，后果与
+漏掉 hide 恢复相同（其他应用被留在英文）。
 ```
 
 已接受的代价：
@@ -3532,9 +3566,11 @@ ResultPresentation 除 title 外全部可选（§13），布局不随字段有�
 
 ```text
 icon 槽位永远占固定宽度（如 44px），None 即留空
-文字起点永不移动
+文字起点（横向）永不移动
 行高固定，icon 在槽位内垂直居中
-subtitle 为 None 即第二行留空
+文字列作为一个整体在行内垂直居中：subtitle 为 None 时不渲染
+  第二行（不是留一行空白），title 随块居中——行高不变、
+  无 reflow、无跳动的结论不受影响
 没有专属图标的 Module 返回 SystemIcon 或 None
 ```
 
@@ -3579,11 +3615,13 @@ Core 收到后：
 ```text
 epoch 不匹配（旧实例事件）→ 丢弃
 session 关闭或 module 非 active → 丢弃
-items 不在当前结果中 → 忽略
-否则对对应可见行重新执行 present() 并更新
+items 与当前结果无交集 → 忽略
+有交集 → 对当前结果重跑 present()
 ```
 
-事件不影响 generation，不触发重新 query。
+模块不精确追踪可见行：允许广播式失效（items 里混着已滚走、
+上一代查询的陈旧 id），交集判定由 Core 一侧做。事件不影响
+generation，不触发重新 query。
 
 典型流程（图标）：
 
@@ -3617,7 +3655,7 @@ App discovery：Windows 用 Start Menu + Package API
               macOS 用 /Applications + Info.plist
 搜索 / 拼音 / ranking / usage：平台中立，复用
 
-FileModule：Windows 依赖 Everything（§31 的延期原因）
+FileModule：Windows 依赖 Everything（§31 定案）
             macOS 有系统自带 Spotlight 索引，该 blocker 不存在
 ```
 
@@ -3713,7 +3751,18 @@ cue-ui 不知道 Module 的存在
 cue-windows 不知道 Core 内部状态
 ```
 
-唯一的同步例外：core.* 设置里需要 Host 副作用的 try-apply（§53 热键注册、core.start_on_boot 登录启动项）是设置事务的一部分，必须同步——Core 持有注入的 `apply_hotkey` / `apply_start_on_boot` 回调直接调用，失败不 commit（§42）。这是函数，不是 HostPlatform trait（§110）。
+同步例外（函数注入，不是 HostPlatform trait，§110）——Core 持有注入回调在 UI 线程直接同步调用：
+
+```text
+apply_hotkey / apply_start_on_boot
+  core.* 设置事务的 try-apply（§42，失败不 commit）
+open_path
+  Path 行的"打开路径"激活（§122——非值变更，不走事务）
+fullscreen_probe
+  游戏模式门控（§127——按键瞬间的纯查询，无 IO、无锁）
+```
+
+UIEvent 不经 launcher 逐条翻译：view 持有 Core，按键在 cue-ui 内直接调 Core 方法；launcher 只注入 CoreEffect 的执行器（effect_handler）。上图的"接收并翻译"覆盖的是 HostEvent（WM_HOTKEY / 托盘 / 失焦 → CoreEvent 队列）。
 
 Windows Host 需要的 GPUI HWND（§107 IME、§54 窗口规则）由 launcher 在窗口创建后从 cue-ui 取得并交给 cue-windows。
 
@@ -3740,6 +3789,8 @@ CUE 是 **single-instance application**。V1 必须实现。
 ```
 
 理由：全局热键、开机启动、后台常驻的组合下，双实例必然互相打架——第二个进程 `RegisterHotKey` 会失败，但若仍继续初始化 GPUI、扫描 App、驻留内存，纯属浪费；settings / usage 还可能被双写。单实例同时锁定一个全局假设：**settings 与 usage store 永远单写者。**
+
+第二实例的 show / focus 与托盘左键唤起（§116）汇合为同一个 ShowRequested 事件——多条唤起路径，一份处理。
 
 ---
 
@@ -3784,6 +3835,9 @@ Memory：63.1 MB(Private Working Set,idle 60 s)✅ < 100 MB
 DirectWrite / 字形缓存的惰性初始化移出唤起路径。复测（直发 WM_HOTKEY 到
 host 窗口、剔除注入管线噪声，该路径当时被本机另一占键应用拖慢到 ~230 ms，
 属环境干扰）：**首次唤起 22 ms、稳态 15 ms**,406 ms 尖峰消除。
+
+> 当前口径：hotkey latency 以预热后的 22/15 ms 为准；上段
+> 92–98 ms 保留为预热落地前的历史测量。
 
 ---
 
@@ -3833,8 +3887,9 @@ V1 决定：
 退出      → 删除托盘图标（不留幽灵图标）、注销热键、进程退出
 ```
 
-不为托盘做更多：不弹气泡通知、不做双击行为、不做开机启动开关
-（开机启动是 Settings 候选，Phase 6 评估）。
+不为托盘做更多：不弹气泡通知、不做双击行为、~~不做开机启动开关
+（开机启动是 Settings 候选，Phase 6 评估）~~（开机自启已落地为
+设置 core.start_on_boot（§36）——在设置页，不在托盘菜单）。
 
 托盘回调消息投递到 host window（§113 的 Win32 消息入口）；
 host window 因此是隐藏顶层窗口而非 message-only——托盘菜单要求
@@ -4053,6 +4108,8 @@ E2E  = 真机:Tab 出菜单(截图:文件 3 行/书签 2 行,头部归属正确)
        usage.tsv 落 (file, action_id=2, 全路径)
 ```
 
+---
+
 # 120. FileModule 噪声目录排除(V1.x)
 
 `/ds` 之类短查询的结果曾被 `C:\Program Files\...` 安装目录内部文件
@@ -4083,8 +4140,8 @@ E2E  = 真机:Tab 出菜单(截图:文件 3 行/书签 2 行,头部归属正确)
 
 > 名单的"保守"判断(AppData 不排除)在真机使用中证伪:
 > AppData\Local、.vscode\extensions 才是短查询的主要噪声源。
-> 名单细化见 §121;可编辑化的最终形态(模块数据文件 +
-> 默认编辑器打开)见 §122。
+> 后续链条:名单细化见 §121,外置为模块数据文件见 §122,
+> TOML 定案见 §123,默认名单最终形态(目录锚定通杀)见 §125。
 
 ## 验证
 
@@ -4097,6 +4154,8 @@ E2E  = 真机:Tab 出菜单(截图:文件 3 行/书签 2 行,头部归属正确)
 E2E  = 真机:/ds 结果从满屏 MATLAB 安装目录变为用户目录文件
        (截图);/C:\Windows\explorer.exe 照常命中(逃生口,截图)
 ```
+
+---
 
 # 121. 排除名单细化与可编辑名单(String 设置)
 
@@ -4146,6 +4205,11 @@ UI       = ~~设置页 String 行进入编辑态(视图本地缓冲,
            白名单模式、AppData 内细分(整目录排除 + 逃生口已够)
 ```
 
+> 本节的默认名单后被 §125 再次修订:USERPROFILE 展开在
+> 真机证伪(多用户/沙箱配置的 AppData 照样涌入),改为
+> 目录锚定 `\AppData\` 通杀 + ProgramData;String 设置本身
+> 也已在 §122 随名单外置一并撤除。本节保留决议过程。
+
 ## 验证
 
 ```text
@@ -4156,6 +4220,8 @@ UI       = ~~设置页 String 行进入编辑态(视图本地缓冲,
 E2E  = 真机:/d 结果不再出现 MathWorks ServiceHost 与
        .vscode\extensions(截图);设置页名单行可编辑(截图)
 ```
+
+---
 
 # 122. 名单外置:模块数据文件 + 默认编辑器打开(Path 设置)
 
@@ -4190,7 +4256,9 @@ E2E  = 真机:/d 结果不再出现 MathWorks ServiceHost 与
            编排层实现 = explorer.exe <path>(拉起默认关联,
            其返回码不可靠故忽略,只认 spawn 失败)
 编辑面   = 回退为 Bool + Hotkey(行内 String 编辑随名单
-           外置一并撤除——克制:没有 String 设置就没有编辑面)
+           外置一并撤除——克制:没有 String 设置就没有编辑面;
+           String 编辑面后在 §128 随触发词设置回归——触发词
+           是真正的"值",名单不是)
 逃生口   = 不变(查询含 \ 原样发送)
 明确不做 = 编辑器关闭/保存的事件监听(mtime 惰性检查已够)、
            名单值经设置事务回流(双源)、行内 String 编辑组件、
@@ -4209,6 +4277,8 @@ E2E  = 真机:/d 结果不再出现 MathWorks ServiceHost 与
 E2E  = 真机:设置页 Path 行回车 → 默认编辑器打开名单文件
        (截图);编辑保存后下一次查询生效(mtime 重读)
 ```
+
+---
 
 # 123. 给人编辑的配置文件一律 TOML(名单格式修订)
 
@@ -4244,6 +4314,8 @@ E2E  = 真机:设置页 Path 行回车 → 默认编辑器打开名单文件
        mtime 照记、改对后生效
 E2E  = 真机:.toml 播种;外部缩减名单后 /d 噪声回归(重读生效)
 ```
+
+---
 
 # 124. 文件结果的真实图标(按路径/扩展名异步提取)
 
@@ -4282,6 +4354,8 @@ E2E  = 真机:/geek.exe 行从通用白图标变为 exe 内嵌图标
        (异步提取 + 失效重画,截图)
 ```
 
+---
+
 # 125. 排除名单通用化(目录锚定 `\AppData\` + ProgramData)
 
 §121 的默认名单把 AppData 与工具缓存按 USERPROFILE 展开,真机
@@ -4290,6 +4364,14 @@ Default)的 AppData 照样涌入结果;ProgramData 同样是应用数据
 而非用户文件(Windows Search 仅为 Start Menu 收录它)。§121 对
 AppData 的反转先例在此继续:排除口径从"精确但只管自己"改为
 "目录锚定通杀"。
+
+> **当前状态**(§120 → §121 → §122 → §123 → §125 五节链条的
+> 落点):名单 = 模块数据文件 `modules/file/data/excluded-paths.toml`
+> (TOML `excluded` 数组,首启播种,内容恰为旧默认才一次性升级);
+> 设置页两行 = Bool 总开关 `module.file.exclude_noise_paths` +
+> Path 行 `module.file.excluded_paths_file`(回车用默认编辑器打开,
+> 非值变更不走事务);生效 = 查询串拼 `!"片段"` 否定子句,mtime
+> 指纹惰性重读;逃生口 = 查询含 `\` 原样发送。
 
 ## 决议
 
@@ -4312,10 +4394,12 @@ AppData 的反转先例在此继续:排除口径从"精确但只管自己"改为
        seed 子句含 ProgramData 与通用 \AppData\
 ```
 
+---
+
 # 126. 系统动作模块(触发词 `>`)
 
 固定枚举的系统动作——锁屏/睡眠/休眠/注销/重启/关机/清空回收站。
-不是 shell runner:不接受任意命令(§26 禁区不动),动作表是
+不是 shell runner:不接受任意命令(§76 禁区不动),动作表是
 模块内静态数据。
 
 ## 决议
@@ -4354,6 +4438,9 @@ AppData 的反转先例在此继续:排除口径从"精确但只管自己"改为
 E2E  = 真机:`>` 列出全部动作(图标/副标题,截图)、`>gj`
        过滤到关机(不执行任何动作)
 ```
+
+---
+
 # 127. 游戏模式(全屏时热键不唤起)
 
 前台应用全屏时(游戏、全屏视频),`Alt+Space` 弹窗会抢焦点、
@@ -4402,12 +4489,15 @@ E2E  = 真机:无边框置顶全屏窗口盖住主屏 → 热键不唤起(截图
        取证);关闭全屏窗口 → 热键恢复唤起;基线(普通前台)
        唤起正常
 ```
+
+---
+
 # 128. 触发词自定义(`module.<id>.trigger`)
 
 每个触发模块的触发词(`b` / `/` / `>` …)可在设置页修改——
 对标 Flow Launcher 的 per-plugin action keyword。触发词是
 **Core 路由状态**,不是模块语义:模块从不解析自己的触发词
-(§86),因此它不属于模块 schema。
+(§5.2),因此它不属于模块 schema。
 
 ## 决议
 
@@ -4425,7 +4515,10 @@ E2E  = 真机:无边框置顶全屏窗口盖住主屏 → 热键不唤起(截图
          跳过 module.try_apply_settings(§42 的 validate →
          commit → persist 链不变)
 校验   = 非空(trim 后,含纯空白)、不含空白、≤16 字符、
-         不与其他模块的生效触发词冲突;失败不 commit,
+         不与其他模块的生效触发词全等("冲突"只指全等;
+         前缀遮蔽不拦——标点类逐字前缀匹配,短的按注册序
+         先到先赢,如已注册的 `/` 会吞掉后注册 `/f` 的
+         输入;词边界类天然互不遮蔽);失败不 commit,
          UI 留在编辑态并回显错误
 匹配   = 语义不随值变:以字母/数字结尾的触发词要求词边界,
          标点类逐字前缀匹配(match_trigger 按值的尾字符
@@ -4444,6 +4537,11 @@ String 编辑 = 设置页第一种行内文本编辑:Enter 进入编辑态
            (保持精确匹配,用户设什么就是什么)
 ```
 
+> 决策记录:空值语义曾定为"停用该模块的触发入口"
+> (b7e1004),随即回退为"触发词必填、持久化空值自愈回落
+> 声明值"(257593a)——"空 = 停用"让一次手滑就能永久弄丢
+> 模块入口,违背设置的可恢复性。
+
 ## 验证
 
 ```text
@@ -4457,6 +4555,9 @@ E2E  = 真机预写 settings.tsv(module.bookmark.trigger=bm)
        `b github` 回落应用模块(无结果);用户原设置
        文件备份后还原
 ```
+
+---
+
 # 129. 设置页呈现:单行列表 + 选中行详情条 + 跟随滚动窗口
 
 行数随模块增长(4 核心 + 每触发模块 1 行 + 模块自有项),
@@ -4474,7 +4575,10 @@ E2E  = 真机预写 settings.tsv(module.bookmark.trigger=bm)
          apply 错误(红)或重启提示(琥珀,并入页脚行)
          复用同一区域——一次只给一行配文字
 滚动   = 无状态跟随窗口(VISIBLE = 8):offset 纯函数于
-         选中下标,渲染时不写状态;语义同结果列表切片
+         选中下标(选中行贴窗口底,首尾钳制),渲染时不写
+         状态——结果列表切片的无状态变体(结果列表持
+         scroll_offset 状态,选中出视口才滚;同为跟随
+         选择,语义并不相同)
 模型   = 不变(SettingsModel/SettingsRow 原样)——本次是
          纯呈现层修订,"Core 出模型、UI 只渲染"不动
 明确不做 = 鼠标滚轮/拖动滚动条(键盘窗口语义与结果列表
@@ -4489,6 +4593,8 @@ E2E = 真机经托盘同路径消息(WM_CUE_TRAY_CMD/SETTINGS)
       打开设置页:首屏 8 行切片截图;连按 ↓ 到末行,
       窗口滚动且末行选中、详情条显示该行完整描述
 ```
+
+---
 
 # 130. 跨 DPI 唤起的双重缩放:问题、根因与两步 SetWindowPos
 
