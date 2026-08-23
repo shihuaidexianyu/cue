@@ -471,6 +471,8 @@ impl LauncherView {
             SettingValue::String(s) | SettingValue::Enum(s) => match &self.editing_string {
                 // 行内编辑态:渲染 buffer + 光标,不渲染已提交值。
                 Some((k, buf)) if k.as_str() == row.key.as_ref() => format!("{buf}▏"),
+                // 空串有语义(§128 触发词留空 = 停用),不能渲染成空白。
+                _ if s.is_empty() => "(空)".to_string(),
                 _ => s.clone(),
             },
             SettingValue::Path(p) => p.display().to_string(),
