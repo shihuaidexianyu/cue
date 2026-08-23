@@ -140,16 +140,9 @@ impl Core {
             .map(|(id, d)| (id.clone(), d))
             .collect();
         for id in self.registry.ids() {
-            // 先注册 schema,再 build_context——load 时的
-            // ModuleSettings 快照才能带上该模块自己的默认值与持久化值。
-            let schema = self
-                .registry
-                .module(&id)
-                .map(|m| m.settings_schema())
-                .unwrap_or_default();
-            self.settings.register_module_specs(&id, schema);
-
-            // 非默认模块的触发词由 Core 合成设置行(路由归 Core)。
+            // 触发词 spec(§128)先于模块 schema 注册:若模块 schema
+            // 误带 module.<id>.trigger 条目,first-wins 去重让 Core
+            // 的行生效——触发词归 Core,不归模块(§128)。
             if let Some((_, desc)) = launchers.iter().find(|(mid, _)| mid == &id)
                 && !desc.is_default
                 && let Some(trigger) = &desc.trigger
@@ -160,8 +153,25 @@ impl Core {
                     .map(|m| m.descriptor().name)
                     .unwrap_or(id.as_str());
                 let key = self.settings.register_trigger_spec(&id, name, trigger);
+                // 持久化文件里的空值(手工改坏)在路由层自愈回落声明值;
+                // 显示层一并归一,设置页所见即生效值(仅内存,随下次
+                // 事务的整体重写落盘)。
+                if matches!(self.settings.value(&key), Some(SettingValue::String(v)) if v.is_empty())
+                {
+                    self.settings
+                        .set_value_no_persist(&key, SettingValue::String(trigger.clone()));
+                }
                 self.trigger_keys.insert(key);
             }
+
+            // 再注册模块 schema,然后 build_context——load 时的
+            // ModuleSettings 快照才能带上该模块自己的默认值与持久化值。
+            let schema = self
+                .registry
+                .module(&id)
+                .map(|m| m.settings_schema())
+                .unwrap_or_default();
+            self.settings.register_module_specs(&id, schema);
 
             let epoch = self.registry.epoch(&id).unwrap_or(0);
             let ctx = self.build_context(&id, epoch);
@@ -458,6 +468,11 @@ impl Core {
         if self.session.is_none() {
             return;
         }
+        // 输入未变(空输入上的 Backspace、粘贴相同内容)不视为变化:
+        // 不 bump generation、不重查、不把选择重置回第 0 行。
+        if self.session.as_ref().is_some_and(|s| s.raw_input == input) {
+            return;
+        }
         // route 读 settings(生效触发词,§128),先算再借 session。
         let (module_id, query) = self.route(&input);
         {
@@ -644,6 +659,8 @@ impl Core {
                 return (id.clone(), query);
             }
         }
+        // 不变量:session 存在 ⇒ 默认模块存在——open_session 在无默认
+        // 模块时根本不开 session,§65 又保证 AppModule 不可禁用。
         let default = self
             .registry
             .default_module()
@@ -761,10 +778,13 @@ impl Core {
             module_id: s.active_module.clone(),
             module_epoch: self.registry.epoch(&s.active_module).unwrap_or(0),
         };
-        s.activation_in_flight = true;
+        // 先取模块再置 flag:查找失败提前返回时不会有 completion
+        // 事件来复位,flag 会卡死本 session 的 Enter(今天不可达,
+        // 但顺序必须防御)。
         let Some(module) = self.registry.module_mut(&ticket.module_id) else {
             return;
         };
+        s.activation_in_flight = true;
         let fut = module.activate(&item, action);
         let tx = self.event_tx.clone();
         self.spawner.spawn(Box::pin(async move {
@@ -850,6 +870,12 @@ impl Core {
             return false;
         }
         s.activation_in_flight = false;
+        // epoch 失配(模块 reload 换过实例):处置是旧实例激活的意图,
+        // 不落到当前实例上;flag 已复位、usage 已记录(§96 三元绑定)。
+        let current_epoch = self.registry.epoch(&ticket.module_id).unwrap_or(u64::MAX);
+        if ticket.module_epoch != current_epoch {
+            return true;
+        }
         match &outcome.status {
             OutcomeStatus::Success => {
                 if outcome.session == SessionDisposition::Close {
@@ -882,9 +908,7 @@ impl Core {
         match event {
             ModuleEvent::PresentationInvalidated { items } => {
                 // 只关心当前可见的 item;命中则 UI 需要重跑 present()。
-                items
-                    .iter()
-                    .any(|id| s.results.iter().any(|r| r.id() == *id))
+                items.iter().any(|id| s.contains_item(*id))
             }
         }
     }

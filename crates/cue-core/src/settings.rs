@@ -71,6 +71,11 @@ pub struct SettingsHost {
     /// 持久化 overlay,apply 时替换)。
     values: HashMap<String, SettingValue>,
     file: Option<PathBuf>,
+    /// 启动时读一次的持久化 overlay,register_specs 复用——
+    /// 不为每次注册重读 settings.tsv(§77 冷启动路径)。
+    persisted: HashMap<String, String>,
+    /// Core 自有的合成行(§128 触发词):不进模块的设置快照。
+    core_owned_keys: std::collections::HashSet<String>,
     apply_hotkey: Option<ApplyHotkey>,
     apply_start_on_boot: Option<ApplyStartOnBoot>,
     open_path: Option<OpenPath>,
@@ -84,16 +89,19 @@ impl SettingsHost {
         apply_start_on_boot: Option<ApplyStartOnBoot>,
         open_path: Option<OpenPath>,
     ) -> Self {
+        let persisted = Self::read_persisted(file.as_deref());
         let mut host = Self {
             specs: Vec::new(),
             values: HashMap::new(),
             file,
+            persisted,
+            core_owned_keys: std::collections::HashSet::new(),
             apply_hotkey,
             apply_start_on_boot,
             open_path,
             restart_required: false,
         };
-        // core.*:V1 三项,都是 Immediate。
+        // core.*:V1 四项,都是 Immediate。
         host.register_specs(core_specs());
         host
     }
@@ -120,6 +128,7 @@ impl SettingsHost {
         default_trigger: &str,
     ) -> String {
         let key = format!("module.{}.trigger", module_id.as_str());
+        self.core_owned_keys.insert(key.clone());
         self.register_specs(vec![SettingSpec {
             key: SettingKey(Arc::from(key.as_str())),
             label: format!("{module_name} · 触发词").into(),
@@ -135,10 +144,17 @@ impl SettingsHost {
     }
 
     fn register_specs(&mut self, specs: Vec<SettingSpec>) {
-        let persisted = self.load_persisted();
         for spec in specs {
             let key = spec.key.0.to_string();
-            let value = persisted
+            // first-wins:同 key 重复注册(模块 schema 撞上 Core 合成行,
+            // 或模块自身重复)只留第一份——设置页不出双行,spec() 查找
+            // 结果确定。
+            if self.specs.iter().any(|s| s.key.0.as_ref() == key) {
+                eprintln!("[warn] duplicate setting key skipped: {key}");
+                continue;
+            }
+            let value = self
+                .persisted
                 .get(&key)
                 .and_then(|raw| decode_value(spec.kind, raw))
                 .unwrap_or_else(|| spec.default.clone());
@@ -185,11 +201,13 @@ impl SettingsHost {
 
     /// 模块设置快照(ModuleContext.settings):短 key(去掉
     /// `module.<id>.` 前缀)——模块知道自己的 id,不需要全限定名。
+    /// Core 自有的合成行(§128 触发词)不进快照:它不是模块 schema。
     pub fn values_for_module(&self, module_id: &ModuleId) -> ModuleSettings {
         let prefix = format!("module.{}.", module_id.as_str());
         let map = self
             .values
             .iter()
+            .filter(|(k, _)| !self.core_owned_keys.contains(*k))
             .filter_map(|(k, v)| {
                 k.strip_prefix(&prefix)
                     .map(|short| (short.to_string(), v.clone()))
@@ -233,6 +251,12 @@ impl SettingsHost {
             // 无回调(测试环境):视为成功。
             None => Ok(()),
         }
+    }
+
+    /// 仅改内存中的已 commit 值,不写盘:Core 对自愈类值(手工
+    /// 改坏的空触发词)的归一用——随下一次事务的整体重写落盘。
+    pub fn set_value_no_persist(&mut self, key: &str, value: SettingValue) {
+        self.values.insert(key.to_string(), value);
     }
 
     /// commit + persist(顺序的最后两步,永远一起)。
@@ -280,9 +304,9 @@ impl SettingsHost {
     // 持久化(版本头 + 整体重写 + tmp rename,与 usage 同一规则)
     // ------------------------------------------------------------------
 
-    fn load_persisted(&self) -> HashMap<String, String> {
+    fn read_persisted(path: Option<&std::path::Path>) -> HashMap<String, String> {
         let mut out = HashMap::new();
-        let Some(path) = &self.file else { return out };
+        let Some(path) = path else { return out };
         let Ok(text) = std::fs::read_to_string(path) else {
             return out;
         };

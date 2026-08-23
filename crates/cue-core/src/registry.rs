@@ -26,6 +26,9 @@ pub enum RegistryError {
     DuplicateModule(ModuleId),
     UnknownModule(ModuleId),
     DuplicateTrigger(String),
+    /// 触发词必填(§128):空触发词会按标点分支匹配一切输入,
+    /// 吞掉默认路由——声明层直接拒绝。
+    EmptyTrigger(ModuleId),
     MultipleDefaults(ModuleId, ModuleId),
 }
 
@@ -35,6 +38,7 @@ impl fmt::Display for RegistryError {
             Self::DuplicateModule(id) => write!(f, "duplicate module: {id}"),
             Self::UnknownModule(id) => write!(f, "unknown module: {id}"),
             Self::DuplicateTrigger(t) => write!(f, "duplicate trigger: {t:?}"),
+            Self::EmptyTrigger(id) => write!(f, "empty trigger: {id}"),
             Self::MultipleDefaults(a, b) => write!(f, "multiple default modules: {a}, {b}"),
         }
     }
@@ -59,6 +63,9 @@ impl ModuleRegistry {
         }
         let launcher = module.launcher_descriptor();
         if let Some(trigger) = &launcher.trigger {
+            if trigger.is_empty() {
+                return Err(RegistryError::EmptyTrigger(id));
+            }
             for other in self.modules.values() {
                 if other.module.launcher_descriptor().trigger.as_ref() == Some(trigger) {
                     return Err(RegistryError::DuplicateTrigger(trigger.clone()));

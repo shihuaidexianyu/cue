@@ -76,6 +76,8 @@ struct FakeModule {
     schema: SettingsSchema,
     /// try_apply_settings 收到的改动(设置事务断言用)。
     applied_settings: Arc<Mutex<Vec<(String, SettingValue)>>>,
+    /// load 时收到的设置快照(§128:Core 合成的触发词行不得混入)。
+    received_settings: Arc<Mutex<Option<ModuleSettings>>>,
 }
 
 impl FakeModule {
@@ -100,6 +102,7 @@ impl FakeModule {
             activated: Arc::new(Mutex::new(Vec::new())),
             schema: Vec::new(),
             applied_settings: Arc::new(Mutex::new(Vec::new())),
+            received_settings: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -150,6 +153,10 @@ impl FakeModule {
     fn applied_settings_handle(&self) -> Arc<Mutex<Vec<(String, SettingValue)>>> {
         Arc::clone(&self.applied_settings)
     }
+
+    fn received_settings_handle(&self) -> Arc<Mutex<Option<ModuleSettings>>> {
+        Arc::clone(&self.received_settings)
+    }
 }
 
 fn make_items(titles: &[&str]) -> Vec<ModuleItem> {
@@ -180,6 +187,7 @@ impl Module for FakeModule {
 
     fn load(&mut self, ctx: ModuleContext) -> Result<(), ModuleError> {
         *self.sink.lock().unwrap() = Some(ctx.events);
+        *self.received_settings.lock().unwrap() = Some(ctx.settings);
         Ok(())
     }
 
@@ -418,6 +426,43 @@ fn legacy_empty_trigger_falls_back_to_declared() {
     core.input_changed("b gh".into());
     drain(&mut core, &mut rx);
     assert_eq!(bm_queries.lock().unwrap().as_slice(), ["gh"]);
+
+    // 显示层同样自愈:设置页该行的值归一为声明值
+    //(仅内存归一不写盘,随下次事务落盘)。
+    core.open_settings();
+    let model = core.settings_model().unwrap();
+    let row = model
+        .rows
+        .iter()
+        .find(|r| r.key.as_ref() == "module.bm.trigger")
+        .unwrap();
+    assert_eq!(row.value, SettingValue::String("b".to_string()));
+}
+
+#[test]
+fn registry_rejects_empty_declared_trigger() {
+    // 声明层必填(§128):空触发词会按标点分支匹配一切输入,吞掉默认路由。
+    let mut registry = ModuleRegistry::new();
+    registry
+        .register(Box::new(FakeModule::new("default")))
+        .unwrap();
+    assert!(matches!(
+        registry.register(Box::new(FakeModule::with_trigger("bad", ""))),
+        Err(RegistryError::EmptyTrigger(_))
+    ));
+}
+
+#[test]
+fn trigger_spec_does_not_leak_into_module_settings() {
+    // §128:触发词是 Core 路由状态,不属于模块 schema——
+    // 不得出现在模块收到的设置快照里。
+    let bm = FakeModule::with_trigger("bm", "b");
+    let seen = bm.received_settings_handle();
+    let (_core, _spawner) = setup_many(vec![FakeModule::new("default"), bm]);
+
+    let snapshot = seen.lock().unwrap();
+    let snapshot = snapshot.as_ref().expect("module loaded");
+    assert!(snapshot.get("trigger").is_none());
 }
 
 #[test]
@@ -551,6 +596,55 @@ fn module_epoch_is_dropped_after_reload() {
     assert_eq!(results(&core), 1);
 }
 
+#[test]
+fn query_error_commits_error_state() {
+    let module = FakeModule::new("fake");
+    let tx = module.push_pending(); // 空查询
+    let (mut core, spawner) = setup(module);
+    let mut rx = core.take_event_receiver();
+
+    core.open_session();
+
+    tx.send(Err(ModuleError::Unavailable("backend down".into())))
+        .unwrap();
+    spawner.poll_all();
+    drain(&mut core, &mut rx);
+
+    // Err 经同一 ticket 校验提交:结果清空、选中清空、错误进状态(§115)。
+    let s = core.session().unwrap();
+    assert!(s.error.is_some());
+    assert!(s.results.is_empty());
+    assert_eq!(s.selected, None);
+}
+
+#[test]
+fn stale_query_error_is_dropped() {
+    let module = FakeModule::new("fake");
+    let tx_empty = module.push_pending(); // 空查询(gen 0)
+    let tx_a = module.push_pending(); // 输入 "a"(gen 1)
+    let (mut core, spawner) = setup(module);
+    let mut rx = core.take_event_receiver();
+
+    core.open_session();
+    core.input_changed("a".into());
+
+    // 新 query(gen 1)先完成。
+    tx_a.send(ready_items(&["New"])).unwrap();
+    spawner.poll_all();
+    drain(&mut core, &mut rx);
+    assert_eq!(results(&core), 1);
+
+    // 旧 generation 的 Err 后到达——同一 ticket 校验,必死:
+    // 不覆盖现有结果,也不写出 error。
+    tx_empty
+        .send(Err(ModuleError::Unavailable("late error".into())))
+        .unwrap();
+    spawner.poll_all();
+    drain(&mut core, &mut rx);
+    assert_eq!(results(&core), 1);
+    assert!(core.session().unwrap().error.is_none());
+}
+
 // ---------------------------------------------------------------------
 // 输入与选择
 // ---------------------------------------------------------------------
@@ -573,6 +667,32 @@ fn input_change_clears_results_immediately() {
     core.input_changed("x".into());
     assert_eq!(results(&core), 0);
     assert_eq!(selected(&core), None);
+}
+
+#[test]
+fn noop_input_change_does_not_requery_or_reset_selection() {
+    let module = FakeModule::new("fake");
+    module.push_ready(&["A", "B", "C"]);
+    let (mut core, spawner) = setup(module);
+    let mut rx = core.take_event_receiver();
+
+    core.open_session();
+    spawner.poll_all();
+    drain(&mut core, &mut rx);
+    assert_eq!(results(&core), 3);
+
+    core.select_next();
+    core.select_next();
+    assert_eq!(selected(&core), Some(2));
+
+    // 空输入上的 Backspace = 输入未变:不推进 generation、不重查、
+    // 不把选择重置回第 0 行。
+    core.backspace();
+    spawner.poll_all();
+    drain(&mut core, &mut rx);
+    assert_eq!(selected(&core), Some(2));
+    assert_eq!(results(&core), 3);
+    assert_eq!(core.session().unwrap().generation, 0);
 }
 
 #[test]
@@ -695,6 +815,48 @@ fn failed_activation_keeps_session_open_with_error() {
     assert!(core.session().is_some());
     assert!(core.session().unwrap().error.is_some());
     assert!(!core.take_effects().contains(&CoreEffect::HideLauncher));
+}
+
+#[test]
+fn activation_from_old_epoch_is_not_disposed() {
+    let module = FakeModule::new("fake");
+    module.push_ready(&["Alpha"]);
+    let tx_act = module.push_pending_activation();
+    let (mut core, spawner) = setup(module);
+    let mut rx = core.take_event_receiver();
+
+    core.open_session();
+    spawner.poll_all();
+    drain(&mut core, &mut rx);
+    core.take_effects();
+    core.activate_selected();
+
+    // reload 换掉实例:旧实例的 activation 仍在途,epoch 已递增。
+    let new_module = FakeModule::new("fake");
+    new_module.push_ready(&["Fresh"]);
+    core.reload_module(Box::new(new_module)).unwrap();
+
+    // 旧实例的 Close outcome 到达:usage 记录、in-flight flag 复位,
+    // 但处置不落到当前实例——session 不得被关闭(§96 三元绑定)。
+    tx_act
+        .send(ModuleOutcome::success(
+            SessionDisposition::Close,
+            Some(UsageRecordRequest {
+                item_key: "alpha".into(),
+                action_id: ActionId::PRIMARY,
+            }),
+        ))
+        .unwrap();
+    spawner.poll_all();
+    drain(&mut core, &mut rx);
+
+    assert!(core.session().is_some());
+    assert!(!core.session().unwrap().activation_in_flight);
+    assert!(!core.take_effects().contains(&CoreEffect::HideLauncher));
+    assert!(
+        core.usage_stat(&ModuleId::from_static("fake"), "alpha", ActionId::PRIMARY)
+            .is_some()
+    );
 }
 
 // ---------------------------------------------------------------------

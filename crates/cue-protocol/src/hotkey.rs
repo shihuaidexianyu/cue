@@ -31,7 +31,7 @@ impl Modifiers {
 }
 
 /// 常见可注册键位(V1 覆盖范围)。`Char` 为 ASCII 可打印字符,
-/// 字母统一按大写规范化存储。
+/// 字母统一按小写规范化存储。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Key {
     Space,
@@ -134,7 +134,7 @@ impl Key {
             "end" => Key::End,
             "pageup" => Key::PageUp,
             "pagedown" => Key::PageDown,
-            t if t.len() == 1 => Key::Char(t.chars().next()?),
+            t if t.len() == 1 => Key::Char(t.chars().next()?.to_ascii_lowercase()),
             _ => {
                 let n: u32 = token.strip_prefix('f')?.parse().ok()?;
                 match n {
