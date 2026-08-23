@@ -455,6 +455,9 @@ impl LauncherView {
                     .px(px(6.0))
                     .text_xs()
                     .text_color(rgb(0x9a9aa3))
+                    .whitespace_nowrap()
+                    .text_ellipsis()
+                    .overflow_hidden()
                     .child(format!("动作 · {}", model.item_title)),
             )
             .child(div().h(px(1.0)).w_full().bg(rgb(0x33333d)))
@@ -531,9 +534,24 @@ impl LauncherView {
             .flex_col()
             .justify_center()
             .overflow_hidden()
-            .child(div().text_sm().child(row.title.to_string()));
+            .child(
+                div()
+                    .text_sm()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
+                    .overflow_hidden()
+                    .child(row.title.to_string()),
+            );
         if !subtitle.is_empty() {
-            text_col = text_col.child(div().text_xs().text_color(rgb(0x9a9aa3)).child(subtitle));
+            text_col = text_col.child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(0x9a9aa3))
+                    .whitespace_nowrap()
+                    .text_ellipsis()
+                    .overflow_hidden()
+                    .child(subtitle),
+            );
         }
 
         let mut container = div()
@@ -542,6 +560,7 @@ impl LauncherView {
             .items_center()
             .rounded_md()
             .px(px(4.0))
+            .overflow_hidden()
             .when(is_selected, |d| d.bg(rgb(0x2d4f67)))
             .child(Self::render_icon_slot(textures, row))
             .child(text_col);
@@ -551,6 +570,7 @@ impl LauncherView {
                     .flex_none()
                     .text_xs()
                     .text_color(rgb(0x9a9aa3))
+                    .whitespace_nowrap()
                     .child(accessory),
             );
         }
