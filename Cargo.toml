@@ -15,7 +15,7 @@ members = [
 [workspace.package]
 edition = "2021"
 
-# §68:crate 统一 cue- 前缀。`cue` 为 binary(composition root)。
+# crate 统一 cue- 前缀。`cue` 为 binary(composition root)。
 [workspace.dependencies]
 cue-protocol = { path = "crates/cue-protocol" }
 cue-core = { path = "crates/cue-core" }
