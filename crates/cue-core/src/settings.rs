@@ -35,6 +35,7 @@ const HEADER: &str = "cue-settings-v1";
 pub const KEY_HOTKEY: &str = "core.hotkey";
 pub const KEY_HIDE_ON_FOCUS_LOSS: &str = "core.hide_on_focus_loss";
 pub const KEY_START_ON_BOOT: &str = "core.start_on_boot";
+pub const KEY_GAME_MODE: &str = "core.game_mode";
 
 /// 给 UI 的渲染模型:Core 出模型,cue-ui 只渲染——
 /// Module 永远不画 GPUI(禁止 `render_settings_gpui`)。
@@ -148,6 +149,13 @@ impl SettingsHost {
         match self.values.get(KEY_START_ON_BOOT) {
             Some(SettingValue::Bool(b)) => *b,
             _ => false,
+        }
+    }
+
+    pub fn game_mode(&self) -> bool {
+        match self.values.get(KEY_GAME_MODE) {
+            Some(SettingValue::Bool(b)) => *b,
+            _ => true,
         }
     }
 
@@ -310,6 +318,17 @@ fn core_specs() -> Vec<SettingSpec> {
             description: Some("登录 Windows 时自动启动 CUE(写入当前用户的 Run 注册表项)".into()),
             kind: SettingKind::Bool,
             default: SettingValue::Bool(false),
+            apply_policy: ApplyPolicy::Immediate,
+        },
+        SettingSpec {
+            key: SettingKey(Arc::from(KEY_GAME_MODE)),
+            label: "游戏模式:全屏时不唤起".into(),
+            description: Some(
+                "前台是全屏应用(游戏、全屏视频)时热键静默失效;只拦截热键唤起,托盘/第二实例照常"
+                    .into(),
+            ),
+            kind: SettingKind::Bool,
+            default: SettingValue::Bool(true),
             apply_policy: ApplyPolicy::Immediate,
         },
     ]

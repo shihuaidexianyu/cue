@@ -5,6 +5,7 @@
 //! 由编排层(cue binary)翻译成 Core 的 HostEvent。
 
 pub mod autostart;
+pub mod fullscreen;
 pub mod host;
 pub mod hotkey;
 pub mod icon;

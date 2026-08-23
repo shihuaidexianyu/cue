@@ -19,8 +19,8 @@ pub use event::{ActivationTicket, CoreEvent, HostEvent, QueryTicket};
 pub use registry::{ModuleRegistry, RegistryError};
 pub use session::{ActionMenuState, SessionId, SessionState};
 pub use settings::{
-    ApplyHotkey, ApplyStartOnBoot, KEY_HOTKEY, KEY_START_ON_BOOT, OpenPath, SettingsHost,
-    SettingsModel, SettingsRow, SettingsViewState,
+    ApplyHotkey, ApplyStartOnBoot, KEY_GAME_MODE, KEY_HOTKEY, KEY_START_ON_BOOT, OpenPath,
+    SettingsHost, SettingsModel, SettingsRow, SettingsViewState,
 };
 pub use spawner::TaskSpawner;
 pub use usage::UsageStore;
@@ -52,6 +52,10 @@ pub struct CoreConfig {
     /// Path 类设置行的"打开"动作回调(系统默认程序打开路径,同模式)。
     /// None(测试)时打开视为成功。
     pub open_path: Option<OpenPath>,
+    /// 前台全屏探针(游戏模式,§127):返回 true 时热键唤起被静默忽略。
+    /// 同步、只在热键按下瞬间调用;同 host 回调模式(函数,不是 trait)。
+    /// None(测试)时视为"非全屏",门控不生效。
+    pub fullscreen_probe: Option<Box<dyn FnMut() -> bool>>,
 }
 
 impl Default for CoreConfig {
@@ -64,6 +68,7 @@ impl Default for CoreConfig {
             apply_hotkey: None,
             apply_start_on_boot: None,
             open_path: None,
+            fullscreen_probe: None,
         }
     }
 }
@@ -222,6 +227,18 @@ impl Core {
         if self.settings_view.is_some() {
             self.dismiss_settings();
         } else if !self.visible {
+            // 游戏模式(§127):前台全屏时静默忽略唤起。
+            // 只门控 show 路径——hide/focus 半段、托盘唤起照常。
+            if self.settings.game_mode()
+                && self
+                    .config
+                    .fullscreen_probe
+                    .as_mut()
+                    .map(|probe| probe())
+                    .unwrap_or(false)
+            {
+                return;
+            }
             self.open_session();
         } else if self.focused {
             self.close_session();

@@ -793,6 +793,72 @@ fn hotkey_toggles_and_focus_loss_hides() {
 }
 
 // ---------------------------------------------------------------------
+// 游戏模式(§127):前台全屏时热键不唤起
+// ---------------------------------------------------------------------
+
+/// 带 fullscreen_probe 的 setup;probe 由调用方注入。
+fn setup_with_probe(probe: impl FnMut() -> bool + 'static) -> Core {
+    let spawner = ManualSpawner::new();
+    let mut registry = ModuleRegistry::new();
+    registry
+        .register(Box::new(FakeModule::new("fake")))
+        .unwrap();
+    let config = CoreConfig {
+        fullscreen_probe: Some(Box::new(probe)),
+        ..test_config()
+    };
+    Core::new(config, registry, spawner).unwrap()
+}
+
+#[test]
+fn game_mode_suppresses_hotkey_show_when_fullscreen() {
+    let mut core = setup_with_probe(|| true);
+    // 设置默认 true + 全屏 → 静默忽略:无效果、不可见。
+    core.hotkey_pressed();
+    assert!(!core.is_visible());
+    assert!(core.take_effects().is_empty());
+}
+
+#[test]
+fn game_mode_off_still_shows_when_fullscreen() {
+    let mut core = setup_with_probe(|| true);
+    // 关掉 core.game_mode:事务式设置(§42)commit 后 getter 立即生效。
+    core.apply_setting(KEY_GAME_MODE, SettingValue::Bool(false))
+        .unwrap();
+    core.hotkey_pressed();
+    assert!(core.is_visible());
+    assert!(core.take_effects().contains(&CoreEffect::ShowLauncher));
+}
+
+#[test]
+fn game_mode_does_not_suppress_when_not_fullscreen() {
+    let mut core = setup_with_probe(|| false);
+    core.hotkey_pressed();
+    assert!(core.is_visible());
+    assert!(core.take_effects().contains(&CoreEffect::ShowLauncher));
+}
+
+#[test]
+fn game_mode_still_allows_hide_toggle_when_fullscreen() {
+    let mut core = setup_with_probe(|| true);
+    core.open_session();
+    core.take_effects();
+    // 已可见时热键照常关闭(门控只在 show 半段)。
+    core.hotkey_pressed();
+    assert!(!core.is_visible());
+    assert!(core.take_effects().contains(&CoreEffect::HideLauncher));
+}
+
+#[test]
+fn game_mode_does_not_gate_show_requested() {
+    let mut core = setup_with_probe(|| true);
+    // 托盘/第二实例唤起不受门控(§127:只拦热键)。
+    core.show_requested();
+    assert!(core.is_visible());
+    assert!(core.take_effects().contains(&CoreEffect::ShowLauncher));
+}
+
+// ---------------------------------------------------------------------
 // present 路由
 // ---------------------------------------------------------------------
 
@@ -1060,15 +1126,16 @@ fn settings_view_lifecycle_and_effects() {
     assert!(core.in_settings());
     assert!(core.session().is_none());
     let model = core.settings_model().unwrap();
-    assert_eq!(model.rows.len(), 3); // hotkey + hide_on_focus_loss + start_on_boot
+    assert_eq!(model.rows.len(), 4); // hotkey + hide_on_focus_loss + start_on_boot + game_mode
     assert_eq!(model.selected, 0);
 
     core.settings_select_next();
-    core.settings_select_next(); // 夹紧在最后一行
     core.settings_select_next();
-    assert_eq!(core.settings_model().unwrap().selected, 2);
+    core.settings_select_next();
+    core.settings_select_next(); // 夹紧在最后一行
+    assert_eq!(core.settings_model().unwrap().selected, 3);
     core.settings_select_prev();
-    assert_eq!(core.settings_model().unwrap().selected, 1);
+    assert_eq!(core.settings_model().unwrap().selected, 2);
 
     // 热键在设置页 = Esc(关闭设置)。
     core.hotkey_pressed();
