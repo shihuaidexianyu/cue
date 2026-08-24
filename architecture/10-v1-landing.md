@@ -399,6 +399,15 @@ Activation 失败：
   toggle 第三态（可见但未聚焦 → 聚焦）依赖此设置存在（§53）。
 ```
 
+增补（2026-08-24，失焦定义补全）：锁屏 / 快速用户切换离开控制台也
+视为失焦。锁屏切到安全桌面时 `EVENT_SYSTEM_FOREGROUND` 是否投递给
+out-of-context 钩子是未文档行为——实测 Win11 26200 显式锁屏有
+LockApp 前台事件（钩子能藏），但随构建与锁屏路径（如灭屏自动锁）
+而异，不能只依赖它。宿主注册 `WM_WTSSESSION`（WTS_SESSION_LOCK /
+WTS_CONSOLE_DISCONNECT，文档化通道）补投 FocusLost，与前台事件
+互补、重复无害（visible=false 时 no-op），是否隐藏仍由
+`core.hide_on_focus_loss` 裁决；解锁不自动唤起。
+
 ---
 
 # 116. 托盘图标与退出路径

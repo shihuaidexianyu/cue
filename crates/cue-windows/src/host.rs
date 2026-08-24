@@ -11,6 +11,7 @@
 use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::System::RemoteDesktop::{NOTIFY_FOR_THIS_SESSION, WTSRegisterSessionNotification};
 use windows::Win32::UI::Accessibility::{HWINEVENTHOOK, SetWinEventHook, UnhookWinEvent};
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::{Error, PCWSTR, w};
@@ -44,6 +45,14 @@ pub const WM_CUE_TRAY: u32 = WM_APP + 3;
 pub const WM_CUE_TRAY_CMD: u32 = WM_APP + 4;
 /// 托盘命令的定时器 id 基数:timer id = 基数 + 命令 id(免去全局状态)。
 pub const TRAY_CMD_TIMER_BASE: usize = 0xC0E0;
+
+/// WTS 会话通知(winuser.h;windows crate 未导出,按 ABI 值定义)。
+/// 用途见 wnd_proc 的 WM_WTSSESSION 分支:锁屏 = 失焦。
+const WM_WTSSESSION: u32 = 0x02B1;
+/// 会话被锁(Win+L / 唤醒要求登录自动锁 / 屏保锁)。
+const WTS_SESSION_LOCK: usize = 0x7;
+/// 会话被从控制台断开(快速用户切换离开本会话)。
+const WTS_CONSOLE_DISCONNECT: usize = 0x2;
 
 static LAUNCHER_HWND: AtomicIsize = AtomicIsize::new(0);
 static HOST_HWND: AtomicIsize = AtomicIsize::new(0);
@@ -117,6 +126,14 @@ impl HostWindow {
                 Some(state as *const core::ffi::c_void),
             )?;
             HOST_HWND.store(hwnd.0 as isize, Ordering::SeqCst);
+            // 锁屏感知:锁屏切到安全桌面时,WinEvent 钩子能否收到前台
+            // 事件是未文档行为(实测 Win11 26200 显式锁屏有 LockApp 前台
+            // 事件,但随构建与锁屏路径而异,如灭屏自动锁),不能只依赖它。
+            // WTS 会话通知是文档化的锁屏途径;注册失败只降级为旧行为。
+            // 注册随进程生命周期,host 窗口与进程同寿,无需 unregister。
+            if let Err(e) = WTSRegisterSessionNotification(hwnd, NOTIFY_FOR_THIS_SESSION) {
+                eprintln!("[host] WTSRegisterSessionNotification failed: {e}");
+            }
             Ok(Self { hwnd })
         }
     }
@@ -155,6 +172,19 @@ unsafe extern "system" fn host_wnd_proc(
                 WM_HOTKEY => handler(HostMsg::HotkeyPressed),
                 m if m == WM_CUE_SHOW => handler(HostMsg::ShowRequested),
                 m if m == WM_CUE_FOCUS_LOST => handler(HostMsg::FocusLost),
+                m if m == WM_WTSSESSION => {
+                    // 锁屏 / 快速用户切换离开控制台:安全桌面接管输入,
+                    // 焦点必然丢失。前台事件钩子在此刻是否投递是未文档
+                    // 行为(实测与 WTS 的先后都不保证),以文档化的 WTS
+                    // 为准补投 FocusLost,是否隐藏仍由
+                    // core.hide_on_focus_loss 裁决(§115)。重复投递无害
+                    // (visible=false 时是 no-op)。解锁不自动唤起:
+                    // 残留可见是误唤醒,主动 show 更是。
+                    if wparam.0 == WTS_SESSION_LOCK || wparam.0 == WTS_CONSOLE_DISCONNECT {
+                        eprintln!("[host] session lock/disconnect -> FocusLost");
+                        handler(HostMsg::FocusLost);
+                    }
+                }
                 m if m == WM_CUE_TRAY => crate::tray::handle_message(hwnd, lparam, handler),
                 m if m == WM_CUE_TRAY_CMD => {
                     // 命令 id 编进 timer id,WM_TIMER 时再取回分发。
