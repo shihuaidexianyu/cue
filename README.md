@@ -4,6 +4,8 @@
   <p><b>轻量 Windows 启动器</b> —— Alt+Space 唤起,输入即搜,Enter 启动</p>
   <p>Rust + GPUI + Win32 · 单文件约 12 MB · 常驻内存约 63 MB</p>
 </div>
+
+
 ## 功能
 
 - **应用搜索**:开始菜单 + 商店应用(UWP/MSIX)全量索引;中文应用按拼音全拼 / 首字母搜(`yx` → 邮箱)
