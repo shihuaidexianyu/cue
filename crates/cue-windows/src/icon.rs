@@ -11,15 +11,26 @@ use windows::core::PCWSTR;
 
 /// 与 crates/cue/cue.rc 的资源 id 一致。
 const BRAND_ICON_ID: usize = 1;
+/// 免打扰生效态(灰火箭,§127):仅托盘运行时 NIM_MODIFY 切换。
+const DND_ICON_ID: usize = 2;
 
 /// 按 (cx, cy) 请求尺寸加载品牌图标。非 LR_SHARED:句柄为私有副本,
 /// 随进程生命周期持有即可(托盘/窗口图标本就与进程同寿)。
 pub fn brand_icon(cx: i32, cy: i32) -> Option<HICON> {
+    load_icon(BRAND_ICON_ID, cx, cy)
+}
+
+/// 免打扰生效态图标,同 brand_icon 的尺寸语义。
+pub fn dnd_icon(cx: i32, cy: i32) -> Option<HICON> {
+    load_icon(DND_ICON_ID, cx, cy)
+}
+
+fn load_icon(id: usize, cx: i32, cy: i32) -> Option<HICON> {
     unsafe {
         let hmod = GetModuleHandleW(None).ok()?;
         LoadImageW(
             Some(windows::Win32::Foundation::HINSTANCE(hmod.0)),
-            PCWSTR(BRAND_ICON_ID as *const u16), // MAKEINTRESOURCEW
+            PCWSTR(id as *const u16), // MAKEINTRESOURCEW
             IMAGE_ICON,
             cx,
             cy,

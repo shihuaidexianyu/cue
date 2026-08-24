@@ -19,8 +19,8 @@ pub use event::{ActivationTicket, CoreEvent, HostEvent, QueryTicket};
 pub use registry::{ModuleRegistry, RegistryError};
 pub use session::{ActionMenuState, SessionId, SessionState};
 pub use settings::{
-    ApplyHotkey, ApplyStartOnBoot, KEY_DND_MODE, KEY_HOTKEY, KEY_START_ON_BOOT, OpenPath,
-    SettingsHost, SettingsModel, SettingsRow, SettingsViewState,
+    ApplyHotkey, ApplyStartOnBoot, KEY_DND_MODE, KEY_HOTKEY, KEY_START_ON_BOOT, NotifyDndMode,
+    OpenPath, SettingsHost, SettingsModel, SettingsRow, SettingsViewState,
 };
 pub use spawner::TaskSpawner;
 pub use usage::UsageStore;
@@ -56,6 +56,10 @@ pub struct CoreConfig {
     /// 同步、只在热键按下瞬间调用;同 host 回调模式(函数,不是 trait)。
     /// None(测试)时视为"非全屏",门控不生效。
     pub fullscreen_probe: Option<Box<dyn FnMut() -> bool>>,
+    /// core.dnd_mode 的 commit 后通知(托盘状态图标;同 host 回调模式)。
+    /// Core::new 以初始值调一次,之后每次成功 commit 调一次。
+    /// None(测试)时不通知。
+    pub notify_dnd_mode: Option<NotifyDndMode>,
 }
 
 impl Default for CoreConfig {
@@ -69,6 +73,7 @@ impl Default for CoreConfig {
             apply_start_on_boot: None,
             open_path: None,
             fullscreen_probe: None,
+            notify_dnd_mode: None,
         }
     }
 }
@@ -129,6 +134,11 @@ impl Core {
             trigger_keys: std::collections::HashSet::new(),
         };
         core.load_modules()?;
+        // 免打扰开关的初始值同步给 host(托盘状态图标,§127):
+        // 此后每次成功 commit 在 apply_setting_inner 里通知。
+        if let Some(notify) = core.config.notify_dnd_mode.as_mut() {
+            notify(core.settings.dnd_mode());
+        }
         Ok(core)
     }
 
@@ -447,6 +457,12 @@ impl Core {
                 }
                 // 第三、四步:commit + persist(host 内为原子的一对)。
                 self.settings.commit(key, candidate);
+                // core.dnd_mode commit 后通知 host(托盘状态图标,§127)。
+                if key == KEY_DND_MODE
+                    && let Some(notify) = self.config.notify_dnd_mode.as_mut()
+                {
+                    notify(self.settings.dnd_mode());
+                }
             }
             ApplyPolicy::RestartApplication => {
                 self.settings.commit(key, candidate);

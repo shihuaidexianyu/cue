@@ -8,7 +8,7 @@
 //! 失焦检测用 `SetWinEventHook(EVENT_SYSTEM_FOREGROUND, WINEVENT_OUTOFCONTEXT)`:
 //! 无需子类化 GPUI 窗口,前台窗口变化且不是 Launcher 时通知 Core。
 
-use std::sync::atomic::{AtomicIsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Accessibility::{HWINEVENTHOOK, SetWinEventHook, UnhookWinEvent};
@@ -47,6 +47,26 @@ pub const TRAY_CMD_TIMER_BASE: usize = 0xC0E0;
 
 static LAUNCHER_HWND: AtomicIsize = AtomicIsize::new(0);
 static HOST_HWND: AtomicIsize = AtomicIsize::new(0);
+
+/// core.dnd_mode 的 host 侧镜像(Core 的 notify_dnd_mode 回调驱动,
+/// UI 线程):免打扰状态图标的门控半边。初始 true 与设置默认值一致,
+/// Core::new 后立刻用真实值校准,偏差窗口无害(见 set_dnd_enabled)。
+static DND_ENABLED: AtomicBool = AtomicBool::new(true);
+
+/// Core 告知 dnd 开关值(初始一次 + 每次成功 commit,§127)。
+/// 设置翻转时立即重估图标——正在全屏前台时关掉免打扰,图标当场回红。
+pub fn set_dnd_enabled(on: bool) {
+    DND_ENABLED.store(on, Ordering::SeqCst);
+    refresh_dnd_icon();
+}
+
+/// 免打扰生效 = 开关开 && 前台全屏;托盘图标红 ↔ 灰。
+/// 在前台切换钩子上调用:事件驱动、纯查询、翻转才换,零轮询。
+fn refresh_dnd_icon() {
+    let engaged =
+        DND_ENABLED.load(Ordering::SeqCst) && crate::fullscreen::foreground_is_fullscreen();
+    crate::tray::set_dnd_engaged(engaged);
+}
 
 /// 窗口创建后由编排层告知 Launcher 的 HWND(失焦比较用)。
 pub fn set_launcher_hwnd(hwnd: HWND) {
@@ -203,6 +223,9 @@ unsafe extern "system" fn foreground_win_event_proc(
     if event != EVENT_SYSTEM_FOREGROUND {
         return;
     }
+    // 免打扰状态图标:每次前台变化都重估——与 §127"只在按键瞬间
+    // 探测"的热键门控互补,这里是图标状态,必须随状态连续。
+    refresh_dnd_icon();
     let launcher = LAUNCHER_HWND.load(Ordering::SeqCst);
     if launcher == 0 || hwnd.0 as isize == launcher {
         return;

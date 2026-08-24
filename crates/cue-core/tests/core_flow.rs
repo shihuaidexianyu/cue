@@ -1156,6 +1156,51 @@ fn dnd_mode_does_not_gate_show_requested() {
     assert!(core.take_effects().contains(&CoreEffect::ShowLauncher));
 }
 
+/// 带 notify_dnd_mode 的 setup;通知序列录进 log。
+fn setup_with_dnd_notify(log: Arc<Mutex<Vec<bool>>>) -> Core {
+    let spawner = ManualSpawner::new();
+    let mut registry = ModuleRegistry::new();
+    registry
+        .register(Box::new(FakeModule::new("fake")))
+        .unwrap();
+    let config = CoreConfig {
+        notify_dnd_mode: Some(Box::new(move |on| log.lock().unwrap().push(on))),
+        ..test_config()
+    };
+    Core::new(config, registry, spawner).unwrap()
+}
+
+#[test]
+fn dnd_mode_notify_fires_initial_and_on_commit() {
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let mut core = setup_with_dnd_notify(log.clone());
+    // 初始值(默认 true)在 Core::new 时通知一次。
+    assert_eq!(*log.lock().unwrap(), vec![true]);
+
+    core.apply_setting(KEY_DND_MODE, SettingValue::Bool(false))
+        .unwrap();
+    core.apply_setting(KEY_DND_MODE, SettingValue::Bool(true))
+        .unwrap();
+    assert_eq!(*log.lock().unwrap(), vec![true, false, true]);
+}
+
+#[test]
+fn dnd_mode_notify_skips_other_keys_and_failed_transactions() {
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let mut core = setup_with_dnd_notify(log.clone());
+
+    // 其他 key 的 commit 不通知。
+    core.apply_setting(KEY_START_ON_BOOT, SettingValue::Bool(true))
+        .unwrap();
+    // 失败事务不通知:类型不符 / 未知 key。
+    core.apply_setting(KEY_DND_MODE, SettingValue::Integer(1))
+        .unwrap_err();
+    core.apply_setting("core.nonexistent", SettingValue::Bool(true))
+        .unwrap_err();
+
+    assert_eq!(*log.lock().unwrap(), vec![true]); // 仍只有初始那次
+}
+
 // ---------------------------------------------------------------------
 // present 路由
 // ---------------------------------------------------------------------

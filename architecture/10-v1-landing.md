@@ -279,6 +279,9 @@ open_path
   Path 行的"打开路径"激活（§122——非值变更，不走事务）
 fullscreen_probe
   免打扰模式门控（§127——按键瞬间的纯查询，无 IO、无锁）
+notify_dnd_mode
+  core.dnd_mode 的 commit 后通知(§127——托盘状态图标;
+  通知不是 try-apply,无返回值,不参与事务成败)
 ```
 
 UIEvent 不经 launcher 逐条翻译：view 持有 Core，按键在 cue-ui 内直接调 Core 方法；launcher 只注入 CoreEffect 的执行器（effect_handler）。上图的"接收并翻译"覆盖的是 HostEvent（WM_HOTKEY / 托盘 / 失焦 → CoreEvent 队列）。
@@ -421,6 +424,10 @@ V1 决定：
 托盘回调消息投递到 host window（§113 的 Win32 消息入口）；
 host window 因此是隐藏顶层窗口而非 message-only——托盘菜单要求
 owner 可设为前台，message-only 窗口做不到（MSDN 托盘菜单模式）。
+
+图标同时是免打扰的状态灯(§127,2026-08-24 增补):红 = 我在
+工作(热键可用),灰 = 免打扰生效(热键被压制)。前台切换钩子
+上重估、翻转才 NIM_MODIFY——见 §127 的「托盘」决议。
 
 ---
 

@@ -207,6 +207,12 @@ fn main() {
                 // 免打扰模式(§127):全屏探针——UI 线程热键路径上的
                 // 几次便宜 Win32 查询,无 IO、无锁,同步注入。
                 fullscreen_probe: Some(Box::new(win::fullscreen::foreground_is_fullscreen)),
+                // 托盘状态图标(§127):Core 告知 dnd 开关的初始值与每次
+                // commit;host 侧合成"开关 && 前台全屏"决定红/灰。
+                notify_dnd_mode: Some(Box::new(|on| {
+                    eprintln!("[dnd] enabled={on}");
+                    win::host::set_dnd_enabled(on);
+                })),
                 storage_root,
                 ..CoreConfig::default()
             },

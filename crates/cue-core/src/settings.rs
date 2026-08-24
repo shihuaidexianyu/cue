@@ -30,6 +30,12 @@ pub type ApplyStartOnBoot = Box<dyn FnMut(bool) -> Result<(), String>>;
 /// UI 线程调用。
 pub type OpenPath = Box<dyn FnMut(&std::path::Path) -> Result<(), String>>;
 
+/// core.dnd_mode 的 commit 后通知(托盘状态图标,§127):Host 注入、
+/// UI 线程调用、无返回值——通知不会失败,不参与事务(与 try-apply
+/// 不同)。Core::new 以初始值调一次,此后每次成功 commit 调一次;
+/// 重复同值 commit 也会通知(host 侧换图标幂等,无需 Core 去重)。
+pub type NotifyDndMode = Box<dyn FnMut(bool)>;
+
 const HEADER: &str = "cue-settings-v1";
 
 pub const KEY_HOTKEY: &str = "core.hotkey";

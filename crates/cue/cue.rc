@@ -1,3 +1,6 @@
 // 品牌图标资源。id 1 与 cue-windows::icon::BRAND_ICON_ID 一致;
 // 路径相对本 crate 目录(build.rs 以包根为 cwd 调 rc.exe)。
 1 ICON "..\\..\\assets\\cue.ico"
+// 免打扰生效态托盘图标(§127,灰火箭)。id 2 与 DND_ICON_ID 一致;
+// 仅托盘运行时 NIM_MODIFY 切换,不做文件/快捷方式图标。
+2 ICON "..\\..\\assets\\cue-dnd.ico"

@@ -3,12 +3,16 @@
 //! 图标优先用 exe 内嵌的品牌资源(crate::icon,assets/cue.ico);
 //! 资源缺失时退回运行时生成的 32×32 圆角方块。左键唤起,右键菜单
 //! "显示 / 设置 / 退出"(托盘不做更多)。
+//!
+//! 免打扰状态图标(§127):红 = 我在工作(热键可用),灰 = 免打扰
+//! 生效(热键被压制)。host 在前台切换钩子上重估状态,
+//! set_dnd_engaged 只在状态翻转时 NIM_MODIFY 换图标——零轮询。
 
 use crate::host::{HostMsg, WM_CUE_TRAY, WM_CUE_TRAY_CMD};
-use std::sync::atomic::{AtomicIsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
 use windows::Win32::Foundation::{HWND, LPARAM, POINT, WPARAM};
 use windows::Win32::UI::Shell::{
-    NIF_ICON, NIF_MESSAGE, NIF_SHOWTIP, NIF_TIP, NIM_ADD, NIM_DELETE, NOTIFYICONDATAW,
+    NIF_ICON, NIF_MESSAGE, NIF_SHOWTIP, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_MODIFY, NOTIFYICONDATAW,
     Shell_NotifyIconW,
 };
 use windows::Win32::UI::WindowsAndMessaging::*;
@@ -21,6 +25,13 @@ const TRAY_CMD_QUIT: usize = 3;
 
 /// 已挂图标的 host hwnd;退出时据此 NIM_DELETE(不留幽灵图标)。
 static TRAY_HOST: AtomicIsize = AtomicIsize::new(0);
+/// 常态(红)与免打扰生效(灰)两枚 HICON:add 时加载,与进程同寿,
+/// 有意不 DestroyIcon(同 add 注释的句柄策略)。
+static ICON_NORMAL: AtomicIsize = AtomicIsize::new(0);
+static ICON_DND: AtomicIsize = AtomicIsize::new(0);
+/// 当前生效态。add 之前的翻转也记账:add 用它挑初始图标
+/// (CUE 启动时全屏应用已在前台的情形)。
+static DND_ENGAGED: AtomicBool = AtomicBool::new(false);
 
 pub fn add(host: HWND) -> Result<(), Error> {
     // 托盘槽位要小图标(SM_CXSMICON,通常 16);多尺寸 ICO 资源
@@ -28,9 +39,20 @@ pub fn add(host: HWND) -> Result<(), Error> {
     // HICON 都与进程同寿,有意不 DestroyIcon:remove() 只在退出
     // 路径跑,句柄随进程回收。
     let small = unsafe { GetSystemMetrics(SM_CXSMICON) };
-    let icon = match crate::icon::brand_icon(small, small) {
+    let normal = match crate::icon::brand_icon(small, small) {
         Some(h) => h,
-        None => build_icon()?,
+        None => build_icon(0xE5, 0x48, 0x4D)?,
+    };
+    let dnd = match crate::icon::dnd_icon(small, small) {
+        Some(h) => h,
+        None => build_icon(0x52, 0x52, 0x5B)?,
+    };
+    ICON_NORMAL.store(normal.0 as isize, Ordering::SeqCst);
+    ICON_DND.store(dnd.0 as isize, Ordering::SeqCst);
+    let icon = if DND_ENGAGED.load(Ordering::SeqCst) {
+        dnd
+    } else {
+        normal
     };
     let mut tip = [0u16; 128];
     for (i, c) in "CUE".encode_utf16().enumerate() {
@@ -53,6 +75,32 @@ pub fn add(host: HWND) -> Result<(), Error> {
     }
     TRAY_HOST.store(host.0 as isize, Ordering::SeqCst);
     Ok(())
+}
+
+/// 免打扰生效态切换(§127):红 ↔ 灰。只在翻转时 NIM_MODIFY;
+/// add 之前调用只记账(add 会读 DND_ENGAGED 挑初始图标)。
+pub fn set_dnd_engaged(engaged: bool) {
+    if DND_ENGAGED.swap(engaged, Ordering::SeqCst) == engaged {
+        return;
+    }
+    eprintln!("[tray] dnd engaged -> {engaged}");
+    let host = TRAY_HOST.load(Ordering::SeqCst);
+    let slot = if engaged { &ICON_DND } else { &ICON_NORMAL };
+    let hicon = slot.load(Ordering::SeqCst);
+    if host == 0 || hicon == 0 {
+        return;
+    }
+    let data = NOTIFYICONDATAW {
+        cbSize: std::mem::size_of::<NOTIFYICONDATAW>() as u32,
+        hWnd: HWND(host as *mut core::ffi::c_void),
+        uID: TRAY_UID,
+        uFlags: NIF_ICON,
+        hIcon: HICON(hicon as *mut core::ffi::c_void),
+        ..Default::default()
+    };
+    unsafe {
+        let _ = Shell_NotifyIconW(NIM_MODIFY, &data);
+    }
 }
 
 /// 退出路径必须调用;进程异常退出时系统会在下次悬停时清理,尽力而为即可。
@@ -129,19 +177,18 @@ pub fn msg_from_cmd(cmd: usize) -> Option<HostMsg> {
     }
 }
 
-/// 运行时生成 32×32 图标:accent 色圆角方块。返回 HICON。
+/// 运行时生成 32×32 图标:指定 rgb 的圆角方块。返回 HICON。
+/// 是资源缺失时的兜底:常态给品牌红,免打扰态给锌灰。
 ///
 /// `CreateIconFromResourceEx` 吃的是 RT_ICON 资源位
 /// (BITMAPINFOHEADER + XOR + AND mask),**不含** .ico 文件的
 /// ICONDIR/ICONDIRENTRY 目录头——那是 RT_GROUP_ICON 的事,
 /// 带上它函数会把目录头误读成位图头。
-fn build_icon() -> Result<HICON, Error> {
+fn build_icon(r: u8, g: u8, b: u8) -> Result<HICON, Error> {
     const S: usize = 32;
     const XOR: usize = S * S * 4;
     const AND: usize = S * S / 8;
 
-    // accent 蓝(BGRA 字节序)
-    let (b, g, r) = (0xFFu8, 0x8Du8, 0x4Cu8);
     let radius = 7.0f32;
 
     let mut xor = vec![0u8; XOR];
