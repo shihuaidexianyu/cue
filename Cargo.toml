@@ -48,3 +48,11 @@ debug = false
 [profile.debugging]
 inherits = "dev"
 debug = "full"
+
+# 发行构建:调试符号不进 exe(分发从来不带 PDB);thin LTO + 单
+# 代码生成单元,换链接时间要小二进制与更少的跨 crate 边界——
+# 加载、Defender 扫描、启动路径都受益。
+[profile.release]
+strip = "symbols"
+lto = "thin"
+codegen-units = 1

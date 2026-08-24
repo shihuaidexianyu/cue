@@ -65,7 +65,11 @@ pub struct HostWindow {
 impl HostWindow {
     /// 在调用线程(必须是带消息循环的主线程)创建隐藏顶层窗口。
     /// 永不 ShowWindow;顶层是为了托盘菜单的前台 owner 要求。
-    pub fn create(handler: Box<dyn Fn(HostMsg) + Send>) -> Result<Self, Error> {
+    ///
+    /// handler 不需要 Send:它只会被本窗口的 WndProc 调用,而窗口
+    /// 有线程亲和(Win32 保证 WndProc 在创建线程上跑)——编排层
+    /// 因此可以在 handler 里持有 Rc<RefCell<...>> 这类单线程状态。
+    pub fn create(handler: Box<dyn Fn(HostMsg)>) -> Result<Self, Error> {
         unsafe {
             let hinstance = GetModuleHandleW(None)?;
             let wc = WNDCLASSW {
@@ -110,7 +114,7 @@ pub fn request_quit() {
     }
 }
 
-type HostHandler = Box<dyn Fn(HostMsg) + Send>;
+type HostHandler = Box<dyn Fn(HostMsg)>;
 
 unsafe extern "system" fn host_wnd_proc(
     hwnd: HWND,

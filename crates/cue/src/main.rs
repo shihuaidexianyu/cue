@@ -7,7 +7,10 @@
 //! 编排:HostEvent → Core → CoreEffect → cue-ui / cue-windows。
 //! 只有本 crate 同时认识 Core、GPUI 和 Win32。
 
-use cue_core::{Core, CoreConfig, CoreEffect, CoreEvent, HostEvent, ModuleRegistry, TaskSpawner};
+use cue_core::{
+    Core, CoreConfig, CoreEffect, CoreEvent, CoreEventSender, HostEvent, ModuleRegistry,
+    TaskSpawner,
+};
 use cue_module_app::AppModule;
 use cue_module_bookmark::BookmarkModule;
 use cue_module_file::FileModule;
@@ -45,6 +48,19 @@ fn parse_hotkey_env() -> Option<Hotkey> {
     std::env::var("CUE_HOTKEY").ok()?.parse().ok()
 }
 
+/// HostMsg → CoreEvent 的翻译(QuitRequested 在 handler 内拦截,
+/// 不进 Core 队列——退出不需要 Core 参与)。
+fn to_core_event(msg: win::host::HostMsg) -> CoreEvent {
+    let event = match msg {
+        win::host::HostMsg::HotkeyPressed => HostEvent::HotkeyPressed,
+        win::host::HostMsg::ShowRequested => HostEvent::ShowRequested,
+        win::host::HostMsg::OpenSettings => HostEvent::OpenSettings,
+        win::host::HostMsg::FocusLost => HostEvent::FocusLost,
+        win::host::HostMsg::QuitRequested => unreachable!("quit 在 handler 内拦截"),
+    };
+    CoreEvent::Host(event)
+}
+
 fn main() {
     let boot_started = std::time::Instant::now();
     // 单实例必须在最早时机——任何状态文件被打开之前。
@@ -54,7 +70,61 @@ fn main() {
         win::single_instance::AcquireOutcome::AlreadyRunning => return,
     };
 
+    // 热键尽早注册(启动序列的核心设计):host window 与热键都是纯
+    // Win32,不依赖 GPUI,抢在 Application 初始化之前完成——进程入口
+    // 后 ~10 ms 热键即生效。GPUI 起来之前按下的热键进线程消息队列,
+    // 主循环启动时分发到 handler;Core 未就位则由 backlog 暂存,
+    // Core::new 后原序补发。开机/安装后立刻按键不再被吞。
+    let core_tx_slot: Rc<RefCell<Option<CoreEventSender>>> = Rc::new(RefCell::new(None));
+    let backlog: Rc<RefCell<Vec<win::host::HostMsg>>> = Rc::new(RefCell::new(Vec::new()));
+    let host = {
+        let slot = Rc::clone(&core_tx_slot);
+        let backlog = Rc::clone(&backlog);
+        win::host::HostWindow::create(Box::new(move |msg| {
+            eprintln!("[host] {msg:?}");
+            // 托盘"退出"是唯一正常退出路径——先删托盘图标
+            // (不留幽灵图标),再结束消息循环;热键随进程释放。
+            if msg == win::host::HostMsg::QuitRequested {
+                win::tray::remove();
+                // §107 配对义务同样覆盖退出路径:可见状态下退出时
+                // hide 不会跑,这里恢复用户布局,否则全局输入法模式
+                // 下其他应用被留在英文。
+                win::ime::restore_saved_layout();
+                win::host::request_quit();
+                return;
+            }
+            match slot.borrow().as_ref() {
+                Some(tx) => {
+                    let _ = tx.unbounded_send(to_core_event(msg));
+                }
+                None => backlog.borrow_mut().push(msg),
+            }
+        }))
+        .expect("host window")
+    };
+
+    // 初始注册用 env 覆盖(仅本次进程)或默认 Alt+Space;设置里的
+    // 自定义值要等 Core 读了 settings.tsv 才知道,Core 就位后再次
+    // apply(相同则 apply 早退;不同则事务式换绑,这 ~100 ms 内
+    // 默认键暂可用,是可接受的瞬态)。
+    let hotkey_slot: Rc<RefCell<Option<win::hotkey::HotkeyManager>>> =
+        Rc::new(RefCell::new(None));
+    *hotkey_slot.borrow_mut() = Some(win::hotkey::HotkeyManager::new(host.hwnd()));
+    let registered = hotkey_slot
+        .borrow_mut()
+        .as_mut()
+        .expect("hotkey manager just installed")
+        .apply(parse_hotkey_env().unwrap_or_default());
+    // 热键被其他应用(如另一个 launcher)占用时降级为警告:
+    // Launcher 继续运行,可经第二实例信号唤起,设置里可换键。
+    if let Err(e) = registered {
+        eprintln!("[warn] hotkey registration failed: {e}");
+    }
+    // 冷启动预算(< 500 ms)的常驻探针:进程入口 → 热键就绪。
+    eprintln!("[boot] hotkey ready in {:?}", boot_started.elapsed());
+
     Application::new().run(move |cx: &mut App| {
+        eprintln!("[boot] gpui entered in {:?}", boot_started.elapsed());
         let spawner = Arc::new(GpuiSpawner {
             executor: cx.background_executor().clone(),
         });
@@ -81,11 +151,9 @@ fn main() {
             .map(|p| PathBuf::from(p).join("CUE"))
             .unwrap_or_else(|_| PathBuf::from("CUE"));
 
-        // apply_hotkey 回调与初始注册共用同一个 HotkeyManager。
-        // Core::new 先于 host window(manager 需要 host hwnd)——
-        // 用共享槽打破构造顺序环;槽只在 UI 线程访问。
-        let hotkey_slot: Rc<RefCell<Option<win::hotkey::HotkeyManager>>> =
-            Rc::new(RefCell::new(None));
+        // apply_hotkey 回调与初始注册共用同一个 HotkeyManager——
+        // manager 在 main 里已创建并入槽(host window 早于 GPUI);
+        // 共享槽只在 UI 线程访问。
         let apply_hotkey = {
             let slot = Rc::clone(&hotkey_slot);
             move |hk: &Hotkey| -> Result<(), String> {
@@ -146,51 +214,35 @@ fn main() {
             spawner,
         )
         .expect("core init");
+        eprintln!("[boot] core ready in {:?}", boot_started.elapsed());
         let core_tx = core.event_sender();
 
-        // Host window(Win32 消息入口)→ Core 事件队列。
-        let host = win::host::HostWindow::create(Box::new(move |msg| {
-            eprintln!("[host] {msg:?}");
-            // 托盘"退出"是唯一正常退出路径——先删托盘图标
-            // (不留幽灵图标),再结束消息循环;热键随进程释放。
-            if msg == win::host::HostMsg::QuitRequested {
-                win::tray::remove();
-                // §107 配对义务同样覆盖退出路径:可见状态下退出时
-                // hide 不会跑,这里恢复用户布局,否则全局输入法模式
-                // 下其他应用被留在英文。
-                win::ime::restore_saved_layout();
-                win::host::request_quit();
-                return;
+        // Core 就位:backlog 里攒下的早期消息(启动后抢先按的热键/
+        // 第二实例唤起)原序补发,再装上发送端。handler 与本段同在
+        // UI 线程,不存在交错。
+        {
+            let mut pending = backlog.borrow_mut();
+            for msg in pending.drain(..) {
+                let _ = core_tx.unbounded_send(to_core_event(msg));
             }
-            let event = match msg {
-                win::host::HostMsg::HotkeyPressed => HostEvent::HotkeyPressed,
-                win::host::HostMsg::ShowRequested => HostEvent::ShowRequested,
-                win::host::HostMsg::OpenSettings => HostEvent::OpenSettings,
-                win::host::HostMsg::FocusLost => HostEvent::FocusLost,
-                win::host::HostMsg::QuitRequested => unreachable!(),
-            };
-            let _ = core_tx.unbounded_send(CoreEvent::Host(event));
-        }))
-        .expect("host window");
+            *core_tx_slot.borrow_mut() = Some(core_tx);
+        }
 
         // 托盘图标是进程存活的唯一常驻可见信号。
         win::tray::add(host.hwnd()).expect("tray icon");
 
-        // 热键管理器入槽;初始注册 = env 覆盖(仅本次进程)或设置值。
-        *hotkey_slot.borrow_mut() = Some(win::hotkey::HotkeyManager::new(host.hwnd()));
-        let initial_hotkey = parse_hotkey_env().unwrap_or_else(|| core.hotkey());
+        // 设置里的自定义热键此时才读到:与早期注册(默认/env)不同
+        // 则事务式换绑;相同则 apply 早退,零成本。
         let registered = hotkey_slot
             .borrow_mut()
             .as_mut()
-            .expect("hotkey manager just installed")
-            .apply(initial_hotkey);
+            .expect("hotkey manager installed in main")
+            .apply(parse_hotkey_env().unwrap_or_else(|| core.hotkey()));
         // 热键被其他应用(如另一个 launcher)占用时降级为警告:
         // Launcher 继续运行,可经第二实例信号唤起,设置里可换键。
         if let Err(e) = registered {
-            eprintln!("[warn] hotkey registration failed: {e}");
+            eprintln!("[warn] hotkey re-apply from settings failed: {e}");
         }
-        // 冷启动预算(< 500 ms)的常驻探针:进程入口 → 热键就绪。
-        eprintln!("[boot] hotkey ready in {:?}", boot_started.elapsed());
 
         // 常驻但默认隐藏——窗口创建时不可见,等待 ShowLauncher 效果。
         let bounds = Bounds::centered(
@@ -211,6 +263,7 @@ fn main() {
                 |_, cx| cx.new(|cx| LauncherView::new(core, cx)),
             )
             .expect("open window");
+        eprintln!("[boot] window created in {:?}", boot_started.elapsed());
 
         cx.activate(true);
 
