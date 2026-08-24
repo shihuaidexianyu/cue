@@ -1091,7 +1091,7 @@ fn hotkey_toggles_and_focus_loss_hides() {
 }
 
 // ---------------------------------------------------------------------
-// 游戏模式(§127):前台全屏时热键不唤起
+// 免打扰模式(§127):前台全屏时热键不唤起
 // ---------------------------------------------------------------------
 
 /// 带 fullscreen_probe 的 setup;probe 由调用方注入。
@@ -1109,7 +1109,7 @@ fn setup_with_probe(probe: impl FnMut() -> bool + 'static) -> Core {
 }
 
 #[test]
-fn game_mode_suppresses_hotkey_show_when_fullscreen() {
+fn dnd_mode_suppresses_hotkey_show_when_fullscreen() {
     let mut core = setup_with_probe(|| true);
     // 设置默认 true + 全屏 → 静默忽略:无效果、不可见。
     core.hotkey_pressed();
@@ -1118,10 +1118,10 @@ fn game_mode_suppresses_hotkey_show_when_fullscreen() {
 }
 
 #[test]
-fn game_mode_off_still_shows_when_fullscreen() {
+fn dnd_mode_off_still_shows_when_fullscreen() {
     let mut core = setup_with_probe(|| true);
-    // 关掉 core.game_mode:事务式设置(§42)commit 后 getter 立即生效。
-    core.apply_setting(KEY_GAME_MODE, SettingValue::Bool(false))
+    // 关掉 core.dnd_mode:事务式设置(§42)commit 后 getter 立即生效。
+    core.apply_setting(KEY_DND_MODE, SettingValue::Bool(false))
         .unwrap();
     core.hotkey_pressed();
     assert!(core.is_visible());
@@ -1129,7 +1129,7 @@ fn game_mode_off_still_shows_when_fullscreen() {
 }
 
 #[test]
-fn game_mode_does_not_suppress_when_not_fullscreen() {
+fn dnd_mode_does_not_suppress_when_not_fullscreen() {
     let mut core = setup_with_probe(|| false);
     core.hotkey_pressed();
     assert!(core.is_visible());
@@ -1137,7 +1137,7 @@ fn game_mode_does_not_suppress_when_not_fullscreen() {
 }
 
 #[test]
-fn game_mode_still_allows_hide_toggle_when_fullscreen() {
+fn dnd_mode_still_allows_hide_toggle_when_fullscreen() {
     let mut core = setup_with_probe(|| true);
     core.open_session();
     core.take_effects();
@@ -1148,7 +1148,7 @@ fn game_mode_still_allows_hide_toggle_when_fullscreen() {
 }
 
 #[test]
-fn game_mode_does_not_gate_show_requested() {
+fn dnd_mode_does_not_gate_show_requested() {
     let mut core = setup_with_probe(|| true);
     // 托盘/第二实例唤起不受门控(§127:只拦热键)。
     core.show_requested();
@@ -1424,7 +1424,7 @@ fn settings_view_lifecycle_and_effects() {
     assert!(core.in_settings());
     assert!(core.session().is_none());
     let model = core.settings_model().unwrap();
-    assert_eq!(model.rows.len(), 4); // hotkey + hide_on_focus_loss + start_on_boot + game_mode
+    assert_eq!(model.rows.len(), 4); // hotkey + hide_on_focus_loss + start_on_boot + dnd_mode
     assert_eq!(model.selected, 0);
 
     core.settings_select_next();

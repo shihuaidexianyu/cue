@@ -1,4 +1,4 @@
-//! 前台全屏探针(游戏模式,§127)。
+//! 前台全屏探针(免打扰模式,§127)。
 //!
 //! 定义:前台顶层窗口的矩形**覆盖其所在显示器的全部物理区域**
 //! (`GetWindowRect` ⊇ `MONITORINFO.rcMonitor`,含等于与超出),
@@ -34,7 +34,7 @@ fn rect_covers_monitor(window: RECT, monitor: RECT) -> bool {
         && window.bottom >= monitor.bottom
 }
 
-/// 当前前台窗口是否处于"全屏覆盖"状态(游戏模式门控的唯一依据)。
+/// 当前前台窗口是否处于"全屏覆盖"状态(免打扰模式门控的唯一依据)。
 /// 任何一步 Win32 失败都返回 false——宁可唤起,不错杀。
 pub fn foreground_is_fullscreen() -> bool {
     unsafe {

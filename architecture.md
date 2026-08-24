@@ -60,7 +60,7 @@
 | §124 | [124-file-icons.md](architecture/records/124-file-icons.md) | 文件结果真实图标(异步提取) |
 | §125 | [125-exclusion-generalized.md](architecture/records/125-exclusion-generalized.md) | 排除名单通用化(`\AppData\` 锚定) |
 | §126 | [126-system-module.md](architecture/records/126-system-module.md) | 系统动作模块(触发词 `>`) |
-| §127 | [127-game-mode.md](architecture/records/127-game-mode.md) | 游戏模式(全屏不唤起) |
+| §127 | [127-dnd-mode.md](architecture/records/127-dnd-mode.md) | 免打扰模式(全屏不唤起) |
 | §128 | [128-custom-triggers.md](architecture/records/128-custom-triggers.md) | 触发词自定义 |
 | §129 | [129-settings-page.md](architecture/records/129-settings-page.md) | 设置页呈现(单行列表 + 详情条) |
 | §130 | [130-dpi-wakeup.md](architecture/records/130-dpi-wakeup.md) | 跨 DPI 唤起双重缩放复盘 |

@@ -35,7 +35,10 @@ const HEADER: &str = "cue-settings-v1";
 pub const KEY_HOTKEY: &str = "core.hotkey";
 pub const KEY_HIDE_ON_FOCUS_LOSS: &str = "core.hide_on_focus_loss";
 pub const KEY_START_ON_BOOT: &str = "core.start_on_boot";
-pub const KEY_GAME_MODE: &str = "core.game_mode";
+pub const KEY_DND_MODE: &str = "core.dnd_mode";
+/// 旧 key(§127,2026-08-24 更名免打扰模式前):read_persisted 读入时
+/// 映射到新 key,下次整体重写时旧 key 自愈消失。
+const KEY_GAME_MODE_LEGACY: &str = "core.game_mode";
 
 /// 给 UI 的渲染模型:Core 出模型,cue-ui 只渲染——
 /// Module 永远不画 GPUI(禁止 `render_settings_gpui`)。
@@ -192,8 +195,8 @@ impl SettingsHost {
         }
     }
 
-    pub fn game_mode(&self) -> bool {
-        match self.values.get(KEY_GAME_MODE) {
+    pub fn dnd_mode(&self) -> bool {
+        match self.values.get(KEY_DND_MODE) {
             Some(SettingValue::Bool(b)) => *b,
             _ => true,
         }
@@ -318,7 +321,15 @@ impl SettingsHost {
             let Some((k, v)) = line.split_once('\t') else {
                 continue; // 坏行跳过
             };
-            out.insert(k.to_string(), v.to_string());
+            // 更名迁移:core.game_mode → core.dnd_mode。新旧并存时
+            // 新 key 赢(与行序无关);旧 key 不写回,自愈。
+            if k == KEY_GAME_MODE_LEGACY {
+                if !out.contains_key(KEY_DND_MODE) {
+                    out.insert(KEY_DND_MODE.to_string(), v.to_string());
+                }
+            } else {
+                out.insert(k.to_string(), v.to_string());
+            }
         }
         out
     }
@@ -369,8 +380,8 @@ fn core_specs() -> Vec<SettingSpec> {
             apply_policy: ApplyPolicy::Immediate,
         },
         SettingSpec {
-            key: SettingKey(Arc::from(KEY_GAME_MODE)),
-            label: "游戏模式:全屏时不唤起".into(),
+            key: SettingKey(Arc::from(KEY_DND_MODE)),
+            label: "免打扰模式:全屏时不唤起".into(),
             description: Some(
                 "前台是全屏应用(游戏、全屏视频)时热键静默失效;只拦截热键唤起,托盘/第二实例照常"
                     .into(),
@@ -462,6 +473,30 @@ mod tests {
         let host = SettingsHost::new(Some(file.clone()), None, None, None);
         assert_eq!(host.hotkey(), Hotkey::default());
         assert!(host.hide_on_focus_loss());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn legacy_game_mode_key_migrates_to_dnd_mode() {
+        let dir =
+            std::env::temp_dir().join(format!("cue-settings-test4-{}", std::process::id()));
+        let file = dir.join("settings.tsv");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // 旧 key 读入即映射为新 key。
+        std::fs::write(&file, "cue-settings-v1\ncore.game_mode\tfalse\n").unwrap();
+        let host = SettingsHost::new(Some(file.clone()), None, None, None);
+        assert!(!host.dnd_mode());
+
+        // 新旧并存:新 key 赢,与行序无关。
+        for text in [
+            "cue-settings-v1\ncore.game_mode\tfalse\ncore.dnd_mode\ttrue\n",
+            "cue-settings-v1\ncore.dnd_mode\ttrue\ncore.game_mode\tfalse\n",
+        ] {
+            std::fs::write(&file, text).unwrap();
+            let host = SettingsHost::new(Some(file.clone()), None, None, None);
+            assert!(host.dnd_mode());
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 

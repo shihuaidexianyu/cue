@@ -204,7 +204,7 @@ fn main() {
                 apply_hotkey: Some(Box::new(apply_hotkey)),
                 apply_start_on_boot: Some(Box::new(apply_start_on_boot)),
                 open_path: Some(Box::new(open_path)),
-                // 游戏模式(§127):全屏探针——UI 线程热键路径上的
+                // 免打扰模式(§127):全屏探针——UI 线程热键路径上的
                 // 几次便宜 Win32 查询,无 IO、无锁,同步注入。
                 fullscreen_probe: Some(Box::new(win::fullscreen::foreground_is_fullscreen)),
                 storage_root,

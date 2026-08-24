@@ -278,7 +278,7 @@ apply_hotkey / apply_start_on_boot
 open_path
   Path 行的"打开路径"激活（§122——非值变更，不走事务）
 fullscreen_probe
-  游戏模式门控（§127——按键瞬间的纯查询，无 IO、无锁）
+  免打扰模式门控（§127——按键瞬间的纯查询，无 IO、无锁）
 ```
 
 UIEvent 不经 launcher 逐条翻译：view 持有 Core，按键在 cue-ui 内直接调 Core 方法；launcher 只注入 CoreEffect 的执行器（effect_handler）。上图的"接收并翻译"覆盖的是 HostEvent（WM_HOTKEY / 托盘 / 失焦 → CoreEvent 队列）。
