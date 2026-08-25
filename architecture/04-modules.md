@@ -91,6 +91,10 @@ Common Start Menu
 UWP / MSIX
 ```
 
+增补（2026-08-24）：「User/Common Start Menu」= 根目录直属快捷方式 +
+Programs 子树（shell All Apps 的完整覆盖）。Inno 系安装器会把 lnk
+直接写进根目录（实机案例：UniGetUI）——只扫 Programs 会漏。
+
 后续：
 
 ```text

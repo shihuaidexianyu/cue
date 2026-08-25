@@ -1,4 +1,8 @@
 //! User / Common Start Menu 的 .lnk 发现。不扫盘找 exe。
+//!
+//! shell 的 All Apps = Start Menu 根目录直属快捷方式 + Programs 子树;
+//! 有安装器(如 Inno 系,UniGetUI)会把 lnk 直接放进根目录,只扫
+//! Programs 会漏掉这一类(实机 bug 报告)。
 
 use crate::catalog::{AppEntry, LaunchTarget};
 use cue_protocol::{LogLevel, ModuleLogger};
@@ -8,15 +12,15 @@ use windows::Win32::System::Com::{CLSCTX_INPROC_SERVER, CoCreateInstance, IPersi
 use windows::Win32::UI::Shell::{IShellLinkW, ShellLink};
 use windows::core::{Interface, PCWSTR};
 
-/// 枚举两个 Start Menu 根,解析全部 .lnk,返回未去重的 entry。
-/// 单个 lnk 失败只跳过并计数——外部数据永不 panic。
+/// 枚举 Start Menu 根(直属文件)+ 两个 Programs 子树(递归),解析全部
+/// .lnk,返回未去重的 entry。单个 lnk 失败只跳过并计数——外部数据永不 panic。
 pub fn discover(logger: &ModuleLogger) -> Vec<AppEntry> {
     let _com = ComGuard::new();
     let mut out = Vec::new();
     let mut skipped = 0u32;
-    for root in start_menu_roots() {
+    for (root, recursive) in start_menu_roots() {
         let mut links = Vec::new();
-        collect_lnk(&root, &mut links);
+        collect_lnk(&root, recursive, &mut links);
         for lnk in links {
             match resolve(&lnk) {
                 Some((name, target)) => out.push(AppEntry::new(&name, target)),
@@ -31,25 +35,30 @@ pub fn discover(logger: &ModuleLogger) -> Vec<AppEntry> {
     out
 }
 
-fn start_menu_roots() -> Vec<PathBuf> {
+/// (目录, 是否递归)。Programs 子树递归;根目录只收直属文件
+/// (递归根目录会重复遍历 Programs 子树)。
+fn start_menu_roots() -> Vec<(PathBuf, bool)> {
     let mut roots = Vec::new();
-    if let Ok(p) = std::env::var("APPDATA") {
-        roots.push(PathBuf::from(p).join(r"Microsoft\Windows\Start Menu\Programs"));
-    }
-    if let Ok(p) = std::env::var("ProgramData") {
-        roots.push(PathBuf::from(p).join(r"Microsoft\Windows\Start Menu\Programs"));
+    for var in ["APPDATA", "ProgramData"] {
+        if let Ok(p) = std::env::var(var) {
+            let start_menu = PathBuf::from(p).join(r"Microsoft\Windows\Start Menu");
+            roots.push((start_menu.join("Programs"), true));
+            roots.push((start_menu, false));
+        }
     }
     roots
 }
 
-fn collect_lnk(dir: &Path, out: &mut Vec<PathBuf>) {
+fn collect_lnk(dir: &Path, recursive: bool, out: &mut Vec<PathBuf>) {
     let Ok(rd) = std::fs::read_dir(dir) else {
         return;
     };
     for entry in rd.flatten() {
         let path = entry.path();
         if path.is_dir() {
-            collect_lnk(&path, out);
+            if recursive {
+                collect_lnk(&path, recursive, out);
+            }
         } else if path
             .extension()
             .is_some_and(|e| e.eq_ignore_ascii_case("lnk"))
