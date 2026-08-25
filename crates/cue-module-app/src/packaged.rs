@@ -7,6 +7,7 @@ use crate::catalog::{AppEntry, LaunchTarget};
 use cue_protocol::{LogLevel, ModuleLogger};
 use cue_util_win::com::ComGuard;
 use windows::Management::Deployment::PackageManager;
+use windows::core::HSTRING;
 
 pub fn discover(logger: &ModuleLogger) -> Vec<AppEntry> {
     let _com = ComGuard::new();
@@ -31,7 +32,14 @@ pub fn discover(logger: &ModuleLogger) -> Vec<AppEntry> {
 
 fn discover_inner() -> Result<Vec<AppEntry>, String> {
     let mgr = PackageManager::new().map_err(|e| e.to_string())?;
-    let packages = mgr.FindPackages().map_err(|e| e.to_string())?;
+    // 空串 = 当前用户。实测(Win11 26200)无参 FindPackages() 可整个调用
+    // 抛 E_ACCESSDENIED(枚举碰到个别 ACL 异常的注册即失败,全模块零
+    // packaged 条目);按 SID 的 overload 走另一代码路径,同机正常。
+    // (windows crate 把 WinRT 的 FindPackagesForUser 重命名为
+    // FindPackagesByUserSecurityId。)
+    let packages = mgr
+        .FindPackagesByUserSecurityId(&HSTRING::new())
+        .map_err(|e| e.to_string())?;
     let mut out = Vec::new();
     for package in packages {
         let Ok(op) = package.GetAppListEntriesAsync() else {
