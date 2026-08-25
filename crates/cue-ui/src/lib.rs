@@ -152,10 +152,6 @@ impl LauncherView {
     fn after_core_change(&mut self, changed: bool, cx: &mut Context<Self>) {
         if changed {
             self.refresh_snapshot();
-            // 探针:结果行首次非空即输入→结果可见的上界。
-            if let Some(t0) = self.perf_input_at.take_if(|_| !self.rows.is_empty()) {
-                logln!("[perf] input->rows in {:?}", t0.elapsed());
-            }
         }
         for effect in self.core.take_effects() {
             if effect == CoreEffect::FocusInput {
@@ -185,13 +181,29 @@ impl LauncherView {
             return;
         };
         self.input = session.raw_input.clone();
-        self.selected = session.selected;
         self.error = session.error.as_ref().map(ToString::to_string);
+        // 频闪抑制(bug 3):输入变化瞬间 Core 按 §102 清空 results
+        // (stale 结果永不可激活——安全语义,不动),若把"已清空"立刻
+        // 画出来,每次击键都把结果区闪成 "No results":/ 文件搜索
+        // 提交间隔 50–140ms,逐键频闪,选中带上边缘时隐时现,被看成
+        // "分割线抖动、粗细变化"。提交在途且手里有行时保持上一批
+        // 绘制(输入照常回显);提交到达——空结果也算——才换画。
+        // 安全性不损失:窗口期 Core 的 selection 是 None,Enter
+        // 什么都激活不了;用户看到的是上一批行,与所有 launcher 同。
+        if session.results.is_empty() && session.results_pending && !self.rows.is_empty() {
+            return;
+        }
+        self.selected = session.selected;
         self.rows = session
             .results
             .iter()
             .filter_map(|item| self.core.present(item))
             .collect();
+        // 探针:结果行首次非空即输入→结果可见的上界。
+        // 必须在换画分支里测——保持分支会把持有行误判成新结果。
+        if let Some(t0) = self.perf_input_at.take_if(|_| !self.rows.is_empty()) {
+            logln!("[perf] input->rows in {:?}", t0.elapsed());
+        }
         // 选中项滚入视口(新非空结果选中第 0 行,自然归零)。
         match self.selected {
             Some(sel) if sel < self.scroll_offset => self.scroll_offset = sel,

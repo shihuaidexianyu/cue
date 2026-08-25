@@ -745,6 +745,11 @@ impl Core {
             module_epoch: self.registry.epoch(&module_id).unwrap_or(0),
             generation: s.generation,
         };
+        // 提交到达前的在途标记:视图据此保持绘制而非闪空态。
+        self.session
+            .as_mut()
+            .expect("session checked above")
+            .results_pending = true;
         let ctx = QueryContext {
             query,
             result_limit: self.config.result_limit,
@@ -864,6 +869,9 @@ impl Core {
                 s.error = Some(e);
             }
         }
+        // 无论结果空满、成功失败,这都是一次"提交":视图的保持
+        // 绘制到此为止,换画新状态。
+        s.results_pending = false;
         // 结果集在菜单打开期间被替换:菜单的动作快照属于旧选中项,
         // 继续用会把旧动作打到新结果上——关掉。
         s.action_menu = None;

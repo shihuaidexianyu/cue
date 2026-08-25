@@ -24,6 +24,12 @@ pub struct SessionState {
     pub results: Vec<ModuleItem>,
     pub selected: Option<usize>,
     pub error: Option<ModuleError>,
+    /// 当前 generation 有 query 在途、结果尚未提交。§102 要求输入
+    /// 变化立即清空 results(激活安全),但视图层若把"已清空"立刻
+    /// 画出来,每次击键都会把结果区闪成空态(bug 3:选中带上边缘
+    /// 的逐键频闪被用户看成"分割线抖动")。视图据此位保持绘制
+    /// 上一批行,直到提交到达(空结果也算提交,见 §115 增补)。
+    pub results_pending: bool,
     /// Enter 后 activation 在途,期间忽略重复 Enter。
     pub activation_in_flight: bool,
     /// Some 时 UI 渲染动作菜单,↑↓/Enter/Esc 路由给菜单。
@@ -40,6 +46,7 @@ impl SessionState {
             results: Vec::new(),
             selected: None,
             error: None,
+            results_pending: false,
             activation_in_flight: false,
             action_menu: None,
         }
