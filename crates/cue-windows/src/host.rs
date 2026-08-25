@@ -8,6 +8,7 @@
 //! 失焦检测用 `SetWinEventHook(EVENT_SYSTEM_FOREGROUND, WINEVENT_OUTOFCONTEXT)`:
 //! 无需子类化 GPUI 窗口,前台窗口变化且不是 Launcher 时通知 Core。
 
+use cue_protocol::logln;
 use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -132,7 +133,7 @@ impl HostWindow {
             // WTS 会话通知是文档化的锁屏途径;注册失败只降级为旧行为。
             // 注册随进程生命周期,host 窗口与进程同寿,无需 unregister。
             if let Err(e) = WTSRegisterSessionNotification(hwnd, NOTIFY_FOR_THIS_SESSION) {
-                eprintln!("[host] WTSRegisterSessionNotification failed: {e}");
+                logln!("[host] WTSRegisterSessionNotification failed: {e}");
             }
             Ok(Self { hwnd })
         }
@@ -181,7 +182,7 @@ unsafe extern "system" fn host_wnd_proc(
                     // (visible=false 时是 no-op)。解锁不自动唤起:
                     // 残留可见是误唤醒,主动 show 更是。
                     if wparam.0 == WTS_SESSION_LOCK || wparam.0 == WTS_CONSOLE_DISCONNECT {
-                        eprintln!("[host] session lock/disconnect -> FocusLost");
+                        logln!("[host] session lock/disconnect -> FocusLost");
                         handler(HostMsg::FocusLost);
                     }
                 }
@@ -270,7 +271,7 @@ unsafe extern "system" fn foreground_win_event_proc(
             GetWindowThreadProcessId(hwnd, Some(&mut pid));
             let n = GetClassNameW(hwnd, &mut class);
             let class = String::from_utf16_lossy(&class[..n as usize]);
-            eprintln!("[focus] launcher lost foreground -> pid={pid} class={class:?}");
+            logln!("[focus] launcher lost foreground -> pid={pid} class={class:?}");
         }
     }
     let host = HOST_HWND.load(Ordering::SeqCst);

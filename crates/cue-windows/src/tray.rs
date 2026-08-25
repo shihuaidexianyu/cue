@@ -8,6 +8,7 @@
 //! 生效(热键被压制)。host 在前台切换钩子上重估状态,
 //! set_dnd_engaged 只在状态翻转时 NIM_MODIFY 换图标——零轮询。
 
+use cue_protocol::logln;
 use crate::host::{HostMsg, WM_CUE_TRAY, WM_CUE_TRAY_CMD};
 use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
 use windows::Win32::Foundation::{HWND, LPARAM, POINT, WPARAM};
@@ -83,7 +84,7 @@ pub fn set_dnd_engaged(engaged: bool) {
     if DND_ENGAGED.swap(engaged, Ordering::SeqCst) == engaged {
         return;
     }
-    eprintln!("[tray] dnd engaged -> {engaged}");
+    logln!("[tray] dnd engaged -> {engaged}");
     let host = TRAY_HOST.load(Ordering::SeqCst);
     let slot = if engaged { &ICON_DND } else { &ICON_NORMAL };
     let hicon = slot.load(Ordering::SeqCst);

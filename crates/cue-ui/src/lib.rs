@@ -4,6 +4,7 @@
 //! cue-ui 不认识 Module,不认识 Win32;CoreEffect 的执行经由注入的
 //! effect handler 交给编排层(cue binary)。
 
+use cue_protocol::logln;
 use cue_core::{
     ActionMenuModel, ActionMenuRow, Core, CoreEffect, CoreEvent, KEY_HOTKEY, SettingsModel,
     SettingsRow,
@@ -153,7 +154,7 @@ impl LauncherView {
             self.refresh_snapshot();
             // 探针:结果行首次非空即输入→结果可见的上界。
             if let Some(t0) = self.perf_input_at.take_if(|_| !self.rows.is_empty()) {
-                eprintln!("[perf] input->rows in {:?}", t0.elapsed());
+                logln!("[perf] input->rows in {:?}", t0.elapsed());
             }
         }
         for effect in self.core.take_effects() {

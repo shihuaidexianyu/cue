@@ -1,7 +1,8 @@
 //! cue-protocol —— Core ↔ Module 协议。
 //!
-//! 本 crate 只包含数据类型与 trait 定义,不含任何平台代码。
-//! Core 与所有 Module 都依赖它;它不依赖任何 crate。
+//! 本 crate 只包含数据类型、trait 定义与平台中立的诊断日志 sink
+//! (std-only),不含任何平台代码。Core 与所有 Module 都依赖它;
+//! 它不依赖任何 crate。
 
 mod action;
 mod context;
@@ -9,6 +10,7 @@ mod error;
 mod hotkey;
 mod item;
 mod launcher_module;
+pub mod log;
 mod module;
 mod outcome;
 mod presentation;

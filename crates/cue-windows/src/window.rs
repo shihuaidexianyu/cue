@@ -3,6 +3,7 @@
 //! HWND 通过"按进程枚举顶层可见窗口"获得,刻意不依赖 GPUI 的内部 API
 //! (raw window handle),把 GPUI 版本漂移关在门外。
 
+use cue_protocol::logln;
 use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
 use windows::Win32::Graphics::Gdi::{InvalidateRect, UpdateWindow};
 use windows::Win32::UI::WindowsAndMessaging::*;
@@ -63,7 +64,7 @@ pub fn show_and_focus(hwnd: HWND) {
         if !fg.as_bool() {
             // 前台抢占被拒:窗口可见但未聚焦,失焦钩子很快会触发隐藏。
             // 诊断留下证据(热键路径理论上不会被拒)。
-            eprintln!(
+            logln!(
                 "[focus] SetForegroundWindow denied (pos_ok={} err={:?})",
                 pos.is_ok(),
                 windows::core::Error::from_thread()

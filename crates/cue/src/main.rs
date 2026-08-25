@@ -7,6 +7,7 @@
 //! 编排:HostEvent → Core → CoreEffect → cue-ui / cue-windows。
 //! 只有本 crate 同时认识 Core、GPUI 和 Win32。
 
+use cue_protocol::logln;
 use cue_core::{
     Core, CoreConfig, CoreEffect, CoreEvent, CoreEventSender, HostEvent, ModuleRegistry,
     TaskSpawner,
@@ -63,6 +64,12 @@ fn to_core_event(msg: win::host::HostMsg) -> CoreEvent {
 
 fn main() {
     let boot_started = std::time::Instant::now();
+    let storage_root = std::env::var("LOCALAPPDATA")
+        .map(|p| PathBuf::from(p).join("CUE"))
+        .unwrap_or_else(|_| PathBuf::from("CUE"));
+    // 诊断日志(§132)在最早时机落地:之后的 [boot]/[host] 行都进文件。
+    // 写线程承载全部文件 IO;打开失败退回纯 stderr,不影响启动。
+    cue_protocol::log::init(&storage_root.join(cue_protocol::log::LOG_FILE_NAME));
     // 单实例必须在最早时机——任何状态文件被打开之前。
     // 第二实例:signal_first_instance 已在 acquire 内完成,直接退出。
     let single_instance = match win::single_instance::acquire() {
@@ -81,7 +88,7 @@ fn main() {
         let slot = Rc::clone(&core_tx_slot);
         let backlog = Rc::clone(&backlog);
         win::host::HostWindow::create(Box::new(move |msg| {
-            eprintln!("[host] {msg:?}");
+            logln!("[host] {msg:?}");
             // 托盘"退出"是唯一正常退出路径——先删托盘图标
             // (不留幽灵图标),再结束消息循环;热键随进程释放。
             if msg == win::host::HostMsg::QuitRequested {
@@ -118,13 +125,13 @@ fn main() {
     // 热键被其他应用(如另一个 launcher)占用时降级为警告:
     // Launcher 继续运行,可经第二实例信号唤起,设置里可换键。
     if let Err(e) = registered {
-        eprintln!("[warn] hotkey registration failed: {e}");
+        logln!("[warn] hotkey registration failed: {e}");
     }
     // 冷启动预算(< 500 ms)的常驻探针:进程入口 → 热键就绪。
-    eprintln!("[boot] hotkey ready in {:?}", boot_started.elapsed());
+    logln!("[boot] hotkey ready in {:?}", boot_started.elapsed());
 
     Application::new().run(move |cx: &mut App| {
-        eprintln!("[boot] gpui entered in {:?}", boot_started.elapsed());
+        logln!("[boot] gpui entered in {:?}", boot_started.elapsed());
         let spawner = Arc::new(GpuiSpawner {
             executor: cx.background_executor().clone(),
         });
@@ -147,9 +154,7 @@ fn main() {
             .register(Box::new(SystemModule::new()))
             .expect("register system module");
 
-        let storage_root = std::env::var("LOCALAPPDATA")
-            .map(|p| PathBuf::from(p).join("CUE"))
-            .unwrap_or_else(|_| PathBuf::from("CUE"));
+        let storage_root = storage_root.clone();
 
         // apply_hotkey 回调与初始注册共用同一个 HotkeyManager——
         // manager 在 main 里已创建并入槽(host window 早于 GPUI);
@@ -160,7 +165,7 @@ fn main() {
                 match slot.borrow_mut().as_mut() {
                     Some(m) => {
                         let r = m.apply(*hk).map_err(|e| e.to_string());
-                        eprintln!(
+                        logln!(
                             "[hotkey] try-apply {hk} -> {}",
                             if r.is_ok() { "ok" } else { "failed" }
                         );
@@ -210,7 +215,7 @@ fn main() {
                 // 托盘状态图标(§127):Core 告知 dnd 开关的初始值与每次
                 // commit;host 侧合成"开关 && 前台全屏"决定红/灰。
                 notify_dnd_mode: Some(Box::new(|on| {
-                    eprintln!("[dnd] enabled={on}");
+                    logln!("[dnd] enabled={on}");
                     win::host::set_dnd_enabled(on);
                 })),
                 storage_root,
@@ -220,7 +225,7 @@ fn main() {
             spawner,
         )
         .expect("core init");
-        eprintln!("[boot] core ready in {:?}", boot_started.elapsed());
+        logln!("[boot] core ready in {:?}", boot_started.elapsed());
         let core_tx = core.event_sender();
 
         // Core 就位:backlog 里攒下的早期消息(启动后抢先按的热键/
@@ -247,7 +252,7 @@ fn main() {
         // 热键被其他应用(如另一个 launcher)占用时降级为警告:
         // Launcher 继续运行,可经第二实例信号唤起,设置里可换键。
         if let Err(e) = registered {
-            eprintln!("[warn] hotkey re-apply from settings failed: {e}");
+            logln!("[warn] hotkey re-apply from settings failed: {e}");
         }
 
         // 常驻但默认隐藏——窗口创建时不可见,等待 ShowLauncher 效果。
@@ -269,7 +274,7 @@ fn main() {
                 |_, cx| cx.new(|cx| LauncherView::new(core, cx)),
             )
             .expect("open window");
-        eprintln!("[boot] window created in {:?}", boot_started.elapsed());
+        logln!("[boot] window created in {:?}", boot_started.elapsed());
 
         cx.activate(true);
 
@@ -287,7 +292,7 @@ fn main() {
         window_handle
             .update(cx, |view, _window, _cx| {
                 view.set_effect_handler(Box::new(move |effect| {
-                    eprintln!("[effect] {effect:?}");
+                    logln!("[effect] {effect:?}");
                     match effect {
                         CoreEffect::ShowLauncher => {
                             ever_shown_fx.set(true);

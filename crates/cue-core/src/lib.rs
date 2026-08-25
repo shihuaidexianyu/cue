@@ -25,6 +25,7 @@ pub use settings::{
 pub use spawner::TaskSpawner;
 pub use usage::UsageStore;
 
+use cue_protocol::logln;
 use cue_protocol::*;
 use futures::channel::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use std::path::PathBuf;
@@ -1066,7 +1067,7 @@ struct StderrLogger {
 
 impl ModuleLog for StderrLogger {
     fn log(&self, level: LogLevel, message: &str) {
-        eprintln!("[{level:?}] [{}] {message}", self.module);
+        logln!("[{level:?}] [{}] {message}", self.module);
     }
 }
 

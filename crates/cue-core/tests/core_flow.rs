@@ -340,8 +340,8 @@ fn trigger_spec_is_synthesized_for_non_default_modules() {
 
     core.open_settings();
     let model = core.settings_model().unwrap();
-    // 4 行 core.* + bm 的触发词行;默认模块(无触发词)没有该行。
-    assert_eq!(model.rows.len(), 5);
+    // 5 行 core.* + bm 的触发词行;默认模块(无触发词)没有该行。
+    assert_eq!(model.rows.len(), 6);
     let keys: Vec<&str> = model.rows.iter().map(|r| r.key.as_ref()).collect();
     assert!(keys.contains(&"module.bm.trigger"));
     assert!(!keys.contains(&"module.default.trigger"));
@@ -1469,16 +1469,17 @@ fn settings_view_lifecycle_and_effects() {
     assert!(core.in_settings());
     assert!(core.session().is_none());
     let model = core.settings_model().unwrap();
-    assert_eq!(model.rows.len(), 4); // hotkey + hide_on_focus_loss + start_on_boot + dnd_mode
+    assert_eq!(model.rows.len(), 5); // log_file + hotkey + hide_on_focus_loss + start_on_boot + dnd_mode
+    assert!(model.rows.iter().any(|r| r.key.as_ref() == "core.log_file"));
     assert_eq!(model.selected, 0);
 
     core.settings_select_next();
     core.settings_select_next();
     core.settings_select_next();
     core.settings_select_next(); // 夹紧在最后一行
-    assert_eq!(core.settings_model().unwrap().selected, 3);
+    assert_eq!(core.settings_model().unwrap().selected, 4);
     core.settings_select_prev();
-    assert_eq!(core.settings_model().unwrap().selected, 2);
+    assert_eq!(core.settings_model().unwrap().selected, 3);
 
     // 热键在设置页 = Esc(关闭设置)。
     core.hotkey_pressed();

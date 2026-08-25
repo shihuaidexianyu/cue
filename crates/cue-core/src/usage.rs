@@ -1,3 +1,4 @@
+use cue_protocol::logln;
 use cue_protocol::{ActionId, ModuleId, UsageRead, UsageReader, UsageRecordRequest, UsageStat};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -85,7 +86,7 @@ impl UsageStore {
         }
         let tmp = path.with_extension("tmp");
         if std::fs::write(&tmp, text).is_err() || std::fs::rename(&tmp, path).is_err() {
-            eprintln!("[warn] usage persist failed: {}", path.display());
+            logln!("[warn] usage persist failed: {}", path.display());
         }
     }
 }

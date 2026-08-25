@@ -9,6 +9,7 @@
 //! rename(与 usage 同一规则):坏行跳过、头不符整个忽略、IO 失败
 //! 仅告警——设置文件损坏永远不构成启动失败。
 
+use cue_protocol::logln;
 use cue_protocol::*;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -42,6 +43,8 @@ pub const KEY_HOTKEY: &str = "core.hotkey";
 pub const KEY_HIDE_ON_FOCUS_LOSS: &str = "core.hide_on_focus_loss";
 pub const KEY_START_ON_BOOT: &str = "core.start_on_boot";
 pub const KEY_DND_MODE: &str = "core.dnd_mode";
+/// 诊断日志文件(§132):Path 行,Enter 用系统默认程序打开。
+pub const KEY_LOG_FILE: &str = "core.log_file";
 /// 旧 key(§127,2026-08-24 更名免打扰模式前):read_persisted 读入时
 /// 映射到新 key,下次整体重写时旧 key 自愈消失。
 const KEY_GAME_MODE_LEGACY: &str = "core.game_mode";
@@ -99,6 +102,13 @@ impl SettingsHost {
         open_path: Option<OpenPath>,
     ) -> Self {
         let persisted = Self::read_persisted(file.as_deref());
+        // core.* 日志 Path 行(§132,只读):路径 = settings 文件同目录,
+        // 与编排层 init 的公式一致(file 随即移入结构体,先算好)。
+        let log_path = file
+            .as_deref()
+            .and_then(|f| f.parent())
+            .map(|p| p.join(cue_protocol::log::LOG_FILE_NAME))
+            .unwrap_or_else(|| PathBuf::from(cue_protocol::log::LOG_FILE_NAME));
         let mut host = Self {
             specs: Vec::new(),
             values: HashMap::new(),
@@ -110,8 +120,8 @@ impl SettingsHost {
             open_path,
             restart_required: false,
         };
-        // core.*:V1 四项,都是 Immediate。
-        host.register_specs(core_specs());
+        // core.*:V1 四项 Immediate + 日志 Path 行。
+        host.register_specs(core_specs(log_path));
         host
     }
 
@@ -159,7 +169,7 @@ impl SettingsHost {
             // 或模块自身重复)只留第一份——设置页不出双行,spec() 查找
             // 结果确定。
             if self.specs.iter().any(|s| s.key.0.as_ref() == key) {
-                eprintln!("[warn] duplicate setting key skipped: {key}");
+                logln!("[warn] duplicate setting key skipped: {key}");
                 continue;
             }
             let value = self
@@ -353,14 +363,25 @@ impl SettingsHost {
         }
         let tmp = path.with_extension("tmp");
         if std::fs::write(&tmp, text).is_err() || std::fs::rename(&tmp, path).is_err() {
-            eprintln!("[warn] settings persist failed: {}", path.display());
+            logln!("[warn] settings persist failed: {}", path.display());
         }
     }
 }
 
 /// Core settings(V1)。
-fn core_specs() -> Vec<SettingSpec> {
+fn core_specs(log_path: PathBuf) -> Vec<SettingSpec> {
     vec![
+        SettingSpec {
+            key: SettingKey(Arc::from(KEY_LOG_FILE)),
+            label: "诊断日志".into(),
+            description: Some(
+                "回车用系统默认程序打开;启动/唤起/模块告警等诊断行,超 1MB 自动滚动一代"
+                    .into(),
+            ),
+            kind: SettingKind::Path,
+            default: SettingValue::Path(log_path),
+            apply_policy: ApplyPolicy::Immediate,
+        },
         SettingSpec {
             key: SettingKey(Arc::from(KEY_HOTKEY)),
             label: "全局热键".into(),
