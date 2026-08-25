@@ -282,6 +282,9 @@ fn main() {
         let hwnd = win::window::find_main_window_hwnd().expect("launcher hwnd");
         win::host::set_launcher_hwnd(hwnd);
         win::window::set_brand_icon(hwnd); // alt-tab / 任务栏图标(资源 id 1)
+        // GPUI 在"记录的显示器断开"时会无条件 ShowWindow 隐藏窗口
+        // (多屏变单屏即误唤醒);隐藏状态下吞掉 WM_DISPLAYCHANGE。
+        win::window::install_display_change_guard(hwnd);
         let focus_hook = win::host::install_focus_hook().expect("focus hook");
 
         // CoreEffect → Win32 执行。FocusInput 的视图侧焦点

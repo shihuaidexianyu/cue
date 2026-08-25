@@ -408,6 +408,24 @@ WTS_CONSOLE_DISCONNECT，文档化通道）补投 FocusLost，与前台事件
 互补、重复无害（visible=false 时 no-op），是否隐藏仍由
 `core.hide_on_focus_loss` 裁决；解锁不自动唤起。
 
+增补（2026-08-25，可见性纪律补全）：**窗口只能经 Core 的唤起序列
+可见，任何外部事件不得让它出现**。GPUI 0.2.2 的
+`WM_DISPLAYCHANGE` 处理器在"窗口记录的显示器已断开"时假定 OS
+把窗口挪走并最小化了，无条件 `ShowWindow(SW_SHOWNORMAL)` 复原——
+对常驻隐藏的 Launcher 这是凭空误唤醒（拔线/多屏变单屏场景），
+显示的是最后一次刷新的无会话快照（空输入 + "No results"），完全
+不经过 Core。宿主按经典子类化（`GWLP_WNDPROC`）在窗口隐藏时吞掉
+`WM_DISPLAYCHANGE`：显示器跟踪不会因此失联——下次唤起的
+`place_on_active_monitor`（SetWindowPos）必然带来 WM_MOVE /
+WM_DPICHANGED，GPUI 在那两条路径上自行重挂；渲染只依赖
+scale_factor。窗口可见时不吞，GPUI 的复原逻辑照常。守卫每次
+吞消息写日志，日常使用中再次出现误唤醒时可直接对证。
+
+实证状态（2026-08-25）：ChangeDisplaySettingsEx 分离副屏未复现
+误唤醒（该路径下 Windows 先把隐藏窗口挪走——WM_MOVE 先行刷新
+GPUI 的显示器记录，断开分支不可达）；守卫日志证实
+`WM_DISPLAYCHANGE` 确实投递到隐藏窗口。物理拔线的复现待补。
+
 ---
 
 # 116. 托盘图标与退出路径
