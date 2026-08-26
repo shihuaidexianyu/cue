@@ -4,7 +4,9 @@
 //! 拼音(全拼 + 首字母)+ fuzzy 搜索,usage ranking,异步图标。
 //! Core 不知道什么是 .lnk、拼音、AUMID——全部语义在本 crate。
 
+mod app_paths;
 mod catalog;
+mod extra_dirs;
 mod icon;
 mod launch;
 mod matcher;
@@ -23,6 +25,10 @@ use std::sync::Arc;
 /// 次级动作 ID(顺序即菜单顺序;PRIMARY = 打开)。
 const ACTION_RUN_AS_ADMIN: ActionId = ActionId(1);
 const ACTION_OPEN_LOCATION: ActionId = ActionId(2);
+
+/// 便携应用目录设置(§133):分号分隔,改动重启后生效
+/// (catalog 只在进程启动时构建,§56)。
+const KEY_EXTRA_DIRS: &str = "module.app.extra_dirs";
 
 /// AppModule 是 V1 的 required default module。
 pub struct AppModule {
@@ -139,23 +145,33 @@ impl Module for AppModule {
         self.usage = Some(ctx.usage.clone());
         self.icons = Some(IconPipeline::new(ctx.events.clone()));
 
+        let extra_dirs = match ctx.settings.get("extra_dirs") {
+            Some(SettingValue::String(s)) => extra_dirs::parse_dirs(s),
+            _ => Vec::new(),
+        };
+
         let cell = Arc::clone(&self.catalog);
         let logger = ctx.logger.clone();
         std::thread::spawn(move || {
             let started = std::time::Instant::now();
             let mut entries = start_menu::discover(&logger);
-            let t_start_menu = started.elapsed();
             let n_start_menu = entries.len();
             entries.extend(packaged::discover(&logger));
-            let t_packaged = started.elapsed() - t_start_menu;
             let n_packaged = entries.len() - n_start_menu;
+            // §133:App Paths 注册表 + 用户声明便携目录。排在开始菜单
+            // 之后:同一 exe 的首见者胜(dedup 保首个),lnk 的显示名
+            // 通常比 exe 文件名漂亮。
+            entries.extend(app_paths::discover(&logger));
+            let n_app_paths = entries.len() - n_start_menu - n_packaged;
+            entries.extend(extra_dirs::discover(&extra_dirs, &logger));
+            let n_extra = entries.len() - n_start_menu - n_packaged - n_app_paths;
             catalog::dedup(&mut entries);
             entries.sort_by(|a, b| a.name_lower.cmp(&b.name_lower));
             // 冷启动 spike:构建耗时就地记录。
             logger.log(
                 LogLevel::Info,
                 &format!(
-                    "app catalog ready: {} entries ({n_start_menu} start menu, {n_packaged} packaged) in {:?} (start menu {t_start_menu:?}, packaged {t_packaged:?})",
+                    "app catalog ready: {} entries ({n_start_menu} start menu, {n_packaged} packaged, {n_app_paths} app paths, {n_extra} extra dirs) in {:?}",
                     entries.len(),
                     started.elapsed()
                 ),
@@ -172,9 +188,21 @@ impl Module for AppModule {
     }
 
     fn settings_schema(&self) -> SettingsSchema {
-        Vec::new()
+        vec![SettingSpec {
+            key: SettingKey(KEY_EXTRA_DIRS.into()),
+            label: "应用:便携软件目录".into(),
+            description: Some(
+                "分号分隔的目录列表,递归扫描其中的 exe/lnk(≤4 层,跳过隐藏项);改动重启 CUE 后生效"
+                    .into(),
+            ),
+            kind: SettingKind::String,
+            default: SettingValue::String(String::new()),
+            apply_policy: ApplyPolicy::RestartApplication,
+        }]
     }
 
+    /// extra_dirs 是 RestartApplication 策略:Core 直接提交并标记
+    /// 待重启,不经模块 try-apply——这里无事可做。
     fn try_apply_settings(&mut self, _changes: SettingsChangeSet) -> Result<(), ModuleError> {
         Ok(())
     }

@@ -71,11 +71,23 @@ fn collect_lnk(dir: &Path, recursive: bool, out: &mut Vec<PathBuf>) {
 /// 显示名 = .lnk 文件名去扩展名。卸载入口不算应用。
 fn display_name(lnk: &Path) -> Option<String> {
     let name = lnk.file_stem()?.to_string_lossy().into_owned();
-    let lower = name.to_lowercase();
-    if lower.contains("uninstall") || name.contains("卸载") {
+    if is_uninstall_entry(&name) {
         return None;
     }
     Some(name)
+}
+
+/// "Uninstall xxx"/"卸载 xxx" 这类卸载入口不算应用——开始菜单、
+/// App Paths 与便携目录扫描(§133)共用同一条规则。
+pub(crate) fn is_uninstall_entry(name: &str) -> bool {
+    let lower = name.to_lowercase();
+    lower.contains("uninstall") || name.contains("卸载")
+}
+
+/// 解析 .lnk → (显示名, Win32 目标);§133 便携目录扫描复用。
+/// 只收存在的 exe 目标;文档 / URL / 文件夹链接不属于 AppModule。
+pub(crate) fn resolve_lnk(lnk: &Path) -> Option<(String, LaunchTarget)> {
+    resolve(lnk)
 }
 
 fn resolve(lnk: &Path) -> Option<(String, LaunchTarget)> {
