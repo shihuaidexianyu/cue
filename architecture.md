@@ -44,7 +44,7 @@
 | §74–§88 | [architecture/08-scope-contract.md](architecture/08-scope-contract.md) | V1 范围、非功能需求、最终边界、**§86 最终 Contract**、判断规则、实现顺序 |
 | §89–§106 | [architecture/09-async.md](architecture/09-async.md) | V1 成功标准、设计哲学、异步任务模型(QueryTicket 北极星) |
 | §107–§116 | [architecture/10-v1-landing.md](architecture/10-v1-landing.md) | V1 落地决策:IME、Row 布局、Module 事件、跨平台、CoreEffect、单实例、性能契约、UX 不变量、托盘 |
-| §117–§135 | [architecture/records/](architecture/records/) | V1.x 实现记录,**每章一文件**,文件名即 § 编号 |
+| §117–§136 | [architecture/records/](architecture/records/) | V1.x 实现记录,**每章一文件**,文件名即 § 编号 |
 
 ### records/ 速查
 
@@ -69,6 +69,7 @@
 | §133 | [133-app-discovery.md](architecture/records/133-app-discovery.md) | 应用发现源扩展(App Paths + 便携目录) |
 | §134 | [134-packaged-logo.md](architecture/records/134-packaged-logo.md) | 商店应用真实图标(GetLogo 管线) |
 | §135 | [135-glyph-icons.md](architecture/records/135-glyph-icons.md) | Segoe 字形图标;SystemIconId 退役 |
+| §136 | [136-settings-value-visuals.md](architecture/records/136-settings-value-visuals.md) | 设置页值槽位视觉分层(开关/键帽/中间省略) |
 
 ## 0.3 阅读顺序
 

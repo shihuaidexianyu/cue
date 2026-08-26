@@ -74,6 +74,61 @@ fn capture_candidate(ks: &Keystroke) -> Option<Hotkey> {
     })
 }
 
+/// 设置页值槽位的字符预算:text_xs @ max 320px 的近似容量。
+/// 超预算先走 middle_ellipsis,布局层 text_ellipsis 兜底(CJK
+/// 宽度约为拉丁两倍,字符计数只是启发式)。
+const VALUE_MAX_CHARS: usize = 44;
+
+/// 中间省略:路径/长串的头尾都比中间有信息。按字符数截,
+/// 保持 ASCII 主导场景准确;CJK 串由布局层的尾部省略兜底。
+fn middle_ellipsis(s: &str, max_chars: usize) -> String {
+    if s.chars().count() <= max_chars {
+        return s.to_string();
+    }
+    let head = max_chars / 2;
+    let tail = max_chars - 1 - head;
+    let head_s: String = s.chars().take(head).collect();
+    let tail_s: String = s
+        .chars()
+        .rev()
+        .take(tail)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    format!("{head_s}…{tail_s}")
+}
+
+/// 设置页 Bool 值:开关样式(30×16 轨道 + 12 圆钮),
+/// 开 = 值蓝,关 = 分隔线灰;状态一眼可辨,不占文字阅读。
+fn bool_switch(on: bool) -> Div {
+    div()
+        .flex_none()
+        .w(px(30.0))
+        .h(px(16.0))
+        .px(px(2.0))
+        .rounded(px(8.0))
+        .bg(rgb(if on { 0x61afef } else { 0x3d3d49 }))
+        .flex()
+        .items_center()
+        .when(on, |d| d.justify_end())
+        .when(!on, |d| d.justify_start())
+        .child(div().size(px(12.0)).rounded(px(6.0)).bg(rgb(0xe6e6e6)))
+}
+
+/// 普通文本值槽位(开关/键帽 chip 以外的共用形态)。
+fn value_text_div(text: String) -> Div {
+    div()
+        .flex_none()
+        .max_w(px(320.0))
+        .text_xs()
+        .text_color(rgb(0x61afef))
+        .whitespace_nowrap()
+        .text_ellipsis()
+        .overflow_hidden()
+        .child(text)
+}
+
 /// Launcher 主视图:持有 Core,把 Core 状态渲染成固定网格。
 pub struct LauncherView {
     core: Core,
@@ -453,7 +508,7 @@ impl LauncherView {
                     .get(model.selected)
                     .and_then(|row| row.description.as_ref().map(|d| d.to_string()))
                     .unwrap_or_default(),
-                rgb(0x9a9aa3),
+                rgb(0xb0b0b8),
             )
         };
 
@@ -484,6 +539,7 @@ impl LauncherView {
             .child(div().h(px(1.0)).w_full().bg(rgb(0x3d3d49)))
             .child(div().h(px(6.0)))
             .child(list)
+            .child(div().h(px(1.0)).w_full().bg(rgb(0x3d3d49)))
             .child(
                 div()
                     .h(px(40.0))
@@ -505,30 +561,39 @@ impl LauncherView {
     }
 
     fn render_settings_row(&self, row: &SettingsRow, is_selected: bool) -> Div {
-        let value_text = match &row.value {
-            SettingValue::Bool(b) => {
-                if *b {
-                    "开".to_string()
-                } else {
-                    "关".to_string()
-                }
-            }
+        // 值槽位按类型给视觉形态:Bool = 开关(状态一眼可辨,
+        // 不再占用文字阅读);Hotkey = 键帽 chip;长文本中间省略,
+        // 路径的头尾都比中间有信息。
+        let value_slot = match &row.value {
+            SettingValue::Bool(on) => bool_switch(*on),
             SettingValue::Hotkey(h) => {
                 if self.capturing_hotkey && is_selected {
-                    "按下新组合键…(Esc 取消)".to_string()
+                    value_text_div("按下新组合键…(Esc 取消)".to_string())
                 } else {
-                    h.to_string()
+                    div()
+                        .flex_none()
+                        .px(px(6.0))
+                        .py(px(1.0))
+                        .rounded(px(4.0))
+                        .bg(rgb(0x2a2a33))
+                        .text_xs()
+                        .text_color(rgb(0x61afef))
+                        .child(h.to_string())
                 }
             }
-            SettingValue::Integer(i) => i.to_string(),
+            SettingValue::Integer(i) => value_text_div(i.to_string()),
             SettingValue::String(s) | SettingValue::Enum(s) => match &self.editing_string {
                 // 行内编辑态:渲染 buffer + 光标,不渲染已提交值。
-                Some((k, buf)) if k.as_str() == row.key.as_ref() => format!("{buf}▏"),
+                Some((k, buf)) if k.as_str() == row.key.as_ref() => {
+                    value_text_div(format!("{buf}▏"))
+                }
                 // 空串渲染成空白会像渲染 bug,如实标注。
-                _ if s.is_empty() => "(空)".to_string(),
-                _ => s.clone(),
+                _ if s.is_empty() => value_text_div("(空)".to_string()),
+                _ => value_text_div(middle_ellipsis(s, VALUE_MAX_CHARS)),
             },
-            SettingValue::Path(p) => p.display().to_string(),
+            SettingValue::Path(p) => {
+                value_text_div(middle_ellipsis(&p.display().to_string(), VALUE_MAX_CHARS))
+            }
         };
 
         div()
@@ -547,17 +612,7 @@ impl LauncherView {
                     .overflow_hidden()
                     .child(row.label.to_string()),
             )
-            .child(
-                div()
-                    .flex_none()
-                    .max_w(px(320.0))
-                    .text_xs()
-                    .text_color(rgb(0x61afef))
-                    .whitespace_nowrap()
-                    .text_ellipsis()
-                    .overflow_hidden()
-                    .child(value_text),
-            )
+            .child(value_slot)
     }
 
     // ------------------------------------------------------------------
@@ -800,5 +855,34 @@ impl Render for LauncherView {
                 .child(div().h(px(6.0)));
         }
         chrome.child(body)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::middle_ellipsis;
+
+    #[test]
+    fn ellipsis_keeps_short_strings() {
+        assert_eq!(middle_ellipsis("C:\\Apps", 44), "C:\\Apps");
+        let exact = "a".repeat(44);
+        assert_eq!(middle_ellipsis(&exact, 44), exact);
+    }
+
+    #[test]
+    fn ellipsis_preserves_head_and_tail() {
+        let s = "C:\\Users\\exqin\\AppData\\Local\\VeryLongDirName\\app.exe";
+        let out = middle_ellipsis(s, 20);
+        assert_eq!(out.chars().count(), 20);
+        assert!(out.starts_with("C:\\Users\\e"));
+        assert!(out.ends_with("e\\app.exe"));
+        assert!(out.contains('…'));
+    }
+
+    #[test]
+    fn ellipsis_counts_cjk_as_chars_not_bytes() {
+        let s = "设置页面很长很长的一个字符串值";
+        let out = middle_ellipsis(s, 8);
+        assert_eq!(out.chars().count(), 8);
     }
 }
