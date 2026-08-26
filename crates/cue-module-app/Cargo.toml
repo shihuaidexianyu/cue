@@ -8,9 +8,9 @@ cue-protocol.workspace = true
 cue-util-win.workspace = true
 futures.workspace = true
 pinyin.workspace = true
-
-[dev-dependencies]
-image = "0.25"
+# packaged logo 解码(PNG/BMP/JPEG 嗅探);不进 util-win:
+# 只有本模块用(Rule of Three 之前的合理重复边界)。
+image = { version = "0.25", default-features = false, features = ["png", "bmp", "jpeg"] }
 
 [dependencies.windows]
 workspace = true
@@ -23,6 +23,7 @@ features = [
     "Management_Deployment",
     "ApplicationModel",
     "ApplicationModel_Core",
+    "Storage_Streams",
     "Foundation",
     "Foundation_Collections",
 ]

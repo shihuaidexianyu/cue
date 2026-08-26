@@ -37,7 +37,7 @@ pub struct AppModule {
     /// 构建(进程启动时唯一一次,无 watcher);query future 等就绪。
     catalog: Arc<CatalogCell>,
     usage: Option<UsageReader>,
-    icons: Option<IconPipeline>,
+    icons: Option<Arc<IconPipeline>>,
 }
 
 impl AppModule {
@@ -143,7 +143,8 @@ impl Module for AppModule {
     /// 图标提取本来就不在 load 内。
     fn load(&mut self, ctx: ModuleContext) -> Result<(), ModuleError> {
         self.usage = Some(ctx.usage.clone());
-        self.icons = Some(IconPipeline::new(ctx.events.clone()));
+        let icons = Arc::new(IconPipeline::new(ctx.events.clone()));
+        self.icons = Some(Arc::clone(&icons));
 
         let extra_dirs = match ctx.settings.get("extra_dirs") {
             Some(SettingValue::String(s)) => extra_dirs::parse_dirs(s),
@@ -156,8 +157,12 @@ impl Module for AppModule {
             let started = std::time::Instant::now();
             let mut entries = start_menu::discover(&logger);
             let n_start_menu = entries.len();
-            entries.extend(packaged::discover(&logger));
-            let n_packaged = entries.len() - n_start_menu;
+            let packaged = packaged::discover(&logger);
+            let n_packaged = packaged.entries.len();
+            // §134:logo 索引先于 catalog 发布填入图标管线——query 看到
+            // packaged 条目时索引必然就绪,worker 取 logo 零等待。
+            icons.set_packaged_index(packaged.logo_index);
+            entries.extend(packaged.entries);
             // §133:App Paths 注册表 + 用户声明便携目录。排在开始菜单
             // 之后:同一 exe 的首见者胜(dedup 保首个),lnk 的显示名
             // 通常比 exe 文件名漂亮。
@@ -244,12 +249,22 @@ impl LauncherModule for AppModule {
             .into(),
         );
         p.icon = match &entry.target {
-            LaunchTarget::Win32 { exe, .. } => self
+            LaunchTarget::Win32 { exe, .. } => self.icons.as_ref().and_then(|icons| {
+                icons.get_or_queue(item.id(), &entry.icon_key(), icon::IconSource::Exe(exe))
+            }),
+            // §134:packaged logo 走 GetLogo 异步提取;未就绪/失败
+            // 暂用 SystemIcon 兜底。
+            LaunchTarget::Packaged { aumid } => self
                 .icons
                 .as_ref()
-                .and_then(|icons| icons.get_or_queue(item.id(), &entry.icon_key(), exe)),
-            // packaged logo 走 WinRT 资源,V1 用 SystemIcon 兜底。
-            LaunchTarget::Packaged { .. } => Some(ResultIcon::SystemIcon(SystemIconId::App)),
+                .and_then(|icons| {
+                    icons.get_or_queue(
+                        item.id(),
+                        &entry.icon_key(),
+                        icon::IconSource::Packaged(aumid),
+                    )
+                })
+                .or(Some(ResultIcon::SystemIcon(SystemIconId::App))),
         };
         p
     }
