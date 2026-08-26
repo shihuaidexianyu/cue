@@ -44,7 +44,7 @@
 | §74–§88 | [architecture/08-scope-contract.md](architecture/08-scope-contract.md) | V1 范围、非功能需求、最终边界、**§86 最终 Contract**、判断规则、实现顺序 |
 | §89–§106 | [architecture/09-async.md](architecture/09-async.md) | V1 成功标准、设计哲学、异步任务模型(QueryTicket 北极星) |
 | §107–§116 | [architecture/10-v1-landing.md](architecture/10-v1-landing.md) | V1 落地决策:IME、Row 布局、Module 事件、跨平台、CoreEffect、单实例、性能契约、UX 不变量、托盘 |
-| §117–§132 | [architecture/records/](architecture/records/) | V1.x 实现记录,**每章一文件**,文件名即 § 编号 |
+| §117–§135 | [architecture/records/](architecture/records/) | V1.x 实现记录,**每章一文件**,文件名即 § 编号 |
 
 ### records/ 速查
 
@@ -66,6 +66,9 @@
 | §130 | [130-dpi-wakeup.md](architecture/records/130-dpi-wakeup.md) | 跨 DPI 唤起双重缩放复盘 |
 | §131 | [131-startup-hotkey.md](architecture/records/131-startup-hotkey.md) | 启动序列:热键尽早注册 + 事件 backlog |
 | §132 | [132-logging.md](architecture/records/132-logging.md) | 诊断日志(全局 sink、有界单文件、写线程) |
+| §133 | [133-app-discovery.md](architecture/records/133-app-discovery.md) | 应用发现源扩展(App Paths + 便携目录) |
+| §134 | [134-packaged-logo.md](architecture/records/134-packaged-logo.md) | 商店应用真实图标(GetLogo 管线) |
+| §135 | [135-glyph-icons.md](architecture/records/135-glyph-icons.md) | Segoe 字形图标;SystemIconId 退役 |
 
 ## 0.3 阅读顺序
 

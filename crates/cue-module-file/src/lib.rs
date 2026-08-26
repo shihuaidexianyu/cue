@@ -46,6 +46,12 @@ pub const KEY_EXCLUDE_FILE: &str = "module.file.excluded_paths_file";
 /// 名单文件名(模块 data 目录下)。
 const EXCLUDE_FILE_NAME: &str = "excluded-paths.toml";
 
+/// 通用图标未就绪时的兜底字形(Segoe MDL2/Fluent,§135)。
+mod glyph_cp {
+    pub const FOLDER: u32 = 0xE8B7;
+    pub const FILE: u32 = 0xE8A5;
+}
+
 /// 默认名单片段(§125):系统目录(含 ProgramData)+ 目录锚定的
 /// 通用 `\AppData\`(任意用户配置,含多配置/沙箱配置)+ 依赖目录
 /// (口径对齐 VS Code search.exclude 默认)+ 按 USERPROFILE 展开
@@ -234,7 +240,8 @@ fn refreshed_clause(state: &Mutex<ExcludeState>) -> String {
     };
     if let Some(p) = path {
         let mtime = std::fs::metadata(&p).and_then(|m| m.modified()).ok();
-        if mtime.is_some() && mtime != known_mtime
+        if mtime.is_some()
+            && mtime != known_mtime
             && let Ok(content) = std::fs::read_to_string(&p)
         {
             let mut g = state.lock().unwrap();
@@ -307,13 +314,13 @@ impl Default for FileModule {
 impl FileModule {
     /// 图标:非文件夹先试真实图标(worker 按路径/扩展名缓存,
     /// 未命中登记提取、本帧走通用);文件夹与各种兜底走
-    /// 通用图标,再退 SystemIcon。
-    fn icon_for(&self, entry: &FileEntry) -> ResultIcon {
+    /// 通用图标,再退 Segoe 字形(§135)。
+    fn icon_for(&self, entry: &FileEntry) -> Option<ResultIcon> {
         if !entry.is_dir
             && let Some(worker) = &self.icon_worker
             && let Some(icon) = worker.get_or_queue(Path::new(entry.path.as_ref()), false)
         {
-            return icon;
+            return Some(icon);
         }
         match self.icons.get() {
             Some(icons) => {
@@ -324,13 +331,19 @@ impl FileModule {
                 } else {
                     &icons.file
                 };
-                ResultIcon::Raster((**img).clone())
+                Some(ResultIcon::Raster((**img).clone()))
             }
-            None => ResultIcon::SystemIcon(if entry.is_dir {
-                SystemIconId::Folder
-            } else {
-                SystemIconId::File
-            }),
+            // 通用图标集未初始化(单测/worker 未起)→ 字形兜底;
+            // 字体缺失时返回 None(空槽位,不影响激活)。
+            None => {
+                let cp = if entry.is_dir {
+                    glyph_cp::FOLDER
+                } else {
+                    glyph_cp::FILE
+                };
+                cue_util_win::glyph::cached_glyph(cp, cue_util_win::glyph::DEFAULT_RGB)
+                    .map(ResultIcon::Raster)
+            }
         }
     }
 }
@@ -499,7 +512,7 @@ impl LauncherModule for FileModule {
                 .size
                 .map(|s| ResultAccessory::Text(format_size(s).into()))
         };
-        p.icon = Some(self.icon_for(entry));
+        p.icon = self.icon_for(entry);
         p
     }
 
@@ -620,21 +633,15 @@ mod tests {
         assert_eq!(&*p.title, "Alpha");
         assert_eq!(p.subtitle.as_deref(), Some("C:"));
         assert!(matches!(&p.accessory, Some(ResultAccessory::Text(t)) if &**t == "文件夹"));
-        // 图标线程未跑 → SystemIcon 兜底
-        assert!(matches!(
-            p.icon,
-            Some(ResultIcon::SystemIcon(SystemIconId::Folder))
-        ));
+        // 通用图标集未初始化 → Segoe 字形兜底(§135)
+        assert!(matches!(p.icon, Some(ResultIcon::Raster(_))));
 
         let file = ModuleItem::new(ItemId(2), entry("C:\\Alpha\\beta.txt", false, Some(2048)));
         let p = m.present(&file);
         assert_eq!(&*p.title, "beta.txt");
         assert_eq!(p.subtitle.as_deref(), Some("C:\\Alpha"));
         assert!(matches!(&p.accessory, Some(ResultAccessory::Text(t)) if &**t == "2.0 KB"));
-        assert!(matches!(
-            p.icon,
-            Some(ResultIcon::SystemIcon(SystemIconId::File))
-        ));
+        assert!(matches!(p.icon, Some(ResultIcon::Raster(_))));
 
         // 盘符根:parent 为空 → 无副标题
         let root = ModuleItem::new(ItemId(3), entry("C:\\", true, None));

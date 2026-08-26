@@ -30,9 +30,7 @@ pub use launcher_module::{
 };
 pub use module::{Module, ModuleDescriptor, ModuleId};
 pub use outcome::{ModuleOutcome, OutcomeStatus, SessionDisposition, UsageRecordRequest};
-pub use presentation::{
-    IconImage, ResultAccessory, ResultBadge, ResultIcon, ResultPresentation, SystemIconId,
-};
+pub use presentation::{IconImage, ResultAccessory, ResultBadge, ResultIcon, ResultPresentation};
 pub use settings::{
     ApplyPolicy, SettingKey, SettingKind, SettingSpec, SettingValue, SettingsChangeSet,
     SettingsSchema,

@@ -30,6 +30,9 @@ const ACTION_OPEN_LOCATION: ActionId = ActionId(2);
 /// (catalog 只在进程启动时构建,§56)。
 const KEY_EXTRA_DIRS: &str = "module.app.extra_dirs";
 
+/// packaged 应用 logo 未就绪时的兜底字形:Segoe AppIconDefault(§135)。
+const GLYPH_APP: u32 = 0xECAA;
+
 /// AppModule 是 V1 的 required default module。
 pub struct AppModule {
     descriptor: ModuleDescriptor,
@@ -253,7 +256,7 @@ impl LauncherModule for AppModule {
                 icons.get_or_queue(item.id(), &entry.icon_key(), icon::IconSource::Exe(exe))
             }),
             // §134:packaged logo 走 GetLogo 异步提取;未就绪/失败
-            // 暂用 SystemIcon 兜底。
+            // 用通用应用字形兜底(§135,Segoe AppIconDefault)。
             LaunchTarget::Packaged { aumid } => self
                 .icons
                 .as_ref()
@@ -264,7 +267,10 @@ impl LauncherModule for AppModule {
                         icon::IconSource::Packaged(aumid),
                     )
                 })
-                .or(Some(ResultIcon::SystemIcon(SystemIconId::App))),
+                .or_else(|| {
+                    cue_util_win::glyph::cached_glyph(GLYPH_APP, cue_util_win::glyph::DEFAULT_RGB)
+                        .map(ResultIcon::Raster)
+                }),
         };
         p
     }

@@ -1051,6 +1051,7 @@ name = "cue-module-system"
 version = "0.1.0"
 dependencies = [
  "cue-protocol",
+ "cue-util-win",
  "windows 0.62.2",
 ]
 
@@ -1075,6 +1076,7 @@ name = "cue-util-win"
 version = "0.1.0"
 dependencies = [
  "cue-protocol",
+ "image",
  "windows 0.62.2",
 ]
 

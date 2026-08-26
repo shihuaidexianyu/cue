@@ -90,7 +90,7 @@ icon 槽位永远占固定宽度（如 44px），None 即留空
 文字列作为一个整体在行内垂直居中：subtitle 为 None 时不渲染
   第二行（不是留一行空白），title 随块居中——行高不变、
   无 reflow、无跳动的结论不受影响
-没有专属图标的 Module 返回 SystemIcon 或 None
+没有专属图标的 Module 返回字形位图(§135)或 None
 ```
 
 因此：

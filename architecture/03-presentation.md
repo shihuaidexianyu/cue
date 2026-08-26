@@ -32,12 +32,12 @@ v0.2 修订：`SharedString` 是 GPUI re-export 类型，protocol 使用它同�
 
 # 14. ResultIcon
 
-v0.1 修订：`ImageHandle` 是 GPUI 类型，会让 protocol 依赖 GPUI，违反 §71。改为协议自有位图：
+v0.1 修订：`ImageHandle` 是 GPUI 类型，会让 protocol 依赖 GPUI，违反 §71。改为协议自有位图。
+v0.3 修订（§135）：`SystemIcon(SystemIconId)` 变体删除——"画什么字形"是模块的决定，协议不携带语义枚举;兜底图标的载体是模块自渲染的字形位图(cue-util-win::glyph)。`ResultIcon` 只剩 `Raster` 一种形态:
 
 ```rust
 pub enum ResultIcon {
     Raster(IconImage),
-    SystemIcon(SystemIconId),
 }
 
 pub struct IconImage {
@@ -57,7 +57,7 @@ rgba.len() == width * height * 4
 UI 按 Arc 指针缓存 GPU 纹理；
 Module 对同一张缓存图标必须复用同一个 Arc<IconImage> 实例，
 否则指针缓存失效、同图标重复上传
-SystemIcon 是没有专属图标时的通用字形逃生口
+没有专属图标的模块自渲染单色字形位图(§135)或返回 None
 ```
 
 不要允许 Module：

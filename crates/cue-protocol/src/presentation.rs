@@ -26,11 +26,13 @@ impl ResultPresentation {
 }
 
 /// ResultIcon —— 协议自有位图,不是 GPUI 类型。
+///
+/// 只有一种形态:模块把图标(或兜底的单色字形,§135)渲染成
+/// 位图再交给 Core——协议不携带"画什么"的语义枚举,UI 也不
+/// 替模块决定字形。
 #[derive(Clone, Debug)]
 pub enum ResultIcon {
     Raster(IconImage),
-    /// 没有专属图标时的通用字形逃生口。
-    SystemIcon(SystemIconId),
 }
 
 /// 像素契约:RGBA8、row-major、sRGB、straight(非预乘)alpha,
@@ -59,23 +61,6 @@ impl IconImage {
             height,
         }
     }
-}
-
-/// SystemIcon 逃生口。前四个是 V1 最小集合;`Lock` 起为系统动作
-/// 模块(§126)的动作字形——协议自有语义,UI 决定具体字形(emoji)。
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SystemIconId {
-    App,
-    File,
-    Folder,
-    Generic,
-    Lock,
-    Sleep,
-    Hibernate,
-    Logoff,
-    Restart,
-    Shutdown,
-    RecycleBin,
 }
 
 #[derive(Clone, Debug)]

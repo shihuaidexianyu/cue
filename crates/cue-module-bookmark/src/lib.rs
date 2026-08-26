@@ -21,6 +21,9 @@ use std::sync::{Arc, OnceLock};
 /// 次级动作 ID(顺序即菜单顺序;PRIMARY = 打开)。
 const ACTION_COPY_URL: ActionId = ActionId(1);
 
+/// 浏览器图标未就绪时的兜底字形:Segoe Globe(§135)。
+const GLYPH_GLOBE: u32 = 0xE774;
+
 /// BookmarkModule,trigger `b`。
 pub struct BookmarkModule {
     descriptor: ModuleDescriptor,
@@ -223,15 +226,18 @@ impl LauncherModule for BookmarkModule {
             .into(),
         );
         p.accessory = Some(ResultAccessory::Text(entry.browser.display().into()));
-        p.icon = Some(
-            self.icons
-                .get()
-                .and_then(|m| m.get(&entry.browser))
-                // IconImage.rgba 是 Arc<[u8]>,clone 保持指针不变——
-                // UI 按该指针缓存纹理。
-                .map(|i| ResultIcon::Raster((**i).clone()))
-                .unwrap_or(ResultIcon::SystemIcon(SystemIconId::Generic)),
-        );
+        p.icon = self
+            .icons
+            .get()
+            .and_then(|m| m.get(&entry.browser))
+            // IconImage.rgba 是 Arc<[u8]>,clone 保持指针不变——
+            // UI 按该指针缓存纹理。
+            .map(|i| ResultIcon::Raster((**i).clone()))
+            // 浏览器图标未就绪 → 地球字形兜底(Segoe,§135)。
+            .or_else(|| {
+                cue_util_win::glyph::cached_glyph(GLYPH_GLOBE, cue_util_win::glyph::DEFAULT_RGB)
+                    .map(ResultIcon::Raster)
+            });
         p
     }
 

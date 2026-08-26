@@ -4,14 +4,14 @@
 //! cue-ui 不认识 Module,不认识 Win32;CoreEffect 的执行经由注入的
 //! effect handler 交给编排层(cue binary)。
 
-use cue_protocol::logln;
 use cue_core::{
     ActionMenuModel, ActionMenuRow, Core, CoreEffect, CoreEvent, KEY_HOTKEY, SettingsModel,
     SettingsRow,
 };
+use cue_protocol::logln;
 use cue_protocol::{
     Hotkey, IconImage, Key as ProtoKey, Modifiers as ProtoModifiers, ResultAccessory, ResultIcon,
-    ResultPresentation, SettingKind, SettingValue, SystemIconId,
+    ResultPresentation, SettingKind, SettingValue,
 };
 use futures::StreamExt;
 use gpui::prelude::FluentBuilder;
@@ -630,19 +630,6 @@ impl LauncherView {
             .justify_center();
         match &row.icon {
             None => slot,
-            Some(ResultIcon::SystemIcon(id)) => slot.child(match id {
-                SystemIconId::App => "🚀",
-                SystemIconId::File => "📄",
-                SystemIconId::Folder => "📁",
-                SystemIconId::Generic => "▪",
-                SystemIconId::Lock => "🔒",
-                SystemIconId::Sleep => "😴",
-                SystemIconId::Hibernate => "💤",
-                SystemIconId::Logoff => "🚪",
-                SystemIconId::Restart => "🔄",
-                SystemIconId::Shutdown => "⏻",
-                SystemIconId::RecycleBin => "🗑",
-            }),
             Some(ResultIcon::Raster(icon)) => match textures.get(&texture_key(icon)) {
                 // 32px 显示尺寸;96px 源纹理由 GPUI 降采样。
                 Some((_, texture)) => slot.child(img(Arc::clone(texture)).w(px(32.0)).h(px(32.0))),

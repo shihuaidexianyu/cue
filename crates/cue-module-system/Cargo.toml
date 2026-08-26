@@ -5,6 +5,7 @@ edition.workspace = true
 
 [dependencies]
 cue-protocol.workspace = true
+cue-util-win.workspace = true
 
 [dependencies.windows]
 workspace = true

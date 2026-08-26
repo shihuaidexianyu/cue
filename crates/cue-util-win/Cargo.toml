@@ -6,6 +6,9 @@ edition.workspace = true
 [dependencies]
 cue-protocol.workspace = true
 
+[dev-dependencies]
+image = { version = "0.25", default-features = false, features = ["png"] }
+
 [dependencies.windows]
 workspace = true
 features = [

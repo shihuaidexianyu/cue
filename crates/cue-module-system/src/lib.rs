@@ -42,8 +42,22 @@ struct ActionSpec {
     extras: &'static [&'static str],
     /// 副标题:说明行为与破坏性。
     subtitle: &'static str,
-    icon: SystemIconId,
+    /// Segoe Fluent/MDL2 字形 codepoint(§135;渲染在 load 完成)。
+    glyph: u32,
     kind: ActionKind,
+}
+
+/// 字形码位表(contact-sheet 肉眼选定;MDL2/Fluent 同码位)。
+/// 休眠无官方字形,取 Frigid(温度计)——"冻结到磁盘"的语义隐喻,
+/// 与睡眠的月亮拉开辨识度;若有更贴切的官方字形,一行可换。
+pub(crate) mod glyph_cp {
+    pub const LOCK: u32 = 0xE72E;
+    pub const SLEEP: u32 = 0xE708;
+    pub const HIBERNATE: u32 = 0xE9CA;
+    pub const LOGOFF: u32 = 0xF3B1;
+    pub const RESTART: u32 = 0xE72C;
+    pub const SHUTDOWN: u32 = 0xE7E8;
+    pub const RECYCLE_BIN: u32 = 0xE74D;
 }
 
 /// 全部系统动作(表顺序 = 无 usage 时的默认顺序)。
@@ -56,7 +70,7 @@ const ACTIONS: &[ActionSpec] = &[
         english: "lock",
         extras: &["suojie", "锁定"],
         subtitle: "立即锁定当前会话",
-        icon: SystemIconId::Lock,
+        glyph: glyph_cp::LOCK,
         kind: ActionKind::Lock,
     },
     ActionSpec {
@@ -67,7 +81,7 @@ const ACTIONS: &[ActionSpec] = &[
         english: "sleep",
         extras: &[],
         subtitle: "进入睡眠(内存保持供电,按电源键唤醒)",
-        icon: SystemIconId::Sleep,
+        glyph: glyph_cp::SLEEP,
         kind: ActionKind::Sleep,
     },
     ActionSpec {
@@ -78,7 +92,7 @@ const ACTIONS: &[ActionSpec] = &[
         english: "hibernate",
         extras: &[],
         subtitle: "内存写入磁盘后断电;仅在本机启用休眠时出现",
-        icon: SystemIconId::Hibernate,
+        glyph: glyph_cp::HIBERNATE,
         kind: ActionKind::Hibernate,
     },
     ActionSpec {
@@ -89,7 +103,7 @@ const ACTIONS: &[ActionSpec] = &[
         english: "logoff",
         extras: &["logout", "signout"],
         subtitle: "退出当前账户(程序有机会正常退出)",
-        icon: SystemIconId::Logoff,
+        glyph: glyph_cp::LOGOFF,
         kind: ActionKind::Logoff,
     },
     ActionSpec {
@@ -101,7 +115,7 @@ const ACTIONS: &[ActionSpec] = &[
         english: "restart",
         extras: &["zhongqi", "zq", "reboot"],
         subtitle: "30 秒后重启(原生倒计时;shutdown /a 可取消)",
-        icon: SystemIconId::Restart,
+        glyph: glyph_cp::RESTART,
         kind: ActionKind::Restart,
     },
     ActionSpec {
@@ -112,7 +126,7 @@ const ACTIONS: &[ActionSpec] = &[
         english: "shutdown",
         extras: &["poweroff"],
         subtitle: "30 秒后关机(原生倒计时;shutdown /a 可取消)",
-        icon: SystemIconId::Shutdown,
+        glyph: glyph_cp::SHUTDOWN,
         kind: ActionKind::Shutdown,
     },
     ActionSpec {
@@ -130,7 +144,7 @@ const ACTIONS: &[ActionSpec] = &[
             "回收站",
         ],
         subtitle: "永久删除回收站全部内容",
-        icon: SystemIconId::RecycleBin,
+        glyph: glyph_cp::RECYCLE_BIN,
         kind: ActionKind::RecycleBin,
     },
 ];
@@ -218,7 +232,13 @@ pub struct SystemModule {
     usage: Option<UsageReader>,
     /// 本机是否可休眠(load 探测;不可休眠则不显示"休眠"动作)。
     hibernate_available: bool,
+    /// 字形图标(load 渲染一次,codepoint → 96px 位图;§135)。
+    icons: std::collections::HashMap<u32, IconImage>,
 }
+
+/// 字形前景色:与行标题文字同档的浅灰(深色底上对比足够,
+/// 又不抢彩色应用图标的视觉权重)。
+const GLYPH_RGB: [u8; 3] = [0xE6, 0xE6, 0xE6];
 
 impl SystemModule {
     pub fn new() -> Self {
@@ -230,6 +250,7 @@ impl SystemModule {
             },
             usage: None,
             hibernate_available: true,
+            icons: std::collections::HashMap::new(),
         }
     }
 }
@@ -248,6 +269,20 @@ impl Module for SystemModule {
     fn load(&mut self, ctx: ModuleContext) -> Result<(), ModuleError> {
         self.usage = Some(ctx.usage.clone());
         self.hibernate_available = exec::hibernate_available();
+        // 7 枚字形一次渲染(亚毫秒级/枚);渲染失败留空槽位,
+        // present() 回退为无图标——图标缺失不值得让 load 失败。
+        self.icons = ACTIONS
+            .iter()
+            .filter_map(|s| {
+                cue_util_win::glyph::render_glyph(s.glyph, GLYPH_RGB).map(|i| (s.glyph, i))
+            })
+            .collect();
+        if self.icons.len() != ACTIONS.len() {
+            ctx.logger.log(
+                LogLevel::Warn,
+                "system: 部分字形渲染失败(Segoe 图标字体缺失?),对应动作为空图标",
+            );
+        }
         if !exec::enable_shutdown_privilege() {
             ctx.logger.log(
                 LogLevel::Warn,
@@ -293,7 +328,12 @@ impl LauncherModule for SystemModule {
         };
         let mut p = ResultPresentation::new(spec.name);
         p.subtitle = Some(Arc::from(spec.subtitle));
-        p.icon = Some(ResultIcon::SystemIcon(spec.icon));
+        // IconImage 内部 Arc<[u8]>,clone 复用同一像素缓冲 ——
+        // UI 按 Arc 指针缓存纹理。
+        p.icon = self
+            .icons
+            .get(&spec.glyph)
+            .map(|i| ResultIcon::Raster(i.clone()));
         p
     }
 
@@ -309,10 +349,14 @@ impl LauncherModule for SystemModule {
         let spec = item.downcast_ref::<&'static ActionSpec>().copied();
         Box::pin(async move {
             let Some(spec) = spec else {
-                return ModuleOutcome::failed(ModuleError::ActivationFailed("system: 未知条目".into()));
+                return ModuleOutcome::failed(ModuleError::ActivationFailed(
+                    "system: 未知条目".into(),
+                ));
             };
             if action != ActionId::PRIMARY {
-                return ModuleOutcome::failed(ModuleError::ActivationFailed("system: 未知动作".into()));
+                return ModuleOutcome::failed(ModuleError::ActivationFailed(
+                    "system: 未知动作".into(),
+                ));
             }
             match exec::run(spec.kind) {
                 Ok(()) => ModuleOutcome::success(
@@ -584,7 +628,8 @@ mod tests {
     }
 
     /// present 出自 payload:标题中文名、副标题说明、动作图标;
-    /// 动作菜单只有 PRIMARY"执行"。
+    /// 动作菜单只有 PRIMARY"执行"。字形在 load() 渲染,本测试
+    /// 未走 load,图标应为空槽位(有图标的路径由 §135 肉眼验收)。
     #[test]
     fn present_and_actions() {
         let no_usage: Option<&UsageReader> = None;
@@ -593,10 +638,7 @@ mod tests {
         let p = m.present(&items[0]);
         assert_eq!(&*p.title, "关机");
         assert!(p.subtitle.as_deref().unwrap().contains("30 秒"));
-        assert!(matches!(
-            p.icon,
-            Some(ResultIcon::SystemIcon(SystemIconId::Shutdown))
-        ));
+        assert!(p.icon.is_none());
         let acts = m.actions(&items[0]);
         assert_eq!(acts.len(), 1);
         assert_eq!(acts[0].id, ActionId::PRIMARY);

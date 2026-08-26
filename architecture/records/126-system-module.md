@@ -28,6 +28,7 @@
          具体错
 图标   = SystemIconId 协议新增 7 个动作字形(UI 映射 emoji)
          ——协议 additive,无破坏性变更
+         [已由 §135 取代:Segoe 字形位图,SystemIconId 退役]
 明确不做 = 任意命令执行(shell runner 禁区)、模块内第二确认
            对话框(launcher 语义即确认;30 秒宽限是保险)、
            自定义动作配置(V1 固定表)、定时/延时动作
