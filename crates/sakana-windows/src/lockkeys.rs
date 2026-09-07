@@ -41,8 +41,17 @@ pub use sakana_protocol::LockKey;
 const INJECTED: usize = 0x534B_4E41; // "SKNA"
 const HOLD_TIMER: usize = 1;
 const NUM_HOLD_TIMER: usize = 2;
+/// worker 窗口私有消息:set_config 后触发一次守护巡检(worker 以默认
+/// 配置启动,真实配置由初始 notify 下发——开机值守从这条消息开始)。
+const WM_LOCKKEYS_PATROL: u32 = WM_APP + 1;
 
 thread_local! { static STATE: RefCell<Option<Keyboard>> = const { RefCell::new(None) }; }
+
+// 铁律:STATE 的借用绝不跨 SendInput 存活。win32k 会在注入线程上
+// 同步回调(KiUserCallbackDispatcher → 钩子/窗口过程重入),借用
+// 未释放时重入 = RefCell 双借 panic,而 panic 点在 extern "system"
+// 边界上 = panic_cannot_unwind → abort(0xc0000409)。因此钩子与
+// 窗口过程一律"借用内只判定,释放后才执行"(见 Decision)。
 
 /// 共享配置 + 代次。UI 线程写(set_config / reset),worker 逐事件读。
 type Shared = Arc<Mutex<(LockKeysConfig, u64)>>;
@@ -236,17 +245,6 @@ impl Worker {
                 })();
                 match setup {
                     Ok((window, hook)) => {
-                        // 常开守护的启动巡检:开局就是关的,立刻打回开。
-                        STATE.with_borrow_mut(|state| {
-                            let state = state.as_mut().unwrap();
-                            let (config, _) = *state.shared.lock().unwrap();
-                            if config.enabled
-                                && config.numlock_mode == NumLockMode::AlwaysOn
-                                && !toggle_on(VK_NUMLOCK)
-                            {
-                                send(&[(VK_NUMLOCK, false), (VK_NUMLOCK, true)]);
-                            }
-                        });
                         let _ = tx.send(Ok(window.0 as usize));
                         let mut msg = MSG::default();
                         while GetMessageW(&mut msg, None, 0, 0).0 > 0 {
@@ -274,10 +272,18 @@ impl Worker {
 
     /// 推送新配置。实现 = 存值 + 代次 +1:代次变化让 worker 丢弃
     /// 挂起手势(改配置时手势语义已经变了,不该用旧语义结算)。
+    /// 顺带触发一次守护巡检:worker 以默认配置启动,真实配置由初始
+    /// notify 下发,开机即入 AlwaysOn 的"打回开"靠这条消息落地。
     pub fn set_config(&self, config: LockKeysConfig) {
-        let mut g = self.shared.lock().unwrap();
-        g.0 = config;
-        g.1 += 1;
+        {
+            let mut g = self.shared.lock().unwrap();
+            g.0 = config;
+            g.1 += 1;
+        }
+        // SAFETY: worker 窗口活着,直到本 owner 的 Drop;只投递整数。
+        unsafe {
+            let _ = PostMessageW(Some(self.window), WM_LOCKKEYS_PATROL, WPARAM(0), LPARAM(0));
+        }
     }
 
     /// 会话复位(锁屏/休眠):释放可能永远等不到抬起的挂起手势。
@@ -351,6 +357,16 @@ fn post_lockkey(host: HWND, key: usize, on: bool) {
     }
 }
 
+/// 借用内的一次判定的产出:全部执行(SendInput)都推迟到借用释放后。
+struct Decision {
+    swallowed: bool,
+    config: LockKeysConfig,
+    /// 常开守护巡检发现 NumLock 被关:需要注入一次翻转打回开。
+    watchdog: bool,
+    /// 手势结算(轻点注入 / 锁定态翻转),带调用点给出的目标键。
+    action: Option<(VIRTUAL_KEY, GestureAction)>,
+}
+
 unsafe extern "system" fn hook(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     // SAFETY: HC_ACTION 时 lparam 是有效的 KBDLLHOOKSTRUCT,回调期内有效。
     unsafe {
@@ -359,28 +375,44 @@ unsafe extern "system" fn hook(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRE
         }
         let event = &*(lparam.0 as *const KBDLLHOOKSTRUCT);
         let injected = event.dwExtraInfo == INJECTED;
-        let swallowed = STATE.with_borrow_mut(|state| {
+        let decision = STATE.with_borrow_mut(|state| {
             let state = state.as_mut().unwrap();
             let config = sync_config(state);
             let down = wparam.0 as u32 == WM_KEYDOWN || wparam.0 as u32 == WM_SYSKEYDOWN;
             let vk = VIRTUAL_KEY(event.vkCode as u16);
             let mut swallowed = false;
+            let mut action = None;
             if !injected {
-                swallowed = handle_event(state, &config, vk, down, event.time);
+                (swallowed, action) = handle_event(state, &config, vk, down, event.time);
             }
-            // NumLock 常开守护:任何事件顺带巡检(含自家注入的后续事件,
-            // 注入引起的翻转在下一次事件被抓到并再次打回——状态 diff
-            // 先上报,OSD 会短暂显示"关"再显示"开",与真实时序一致)。
-            if config.enabled
+            // NumLock 常开守护:任何真实事件顺带巡检。**自家注入的事件
+            // 必须排除**:注入送达时锁定态还没来得及翻转,巡检会误判
+            // "仍是关"而再注入——同步重入下就是无限递归。注入失败由下一
+            // 个真实事件兜底(任何按键都触发巡检),启动巡检覆盖开机。
+            let watchdog = !injected
+                && config.enabled
                 && config.numlock_mode == NumLockMode::AlwaysOn
-                && !toggle_on(VK_NUMLOCK)
-            {
-                send(&[(VK_NUMLOCK, false), (VK_NUMLOCK, true)]);
+                && !toggle_on(VK_NUMLOCK);
+            Decision {
+                swallowed,
+                config,
+                watchdog,
+                action,
             }
-            report_state_changes(state, &config);
-            swallowed
         });
-        if swallowed {
+        // 借用已释放,SendInput 的同步重入看到的是空闲的 STATE。
+        if decision.watchdog {
+            send(&[(VK_NUMLOCK, false), (VK_NUMLOCK, true)]);
+        }
+        if let Some((vk, action)) = decision.action {
+            execute(&decision.config, vk, action);
+        }
+        // 状态 diff 放在注入之后:本轮注入引起的翻转当场就能上报;
+        // 若系统选择异步投递注入事件,下一次事件也会补报,不丢。
+        STATE.with_borrow_mut(|state| {
+            report_state_changes(state.as_mut().unwrap(), &decision.config);
+        });
+        if decision.swallowed {
             LRESULT(1)
         } else {
             CallNextHookEx(None, code, wparam, lparam)
@@ -388,14 +420,15 @@ unsafe extern "system" fn hook(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRE
     }
 }
 
-/// 单个非注入按键事件的判定;返回 true = 吞掉(不传给后续钩子/系统)。
+/// 单个非注入按键事件的判定;返回 (是否吞掉, 待执行的手势结算)。
+/// 结算的执行(SendInput)由调用者在借用释放后进行——本函数只动状态。
 fn handle_event(
     state: &mut Keyboard,
     config: &LockKeysConfig,
     vk: VIRTUAL_KEY,
     down: bool,
     time: u32,
-) -> bool {
+) -> (bool, Option<(VIRTUAL_KEY, GestureAction)>) {
     // 修饰键按下取消挂起手势(Ctrl+C 里的 Ctrl 不该让 CapsLock 攒着)。
     if down
         && [
@@ -416,7 +449,7 @@ fn handle_event(
         if let Some(press) = &mut state.num_press {
             press.cancel();
         }
-        return false;
+        return (false, None);
     }
 
     if vk == trigger_vk(config.remap_key) {
@@ -425,22 +458,27 @@ fn handle_event(
     if vk == VK_NUMLOCK {
         return handle_numlock(state, config, down, time);
     }
-    false
+    (false, None)
 }
 
-fn handle_trigger(state: &mut Keyboard, config: &LockKeysConfig, down: bool, time: u32) -> bool {
+fn handle_trigger(
+    state: &mut Keyboard,
+    config: &LockKeysConfig,
+    down: bool,
+    time: u32,
+) -> (bool, Option<(VIRTUAL_KEY, GestureAction)>) {
     if down {
         if state.passthrough {
-            return false;
+            return (false, None);
         }
         // 按住自动重复:第一次按下已吞,后续重复报文同样吞掉。
         if state.press.is_some() {
-            return true;
+            return (true, None);
         }
         let foreground = unsafe { GetForegroundWindow() };
         if !config.enabled || modifiers_down() || !chinese_input(foreground) {
             state.passthrough = true;
-            return false;
+            return (false, None);
         }
         state.press = Some(Press::new(
             time,
@@ -453,14 +491,14 @@ fn handle_trigger(state: &mut Keyboard, config: &LockKeysConfig, down: bool, tim
         if unsafe { SetTimer(Some(state.window), HOLD_TIMER, config.hold_ms, None) } == 0 {
             state.press = None;
             state.passthrough = true;
-            return false;
+            return (false, None);
         }
-        true
+        (true, None)
     } else {
         let was_passthrough = state.passthrough;
         state.passthrough = false;
         let Some(mut press) = state.press.take() else {
-            return false; // 透传的按下,抬起也透传
+            return (false, None); // 透传的按下,抬起也透传
         };
         let _ = was_passthrough;
         unsafe {
@@ -474,24 +512,29 @@ fn handle_trigger(state: &mut Keyboard, config: &LockKeysConfig, down: bool, tim
         {
             press.cancel();
         }
-        if let Some(action) = press.release(time) {
-            execute(config, trigger_vk(config.remap_key), action);
-        }
-        true
+        let action = press
+            .release(time)
+            .map(|action| (trigger_vk(config.remap_key), action));
+        (true, action)
     }
 }
 
-fn handle_numlock(state: &mut Keyboard, config: &LockKeysConfig, down: bool, time: u32) -> bool {
+fn handle_numlock(
+    state: &mut Keyboard,
+    config: &LockKeysConfig,
+    down: bool,
+    time: u32,
+) -> (bool, Option<(VIRTUAL_KEY, GestureAction)>) {
     match (config.enabled, config.numlock_mode) {
-        (false, _) | (_, NumLockMode::Native) => false,
-        (_, NumLockMode::AlwaysOn) => true, // 全吞;状态由守护巡检维持
+        (false, _) | (_, NumLockMode::Native) => (false, None),
+        (_, NumLockMode::AlwaysOn) => (true, None), // 全吞;状态由守护巡检维持
         (_, NumLockMode::Hold) => {
             if down {
                 if state.num_passthrough {
-                    return false;
+                    return (false, None);
                 }
                 if state.num_press.is_some() {
-                    return true; // 自动重复
+                    return (true, None); // 自动重复
                 }
                 state.num_press = Some(Press::new(
                     time,
@@ -505,13 +548,13 @@ fn handle_numlock(state: &mut Keyboard, config: &LockKeysConfig, down: bool, tim
                 {
                     state.num_press = None;
                     state.num_passthrough = true;
-                    return false;
+                    return (false, None);
                 }
-                true
+                (true, None)
             } else {
                 state.num_passthrough = false;
                 let Some(mut press) = state.num_press.take() else {
-                    return false;
+                    return (false, None);
                 };
                 unsafe {
                     let _ = KillTimer(Some(state.window), NUM_HOLD_TIMER);
@@ -519,10 +562,8 @@ fn handle_numlock(state: &mut Keyboard, config: &LockKeysConfig, down: bool, tim
                 if modifiers_down() {
                     press.cancel();
                 }
-                if let Some(action) = press.release(time) {
-                    execute(config, VK_NUMLOCK, action);
-                }
-                true
+                let action = press.release(time).map(|action| (VK_NUMLOCK, action));
+                (true, action)
             }
         }
     }
@@ -592,7 +633,9 @@ unsafe extern "system" fn worker_wnd_proc(
     unsafe {
         match message {
             WM_TIMER if wparam.0 == HOLD_TIMER || wparam.0 == NUM_HOLD_TIMER => {
-                STATE.with_borrow_mut(|state| {
+                // 与钩子同款"借用内只判定":execute 的 SendInput 必须
+                // 在借用释放后(同步重入会再进本过程,见文件头铁律)。
+                let decision = STATE.with_borrow_mut(|state| {
                     let state = state.as_mut().unwrap();
                     let config = sync_config(state);
                     let now = GetTickCount();
@@ -602,6 +645,7 @@ unsafe extern "system" fn worker_wnd_proc(
                     } else {
                         &mut state.num_press
                     };
+                    let mut action = None;
                     if let Some(press) = slot {
                         // 定时器送达时前台/修饰键可能已变:复核取消条件。
                         if is_trigger
@@ -612,7 +656,7 @@ unsafe extern "system" fn worker_wnd_proc(
                         {
                             press.cancel();
                         }
-                        let action = press.hold(now);
+                        action = press.hold(now);
                         let finished = press.finished();
                         if finished {
                             let _ = KillTimer(
@@ -624,18 +668,39 @@ unsafe extern "system" fn worker_wnd_proc(
                                 },
                             );
                         }
-                        if let Some(action) = action {
-                            let vk = if is_trigger {
-                                trigger_vk(config.remap_key)
-                            } else {
-                                VK_NUMLOCK
-                            };
-                            execute(&config, vk, action);
-                        }
                     }
+                    (config, is_trigger, action)
                 });
+                let (config, is_trigger, action) = decision;
+                if let Some(action) = action {
+                    let vk = if is_trigger {
+                        trigger_vk(config.remap_key)
+                    } else {
+                        VK_NUMLOCK
+                    };
+                    execute(&config, vk, action);
+                    // 注入引起的锁定态翻转当场结算上报(与钩子的
+                    // 状态 diff 同一语义;不在这里报就要等下一个事件)。
+                    STATE.with_borrow_mut(|state| {
+                        report_state_changes(state.as_mut().unwrap(), &config);
+                    });
+                }
             }
             WM_CLOSE => PostQuitMessage(0),
+            // 守护巡检(配置下发/变更驱动):AlwaysOn 且当前为关 → 打回开。
+            // 判定与注入分两段,借用不跨 SendInput(文件头铁律)。
+            m if m == WM_LOCKKEYS_PATROL => {
+                let send_toggle = STATE.with_borrow_mut(|state| {
+                    let state = state.as_mut().unwrap();
+                    let config = sync_config(state);
+                    config.enabled
+                        && config.numlock_mode == NumLockMode::AlwaysOn
+                        && !toggle_on(VK_NUMLOCK)
+                });
+                if send_toggle {
+                    send(&[(VK_NUMLOCK, false), (VK_NUMLOCK, true)]);
+                }
+            }
             _ => return DefWindowProcW(window, message, wparam, _lparam),
         }
         LRESULT(0)

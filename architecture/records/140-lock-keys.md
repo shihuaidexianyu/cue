@@ -83,6 +83,27 @@ notify_dnd_mode 同款 post-commit 模式):Core::new 初始一次 +
    protocol 的 `LockKey` 纯数据进来。自动收起计时在编排层的
    OSD 泵里(background timer + foreground 任务),不在视图里。
 
+## 复盘:SendInput 同步重入(0.5.0 闪退根因)
+
+**铁律:STATE 的借用绝不跨 SendInput 存活。** win32k 会在注入
+线程上同步回调(KiUserCallbackDispatcher → 本线程的 LL 钩子/窗口
+过程重入)。0.5.0 的钩子把 SendInput 放在 `STATE.with_borrow_mut`
+闭包里执行:第一次真实手势结算时重入钩子再次借 RefCell →
+"RefCell already borrowed" panic,panic 点在 `extern "system"`
+边界上 = panic_cannot_unwind → abort(WER:0xc0000409 子码 7,
+FAST_FAIL_FATAL_APP_EXIT)。调试侧的两个教训:日志写线程在 abort
+时丢尾部消息(日志缺尾 ≠ 事件没发生);`strip="symbols"` 发行版
+靠链接 map(`-C link-arg=/MAP`)+ minidump 栈扫描即可符号化,
+无需 PDB。
+
+修复形态:钩子与 worker 窗口过程一律"借用内只判定(`Decision`),
+释放后才执行(send/execute),状态 diff 在注入后再借一次上报"。
+连带修正:常开守护巡检必须排除自家注入事件(注入送达时锁定态尚未
+翻转,巡检会误判"仍是关"而再注入——同步重入下即无限递归);
+启动巡检改由 set_config 投递 `WM_LOCKKEYS_PATROL` 触发(worker 以
+默认配置启动,真实配置由初始 notify 下发,直接在 start() 里巡检
+永远看到的是默认值,是死代码)。
+
 ## 明确不做
 
 - 不移植 WinCaps 的 D2D OSD / 托盘菜单 / 注册表设置存储——我们
