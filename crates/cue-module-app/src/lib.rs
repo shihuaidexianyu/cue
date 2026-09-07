@@ -8,6 +8,7 @@ mod app_paths;
 mod catalog;
 mod extra_dirs;
 mod icon;
+mod icon_cache;
 mod launch;
 mod matcher;
 mod packaged;
@@ -146,7 +147,12 @@ impl Module for AppModule {
     /// 图标提取本来就不在 load 内。
     fn load(&mut self, ctx: ModuleContext) -> Result<(), ModuleError> {
         self.usage = Some(ctx.usage.clone());
-        let icons = Arc::new(IconPipeline::new(ctx.events.clone()));
+        let icons = Arc::new(IconPipeline::new(
+            ctx.events.clone(),
+            // §137:图标磁盘缓存目录(Core 已建好 cache 根)。
+            Some(ctx.storage.cache.join("icons")),
+            ctx.logger.clone(),
+        ));
         self.icons = Some(Arc::clone(&icons));
 
         let extra_dirs = match ctx.settings.get("extra_dirs") {
@@ -164,7 +170,8 @@ impl Module for AppModule {
             let n_packaged = packaged.entries.len();
             // §134:logo 索引先于 catalog 发布填入图标管线——query 看到
             // packaged 条目时索引必然就绪,worker 取 logo 零等待。
-            icons.set_packaged_index(packaged.logo_index);
+            // §137:版本号表同行,作磁盘缓存的失效指纹。
+            icons.set_packaged_index(packaged.logo_index, packaged.versions);
             entries.extend(packaged.entries);
             // §133:App Paths 注册表 + 用户声明便携目录。排在开始菜单
             // 之后:同一 exe 的首见者胜(dedup 保首个),lnk 的显示名
@@ -184,6 +191,10 @@ impl Module for AppModule {
                     started.elapsed()
                 ),
             );
+            // §137:发布前先预载磁盘图标缓存(亚秒级)——首个查询
+            // 即可见全部缓存图标,不经历占位蹦出;相对秒级的 catalog
+            // 构建,这点延迟无感。
+            icons.preload_from_cache(&entries);
             cell.set(entries);
         });
         Ok(())

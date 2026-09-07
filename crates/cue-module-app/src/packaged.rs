@@ -14,16 +14,18 @@ use windows::ApplicationModel::Core::AppListEntry;
 use windows::Management::Deployment::PackageManager;
 use windows::core::HSTRING;
 
-/// 发现产物:catalog 条目 + 图标管线用的 AUMID → AppListEntry 索引。
+/// 发现产物:catalog 条目 + 图标管线用的 AUMID → AppListEntry 索引
+/// + AUMID → 包版本号表(§137 图标磁盘缓存的失效指纹)。
 pub struct PackagedDiscovery {
     pub entries: Vec<AppEntry>,
     pub logo_index: HashMap<String, AppListEntry>,
+    pub versions: HashMap<String, u64>,
 }
 
 pub fn discover(logger: &ModuleLogger) -> PackagedDiscovery {
     let _com = ComGuard::new();
     match discover_inner() {
-        Ok((entries, logo_index)) => {
+        Ok((entries, logo_index, versions)) => {
             logger.log(
                 LogLevel::Info,
                 &format!("packaged: {} entries", entries.len()),
@@ -31,6 +33,7 @@ pub fn discover(logger: &ModuleLogger) -> PackagedDiscovery {
             PackagedDiscovery {
                 entries,
                 logo_index,
+                versions,
             }
         }
         Err(e) => {
@@ -42,12 +45,20 @@ pub fn discover(logger: &ModuleLogger) -> PackagedDiscovery {
             PackagedDiscovery {
                 entries: Vec::new(),
                 logo_index: HashMap::new(),
+                versions: HashMap::new(),
             }
         }
     }
 }
 
-fn discover_inner() -> Result<(Vec<AppEntry>, HashMap<String, AppListEntry>), String> {
+/// discover_inner 的产物三元组:catalog 条目、logo 索引、版本号表。
+type PackagedParts = (
+    Vec<AppEntry>,
+    HashMap<String, AppListEntry>,
+    HashMap<String, u64>,
+);
+
+fn discover_inner() -> Result<PackagedParts, String> {
     let mgr = PackageManager::new().map_err(|e| e.to_string())?;
     // 空串 = 当前用户。实测(Win11 26200)无参 FindPackages() 可整个调用
     // 抛 E_ACCESSDENIED(枚举碰到个别 ACL 异常的注册即失败,全模块零
@@ -59,7 +70,15 @@ fn discover_inner() -> Result<(Vec<AppEntry>, HashMap<String, AppListEntry>), St
         .map_err(|e| e.to_string())?;
     let mut out = Vec::new();
     let mut logo_index = HashMap::new();
+    let mut versions = HashMap::new();
     for package in packages {
+        // §137:包版本号是图标磁盘缓存的失效指纹(包更新 → 版本变 →
+        // 旧缓存失效重建)。取不到的条目不缓存,现用现提。
+        let version = package
+            .Id()
+            .and_then(|id| id.Version())
+            .ok()
+            .map(|v| crate::icon_cache::pack_version(v.Major, v.Minor, v.Build, v.Revision));
         let Ok(op) = package.GetAppListEntriesAsync() else {
             continue;
         };
@@ -81,6 +100,9 @@ fn discover_inner() -> Result<(Vec<AppEntry>, HashMap<String, AppListEntry>), St
             }
             let aumid = aumid.to_string_lossy();
             logo_index.insert(aumid.clone(), entry);
+            if let Some(v) = version {
+                versions.insert(aumid.clone(), v);
+            }
             out.push(AppEntry::new(
                 &name,
                 LaunchTarget::Packaged {
@@ -89,5 +111,5 @@ fn discover_inner() -> Result<(Vec<AppEntry>, HashMap<String, AppListEntry>), St
             ));
         }
     }
-    Ok((out, logo_index))
+    Ok((out, logo_index, versions))
 }

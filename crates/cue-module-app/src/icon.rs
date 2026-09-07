@@ -6,9 +6,20 @@
 //! 已发布 catalog 的条目,Packaged 图标请求到达时索引必然就绪,
 //! 枚举不重复、worker 不等待。
 //!
+//! §137:最终像素落盘(`icon_cache`),catalog 发布前预载——重启后
+//! 首屏图标直接命中内存,不经历"占位字形 → 逐个蹦出"。worker 提取
+//! 成功后写穿到磁盘。失效:Win32 = exe mtime+size;Packaged = 包
+//! 版本号。读失败的坏/旧文件即删(随后正常提取重缓存);不在当前
+//! catalog 的缓存文件一律保留(packaged 发现可能整批失败,误删
+//! 会让缓存比没有更脆弱)。
+//!
 //! 线程模型:module 自有 worker 线程串行提取,负缓存防重试风暴。
 
-use cue_protocol::{IconImage, ItemId, ModuleEvent, ModuleEventSink, ResultIcon};
+use crate::catalog::{AppEntry, LaunchTarget};
+use crate::icon_cache::{self, Stamp};
+use cue_protocol::{
+    IconImage, ItemId, LogLevel, ModuleEvent, ModuleEventSink, ModuleLogger, ResultIcon,
+};
 use cue_util_win::com::ComGuard;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -51,26 +62,52 @@ struct Request {
 pub struct IconPipeline {
     cache: Arc<Mutex<HashMap<String, Slot>>>,
     packaged_index: Arc<Mutex<HashMap<String, AppListEntry>>>,
+    /// AUMID → 打包包版本号(§137 磁盘缓存失效指纹)。
+    packaged_versions: Arc<Mutex<HashMap<String, u64>>>,
+    /// 磁盘缓存目录(modules/app/cache/icons);None = 纯内存(测试)。
+    cache_dir: Option<PathBuf>,
+    logger: ModuleLogger,
     tx: Option<Sender<Request>>,
     shutdown: Arc<AtomicBool>,
     worker: Option<JoinHandle<()>>,
 }
 
+/// worker 的共享上下文(打包成结构,避免参数串过长)。
+struct WorkerCtx {
+    cache: Arc<Mutex<HashMap<String, Slot>>>,
+    packaged_index: Arc<Mutex<HashMap<String, AppListEntry>>>,
+    packaged_versions: Arc<Mutex<HashMap<String, u64>>>,
+    cache_dir: Option<PathBuf>,
+    sink: ModuleEventSink,
+    logger: ModuleLogger,
+    shutdown: Arc<AtomicBool>,
+}
+
 impl IconPipeline {
-    pub fn new(sink: ModuleEventSink) -> Self {
+    pub fn new(sink: ModuleEventSink, cache_dir: Option<PathBuf>, logger: ModuleLogger) -> Self {
         let cache = Arc::new(Mutex::new(HashMap::new()));
         let packaged_index = Arc::new(Mutex::new(HashMap::new()));
+        let packaged_versions = Arc::new(Mutex::new(HashMap::new()));
         let (tx, rx) = channel::<Request>();
         let shutdown = Arc::new(AtomicBool::new(false));
         let worker = {
-            let cache = Arc::clone(&cache);
-            let packaged_index = Arc::clone(&packaged_index);
-            let shutdown = Arc::clone(&shutdown);
-            std::thread::spawn(move || worker_loop(rx, cache, packaged_index, sink, shutdown))
+            let ctx = WorkerCtx {
+                cache: Arc::clone(&cache),
+                packaged_index: Arc::clone(&packaged_index),
+                packaged_versions: Arc::clone(&packaged_versions),
+                cache_dir: cache_dir.clone(),
+                sink,
+                logger: logger.clone(),
+                shutdown: Arc::clone(&shutdown),
+            };
+            std::thread::spawn(move || worker_loop(rx, ctx))
         };
         Self {
             cache,
             packaged_index,
+            packaged_versions,
+            cache_dir,
+            logger,
             tx: Some(tx),
             shutdown,
             worker: Some(worker),
@@ -79,8 +116,62 @@ impl IconPipeline {
 
     /// 发现线程在发布 catalog 前调用(§134)。只在启动时写一次,
     /// 之后 worker 只读;锁在请求粒度上持有,无热路径竞争。
-    pub fn set_packaged_index(&self, index: HashMap<String, AppListEntry>) {
+    pub fn set_packaged_index(
+        &self,
+        index: HashMap<String, AppListEntry>,
+        versions: HashMap<String, u64>,
+    ) {
         *self.packaged_index.lock().unwrap() = index;
+        *self.packaged_versions.lock().unwrap() = versions;
+    }
+
+    /// §137:catalog 发布前预载磁盘缓存——首个查询即可见全部缓存
+    /// 图标,不再有占位蹦出。只插缺失键(防御:与 worker 在途的
+    /// Pending 不冲突);读失败的坏/旧文件删除(正常提取会重缓存),
+    /// 不在 catalog 的文件不碰(发现可能整批失败,误删更糟)。
+    /// 在发现线程上跑,几百枚小文件 + 每枚一次 stat,亚秒级。
+    pub fn preload_from_cache(&self, entries: &[AppEntry]) {
+        let Some(dir) = &self.cache_dir else {
+            return;
+        };
+        let started = std::time::Instant::now();
+        let mut hits = 0u32;
+        for e in entries {
+            let key = e.icon_key();
+            if self.cache.lock().unwrap().contains_key(key.as_ref()) {
+                continue;
+            }
+            let stamp = match &e.target {
+                LaunchTarget::Win32 { exe, .. } => Stamp::of_exe(exe),
+                LaunchTarget::Packaged { aumid } => self
+                    .packaged_versions
+                    .lock()
+                    .unwrap()
+                    .get(aumid.as_ref())
+                    .copied()
+                    .map(Stamp::Packaged),
+            };
+            // 拿不到指纹(元数据/版本缺失)的条目不缓存,现用现提。
+            let Some(stamp) = stamp else { continue };
+            match icon_cache::read(dir, &key, stamp) {
+                Some(icon) => {
+                    self.cache
+                        .lock()
+                        .unwrap()
+                        .insert(key.to_string(), Slot::Ready(Arc::new(icon)));
+                    hits += 1;
+                }
+                None => icon_cache::remove(dir, &key),
+            }
+        }
+        self.logger.log(
+            LogLevel::Info,
+            &format!(
+                "app icon cache preload: {hits}/{} hits in {:?}",
+                entries.len(),
+                started.elapsed()
+            ),
+        );
     }
 
     /// present() 热路径(< 1 ms,无 IO):命中返回缓存图标;
@@ -130,25 +221,58 @@ impl Drop for IconPipeline {
     }
 }
 
-fn worker_loop(
-    rx: Receiver<Request>,
-    cache: Arc<Mutex<HashMap<String, Slot>>>,
-    packaged_index: Arc<Mutex<HashMap<String, AppListEntry>>>,
-    sink: ModuleEventSink,
-    shutdown: Arc<AtomicBool>,
-) {
+#[cfg(test)]
+impl IconPipeline {
+    fn slot_is_ready(&self, key: &str) -> bool {
+        matches!(self.cache.lock().unwrap().get(key), Some(Slot::Ready(_)))
+    }
+
+    fn insert_pending_for_test(&self, key: &str) {
+        self.cache
+            .lock()
+            .unwrap()
+            .insert(key.to_string(), Slot::Pending(vec![ItemId(1)]));
+    }
+}
+
+fn worker_loop(rx: Receiver<Request>, ctx: WorkerCtx) {
     let _com = ComGuard::new();
     while let Ok(req) = rx.recv() {
-        if shutdown.load(Ordering::SeqCst) {
+        if ctx.shutdown.load(Ordering::SeqCst) {
             break;
         }
         let icon = match &req.source {
             OwnedSource::Exe(exe) => cue_util_win::icon::extract_file_icon(exe),
-            OwnedSource::Packaged(aumid) => packaged_logo(&packaged_index.lock().unwrap(), aumid),
+            OwnedSource::Packaged(aumid) => {
+                packaged_logo(&ctx.packaged_index.lock().unwrap(), aumid)
+            }
         };
+        // §137:提取成功即写穿磁盘缓存(重启后预载直接命中);
+        // 拿不到失效指纹的不缓存。写失败只记日志——缓存是优化,
+        // 不该影响在途展示。
+        if let (Some(dir), Some(icon)) = (&ctx.cache_dir, &icon) {
+            let stamp = match &req.source {
+                OwnedSource::Exe(exe) => Stamp::of_exe(exe),
+                OwnedSource::Packaged(aumid) => ctx
+                    .packaged_versions
+                    .lock()
+                    .unwrap()
+                    .get(aumid.as_str())
+                    .copied()
+                    .map(Stamp::Packaged),
+            };
+            if let Some(stamp) = stamp
+                && let Err(e) = icon_cache::write(dir, &req.key, stamp, icon)
+            {
+                ctx.logger.log(
+                    LogLevel::Warn,
+                    &format!("app icon cache write failed for {}: {e}", req.key),
+                );
+            }
+        }
         let mut ready = Vec::new();
         {
-            let mut cache = cache.lock().unwrap();
+            let mut cache = ctx.cache.lock().unwrap();
             match icon {
                 Some(icon) => {
                     // insert 返回旧槽:等待名单整单取出,广播失效。
@@ -165,7 +289,7 @@ fn worker_loop(
             }
         }
         if !ready.is_empty() {
-            sink.send(ModuleEvent::PresentationInvalidated { items: ready });
+            ctx.sink.send(ModuleEvent::PresentationInvalidated { items: ready });
         }
     }
 }
@@ -291,6 +415,7 @@ fn fill_bbox(rgba: &mut Vec<u8>, size: u32) {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use crate::{app_paths, catalog, packaged, start_menu};
     use cue_protocol::{LogLevel, ModuleLog};
     use std::path::Path;
@@ -298,6 +423,76 @@ mod tests {
     struct TestLog;
     impl ModuleLog for TestLog {
         fn log(&self, _level: LogLevel, _message: &str) {}
+    }
+
+    struct TestSink;
+    impl cue_protocol::ModuleEventSend for TestSink {
+        fn send(&self, _event: cue_protocol::ModuleEvent) {}
+    }
+
+    /// §137 预载:指纹一致的缓存文件直接 Ready;已在途的 Pending
+    /// 槽位不被覆盖(失效广播留给 worker);stamp 不符的旧文件删除,
+    /// 条目留待正常提取重缓存。
+    #[test]
+    fn preload_from_disk_cache() {
+        let dir = std::env::temp_dir().join(format!("cue-app-preload-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let pipeline = IconPipeline::new(
+            std::sync::Arc::new(TestSink),
+            Some(dir.clone()),
+            std::sync::Arc::new(TestLog),
+        );
+        let icon = IconImage::new(std::sync::Arc::from(vec![7u8; 96 * 96 * 4]), 96, 96);
+        let mk = |name: &str, content: &[u8]| {
+            let exe = dir.join(name);
+            std::fs::write(&exe, content).unwrap();
+            catalog::AppEntry::new(
+                name,
+                catalog::LaunchTarget::Win32 {
+                    exe,
+                    args: "".into(),
+                    working_dir: None,
+                },
+            )
+        };
+        let stamp_of = |e: &catalog::AppEntry| match &e.target {
+            catalog::LaunchTarget::Win32 { exe, .. } => Stamp::of_exe(exe).unwrap(),
+            _ => unreachable!(),
+        };
+
+        // 1. 命中:缓存文件与 exe 指纹一致 → Ready
+        let a = mk("a.exe", b"x");
+        let key_a = a.icon_key().to_string();
+        icon_cache::write(&dir, &key_a, stamp_of(&a), &icon).unwrap();
+        pipeline.preload_from_cache(&[a]);
+        assert!(pipeline.slot_is_ready(&key_a));
+
+        // 2. 在途 Pending 不被预载覆盖
+        let b = mk("b.exe", b"yy");
+        let key_b = b.icon_key().to_string();
+        pipeline.insert_pending_for_test(&key_b);
+        icon_cache::write(&dir, &key_b, stamp_of(&b), &icon).unwrap();
+        pipeline.preload_from_cache(&[b]);
+        assert!(!pipeline.slot_is_ready(&key_b));
+
+        // 3. stamp 漂移(exe 更新,size 变)→ 不命中,旧文件被删
+        let c = mk("c.exe", b"zzz");
+        let key_c = c.icon_key().to_string();
+        icon_cache::write(&dir, &key_c, stamp_of(&c), &icon).unwrap();
+        std::fs::write(
+            match &c.target {
+                catalog::LaunchTarget::Win32 { exe, .. } => exe,
+                _ => unreachable!(),
+            },
+            b"zzzz-longer",
+        )
+        .unwrap();
+        pipeline.preload_from_cache(std::slice::from_ref(&c));
+        assert!(!pipeline.slot_is_ready(&key_c));
+        assert!(!icon_cache::cache_path(&dir, &key_c).exists());
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// 离线审计(诊断工具,非常规测试):对全量 catalog 跑提取管线,

@@ -77,7 +77,8 @@ fn normalize_args(args: &str) -> String {
 }
 
 /// FNV-1a 64。不需要加密强度,需要稳定(同输入同输出)。
-fn fnv1a(s: &str) -> u64 {
+/// item_id 与图标缓存文件名(§137)共用。
+pub(crate) fn fnv1a(s: &str) -> u64 {
     let mut h = 0xcbf29ce484222325u64;
     for b in s.as_bytes() {
         h ^= *b as u64;
