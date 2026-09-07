@@ -1,4 +1,4 @@
-# 架构护栏(§70–73、§110–111):依赖方向 + 平台纯净度,纯 grep。
+﻿# 架构护栏(§70–73、§110–111):依赖方向 + 平台纯净度,纯 grep。
 # 规格声称"grep-checkable"——本脚本就是兑现;任何一条违规退出码非零。
 # 用法:powershell -File scripts/check-arch.ps1(建议 pre-push 跑一次;仓库尚无 CI)
 $ErrorActionPreference = "Stop"

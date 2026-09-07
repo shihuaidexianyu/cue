@@ -1,4 +1,4 @@
-# SVG → 多尺寸 ICO(assets/sakana.ico)。
+﻿# SVG → 多尺寸 ICO(assets/sakana.ico)。
 # 无第三方依赖:Edge headless 按每个目标尺寸直接矢量重栅格化
 # (比从 512 降采样锐利),System.Drawing 仅作兜底;ICO 容器手卷
 # (PNG-in-ICO,Vista+ 全尺寸合法)。
