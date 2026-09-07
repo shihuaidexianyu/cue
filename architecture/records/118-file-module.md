@@ -2,6 +2,10 @@
 
 # 118. FileModule 实现记录(Everything,V1.x)
 
+> **已废止(2026-09,由 §138 取代):** Everything 依赖整体移除,
+> FileModule 改为自建索引 + ReadDirectoryChangesW 增量 watcher。
+> 本文保留作历史记录(线程模型与 IPC 对齐细节仍可参考)。
+
 文件搜索。§31–33 的实现落点;设计裁剪与关键决策记录于此。
 
 ## 范围与触发词

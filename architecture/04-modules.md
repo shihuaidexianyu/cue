@@ -175,6 +175,10 @@ normalized arguments
 > Everything 1.4——Flow Launcher 同款策略。不自建索引(§76 不变)、
 > 不随包分发 Everything、不链 Everything.dll;直连 WM_COPYDATA IPC。
 > Everything 未运行 → 模块报 Unavailable,行内错误文案,优雅降级。**
+>
+> **v0.2 再修订(2026-09):Everything 依赖整体移除,改为模块自建
+> 索引 + 增量 watcher(用户态 API,覆盖 %USERPROFILE% 与已知文件夹)。
+> 选型与执行记录见 §138;§118 随之废止,§32/§33 不变。**
 
 FileModule 内部负责：
 

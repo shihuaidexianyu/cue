@@ -1,36 +1,35 @@
 //! cue-module-file —— FileModule。
 //!
 //! `/` 触发的文件搜索:触发词是标点,verbatim 匹配(词边界只约束
-//! 字母触发);`/` 之后的输入原样作为 Everything 搜索串——查询语法
-//! (子串、`ext:`、路径过滤等)归模块与 Everything,Core 不解析。
-//! 数据源是本机已安装运行的 Everything 1.4(依赖第三方服务,
-//! 不自建索引、不链 Everything.dll),IPC 走 WM_COPYDATA(专用
-//! 线程 + latest-wins 槽)。文件与文件夹同一模态;FileEntry
-//! 只在模块内部,Core 只见 ItemId。
+//! 字母触发);`/` 之后的输入原样作为搜索串——查询语义(子串 AND、
+//! `ext:` 子集、路径过滤)归模块,Core 不解析。数据源是**自建文件
+//! 索引**(§138:限定范围遍历 + ReadDirectoryChangesW 增量维护,
+//! 无第三方依赖、无管理员特权;取代 §118 的 Everything IPC)。
+//! 文件与文件夹同一模态;FileEntry 只在模块内部,Core 只见 ItemId。
 //!
 //! 空查询返回空:UsageRead 只能按键查、不能枚举,给不出 Top Files,
-//! 不显示任何推荐内容。排序保持 Everything 的
-//! NAME_ASCENDING(SDK 保证该序无性能损失),V1 不做 usage 重排。
+//! 不显示任何推荐内容。排序 = 文件名命中优先,平手名字升序;
+//! V1 不做 usage 重排。
 //!
 //! 噪声目录默认排除:工作文件几乎从不在系统目录、AppData、包缓存、
-//! 编辑器扩展目录里,但它们会以"工具内脏"的形式淹没结果。排除不做
-//! 结果后过滤,而是把否定子句拼进发给 Everything 的查询串(`!"路径
-//! 片段"`),让这些路径根本不占结果位。名单是模块数据文件
-//! `modules/file/data/excluded-paths.toml`——给人编辑的配置一律
-//! TOML(literal string 数组,反斜杠免转义;默认口径参照 VS Code
-//! search.exclude 与 Windows Search 默认索引范围);设置页有一行
-//! 指向它的 Path 设置,回车即用系统默认编辑器打开,保存后下一次
-//! 查询生效(mtime 指纹重读,无 watcher;语法错误保留旧子句——
+//! 编辑器扩展目录里,但它们会以"工具内脏"的形式淹没结果。名单是
+//! 模块数据文件 `modules/file/data/excluded-paths.toml`——给人编辑
+//! 的配置一律 TOML(literal string 数组,反斜杠免转义);设置页有
+//! 一行指向它的 Path 设置,回车即用系统默认编辑器打开,保存后下
+//! 一次查询生效(mtime 指纹重读,无 watcher;语法错误保留旧名单——
 //! 编辑器里的半保存状态不该打烂搜索)。总开关是
-//! `module.file.exclude_noise_paths`。查询含 `\`(用户在写显式
-//! 路径)时原样发送、不加排除——刻意找系统文件时不会被拦。
+//! `module.file.exclude_noise_paths`。名单双段生效(§138):爬取时
+//! 对命中片段的目录整棵剪枝(不进索引),查询时对文件级片段再
+//! 过滤;查询含 `\`(显式路径)时查询级过滤不生效——逃生口,但
+//! 够不到被剪枝的子树。名单/开关变更触发索引后台全量重爬。
 
-mod everything;
 mod icon;
+mod index;
 
 use cue_protocol::*;
-use everything::{EverythingBackend, FileEntry};
+use index::{FileEntry, FileIndex};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::SystemTime;
 
@@ -43,6 +42,9 @@ pub const KEY_EXCLUDE_NOISE: &str = "module.file.exclude_noise_paths";
 /// 名单文件的 Path 设置(设置 UI 里回车打开;值只是指针,
 /// 名单内容归模块数据文件,不是设置值)。
 pub const KEY_EXCLUDE_FILE: &str = "module.file.excluded_paths_file";
+/// 额外索引根目录(§138):分号分隔;默认已覆盖 %USERPROFILE%
+/// 与桌面/文档/下载。改动重启后生效(索引只在进程启动时建)。
+const KEY_INDEX_DIRS: &str = "module.file.index_dirs";
 /// 名单文件名(模块 data 目录下)。
 const EXCLUDE_FILE_NAME: &str = "excluded-paths.toml";
 
@@ -187,57 +189,47 @@ fn parse_fragments(content: &str) -> Result<Vec<String>, String> {
         .collect()
 }
 
-/// 片段 → Everything 否定子句:含反斜杠的词按全路径子串匹配,
-/// `!"…"` 即"路径不含该片段"。带引号容忍空格;大小写不敏感。
-/// 含 `"` 的片段直接丢弃:Everything 查询语法没有引号转义,
-/// 放行会拆散引号配对、打烂整条子句(与空片段同按"不适用"处理)。
-fn clause_from_fragments(frags: &[String]) -> String {
+/// 片段归一化:trim、去空、小写——索引匹配是大小写不敏感的
+/// 全路径子串(§138;不再是 Everything 查询语法,引号无需特判)。
+fn normalize_fragments(frags: &[String]) -> Vec<String> {
     frags
         .iter()
         .map(|f| f.trim())
-        .filter(|f| !f.is_empty() && !f.contains('"'))
-        .map(|f| format!("!\"{f}\""))
-        .collect::<Vec<_>>()
-        .join(" ")
+        .filter(|f| !f.is_empty())
+        .map(|f| f.to_lowercase())
+        .collect()
 }
 
-/// 名单文件内容 → Everything 否定子句。
-fn build_clause(content: &str) -> Result<String, String> {
-    Ok(clause_from_fragments(&parse_fragments(content)?))
-}
-
-/// 构造发给 Everything 的搜索串。查询含 `\` 视为显式路径输入,
-/// 原样发送(逃生口:刻意找系统文件时不被默认排除拦截)。
-fn effective_search(query: &str, exclude_noise: bool, clause: &str) -> String {
-    if !exclude_noise || clause.is_empty() || query.contains('\\') {
-        return query.to_string();
-    }
-    format!("{query} {clause}")
+/// 名单文件内容 → 归一化片段数组。
+fn build_fragments(content: &str) -> Result<Vec<String>, String> {
+    parse_fragments(content).map(|f| normalize_fragments(&f))
 }
 
 /// 名单的共享视图:query future 在后台线程做 mtime 指纹检查,
-/// 变了才重读重编译(UI 线程零 IO,查询创建预算不破)。
-struct ExcludeState {
-    /// 名单文件路径(load 后才有;测试里 None = 固定内置子句)。
+/// 变了才重读(UI 线程零 IO,查询创建预算不破)。
+pub(crate) struct ExcludeState {
+    /// 名单文件路径(load 后才有;测试里 None = 固定内置名单)。
     path: Option<PathBuf>,
     /// 上次读到的文件修改时间(含解析失败的版本——见过即记,
     /// 免得每次查询都重读重报)。
     mtime: Option<SystemTime>,
-    /// 当前编译出的否定子句。
-    clause: String,
+    /// 当前生效的归一化片段(小写)。
+    fragments: Vec<String>,
     /// 解析失败告警(load 后才有)。
     logger: Option<ModuleLogger>,
 }
 
-/// 后台线程侧:mtime 变了才重读文件、重编译子句;stat/读失败
-/// 或 TOML 语法错误保留旧子句(编辑器里的半保存状态不该打烂
-/// 搜索)。两阶段:先快照路径与已知 mtime,IO 在锁外做,提交时
-/// 再锁——并发查询重复读同一版本无害(同内容幂等,后到覆盖)。
-fn refreshed_clause(state: &Mutex<ExcludeState>) -> String {
+/// 后台线程侧:mtime 变了才重读文件;stat/读失败或 TOML 语法错误
+/// 保留旧名单(编辑器里的半保存状态不该打烂搜索)。两阶段:先快照
+/// 路径与已知 mtime,IO 在锁外做,提交时再锁——并发查询重复读同
+/// 一版本无害(同内容幂等,后到覆盖)。返回 (片段, 本次是否变更)——
+/// 变更时调用方应触发索引全量重爬(§138:名单的爬取剪枝口径变了)。
+pub(crate) fn refreshed_fragments(state: &Mutex<ExcludeState>) -> (Vec<String>, bool) {
     let (path, known_mtime) = {
         let g = state.lock().unwrap();
         (g.path.clone(), g.mtime)
     };
+    let mut changed = false;
     if let Some(p) = path {
         let mtime = std::fs::metadata(&p).and_then(|m| m.modified()).ok();
         if mtime.is_some()
@@ -245,8 +237,8 @@ fn refreshed_clause(state: &Mutex<ExcludeState>) -> String {
             && let Ok(content) = std::fs::read_to_string(&p)
         {
             let mut g = state.lock().unwrap();
-            match build_clause(&content) {
-                Ok(clause) => g.clause = clause,
+            match build_fragments(&content) {
+                Ok(fragments) => g.fragments = fragments,
                 Err(e) => {
                     if let Some(logger) = &g.logger {
                         logger.log(
@@ -257,16 +249,18 @@ fn refreshed_clause(state: &Mutex<ExcludeState>) -> String {
                 }
             }
             g.mtime = mtime;
+            changed = true;
         }
     }
-    state.lock().unwrap().clause.clone()
+    (state.lock().unwrap().fragments.clone(), changed)
 }
 
 /// FileModule,trigger `/`。
 pub struct FileModule {
     descriptor: ModuleDescriptor,
-    /// load 时启动(专用 IPC 线程);未 load 时 None → query 报 Unavailable。
-    backend: Option<EverythingBackend>,
+    /// load 时启动(索引线程 + watcher 线程);未 load 时 None →
+    /// query 报 Unavailable。
+    index: Option<FileIndex>,
     /// 文件夹 / 通用文件图标(worker 启动时最先提取;同一 Arc
     /// 复用,UI 按 rgba 指针缓存纹理)。具体文件的真实图标走
     /// worker 的按路径/扩展名缓存。
@@ -276,8 +270,8 @@ pub struct FileModule {
     /// 最近一次 query 返回的 item id:图标晚到时据此发
     /// PresentationInvalidated,让 Core 重画可见行。
     last_items: Arc<Mutex<Vec<ItemId>>>,
-    /// 噪声目录排除开关的当前值(load 时从设置快照读,try_apply 更新)。
-    exclude_noise: bool,
+    /// 噪声目录排除开关(设置即时生效;索引线程与查询共享)。
+    exclude_noise: Arc<AtomicBool>,
     /// 排除名单(模块数据文件 + mtime 指纹;future 后台重读)。
     exclude: Arc<Mutex<ExcludeState>>,
 }
@@ -290,15 +284,15 @@ impl FileModule {
                 name: "文件",
                 version: "0.1.0",
             },
-            backend: None,
+            index: None,
             icons: Arc::new(OnceLock::new()),
             icon_worker: None,
             last_items: Arc::new(Mutex::new(Vec::new())),
-            exclude_noise: true,
+            exclude_noise: Arc::new(AtomicBool::new(true)),
             exclude: Arc::new(Mutex::new(ExcludeState {
                 path: None,
                 mtime: None,
-                clause: clause_from_fragments(&default_fragments()),
+                fragments: normalize_fragments(&default_fragments()),
                 logger: None,
             })),
         }
@@ -353,16 +347,17 @@ impl Module for FileModule {
         &self.descriptor
     }
 
-    /// load 廉价:起两条线程——Everything IPC 线程(窗口与消息泵都在
-    /// 线程内)与图标 worker(先提两枚通用图标,随后串行服务按文件
-    /// 真实图标的提取队列)。名单文件播种 + 存量升级判定 + 首读是
-    /// 几次小文件 IO(缺失才写;内容恰为旧默认才重写),微秒级。
+    /// load 廉价:起三拨线程——索引线程(首爬在后台,查询经就绪
+    /// 门等待)与每根一个 watcher、图标 worker(先提两枚通用图标,
+    /// 随后串行服务按文件真实图标的提取队列)。名单文件播种 + 存量
+    /// 升级判定 + 首读是几次小文件 IO(缺失才写;内容恰为旧默认才
+    /// 重写),微秒级。
     fn load(&mut self, ctx: ModuleContext) -> Result<(), ModuleError> {
         if let Some(SettingValue::Bool(v)) = ctx.settings.get("exclude_noise_paths") {
-            self.exclude_noise = *v;
+            self.exclude_noise.store(*v, Ordering::Relaxed);
         }
         // 名单文件:缺失则播种默认名单;读取/解析失败沿用 new()
-        // 里的内置默认子句——排除是体验优化,不该阻塞 load。
+        // 里的内置默认名单——排除是体验优化,不该阻塞 load。
         let file = ctx.storage.data.join(EXCLUDE_FILE_NAME);
         if !file.exists()
             && let Err(e) = seed_exclude_file(&file)
@@ -383,10 +378,10 @@ impl Module for FileModule {
             let mut g = self.exclude.lock().unwrap();
             match std::fs::read_to_string(&file)
                 .map_err(|e| e.to_string())
-                .and_then(|c| build_clause(&c))
+                .and_then(|c| build_fragments(&c))
             {
-                Ok(clause) => {
-                    g.clause = clause;
+                Ok(fragments) => {
+                    g.fragments = fragments;
                     g.mtime = std::fs::metadata(&file).and_then(|m| m.modified()).ok();
                 }
                 Err(e) => ctx.logger.log(
@@ -397,7 +392,23 @@ impl Module for FileModule {
             g.path = Some(file);
             g.logger = Some(ctx.logger.clone());
         }
-        self.backend = Some(EverythingBackend::start(ctx.logger.clone()));
+        // §138:默认根(%USERPROFILE% + 桌面/文档/下载)∪ 用户声明
+        // 的额外根;去重去嵌套由 index 内部完成。
+        let mut roots = index::default_roots();
+        if let Some(SettingValue::String(s)) = ctx.settings.get("index_dirs") {
+            roots.extend(
+                s.split(';')
+                    .map(|p| p.trim())
+                    .filter(|p| !p.is_empty())
+                    .map(PathBuf::from),
+            );
+        }
+        self.index = Some(FileIndex::start(
+            index::dedup_roots(roots),
+            Arc::clone(&self.exclude),
+            Arc::clone(&self.exclude_noise),
+            ctx.logger.clone(),
+        ));
         self.icon_worker = Some(icon::IconWorker::new(
             Arc::clone(&self.icons),
             Arc::clone(&self.last_items),
@@ -407,7 +418,7 @@ impl Module for FileModule {
     }
 
     fn unload(&mut self) {
-        // IPC 线程随进程生命(同 AppModule catalog 线程);
+        // 索引/watcher 线程随进程生命(同 AppModule catalog 线程);
         // icons OnceLock 不重建:幂等无害。
     }
 
@@ -433,16 +444,36 @@ impl Module for FileModule {
                 default: SettingValue::Path(default_exclude_file()),
                 apply_policy: ApplyPolicy::Immediate,
             },
+            SettingSpec {
+                key: SettingKey(KEY_INDEX_DIRS.into()),
+                label: "文件搜索:额外索引目录".into(),
+                description: Some(
+                    "分号分隔的目录列表,加入文件索引;默认已覆盖用户目录与桌面/文档/下载;改动重启 CUE 后生效"
+                        .into(),
+                ),
+                kind: SettingKind::String,
+                default: SettingValue::String(String::new()),
+                apply_policy: ApplyPolicy::RestartApplication,
+            },
         ]
     }
 
     fn try_apply_settings(&mut self, changes: SettingsChangeSet) -> Result<(), ModuleError> {
         for (key, value) in &changes.changes {
             match (key.0.as_ref(), value) {
-                (KEY_EXCLUDE_NOISE, SettingValue::Bool(v)) => self.exclude_noise = *v,
+                (KEY_EXCLUDE_NOISE, SettingValue::Bool(v)) => {
+                    self.exclude_noise.store(*v, Ordering::Relaxed);
+                    // 剪枝口径变了:后台全量重爬让索引跟上(查询级
+                    // 过滤即时生效,索引级靠这次重爬)。
+                    if let Some(index) = &self.index {
+                        index.request_rescan();
+                    }
+                }
                 (KEY_EXCLUDE_NOISE, _) => {
                     return Err(ModuleError::InvalidState(format!("{} 类型不符", key.0)));
                 }
+                // index_dirs 是 RestartApplication 策略:Core 直接提交
+                // 并标记待重启,不经模块 try-apply——这里无事可做。
                 // Path 行的值只是文件指针,打开动作不产生变更;
                 // 名单内容模块自己从文件读,不经设置事务。
                 _ => {}
@@ -460,38 +491,39 @@ impl LauncherModule for FileModule {
         }
     }
 
-    /// 创建不触碰 IO——只往 latest-wins 槽投一个请求,future 内
-    /// await 应答。空查询直接返回空(见模块头注释)。名单的 mtime
-    /// 指纹检查也在 future 里做(后台线程,一次 stat 亚毫秒)。
+    /// 创建不触碰 IO;首爬完成前 future 在就绪门内挂起(不阻塞
+    /// UI 线程),过期完成由 Core 的 ticket 判定丢弃。空查询直接
+    /// 返回空(见模块头注释)。名单的 mtime 指纹检查在 future 里做
+    /// (后台线程,一次 stat 亚毫秒);名单变更时触发索引后台重爬。
     fn query(&mut self, ctx: QueryContext) -> QueryFuture {
-        // 标点触发的剩余输入不去空白;Everything 语义上前导
-        // 空白无意义,trim 掉。
+        // 标点触发的剩余输入不去空白;前导空白无意义,trim 掉。
         let search = ctx.query.trim().to_string();
         if search.is_empty() {
             return Box::pin(async { Ok(QueryResponse { items: Vec::new() }) });
         }
-        let exclude_noise = self.exclude_noise;
-        let exclude = Arc::clone(&self.exclude);
-        let Some(backend) = self.backend.clone() else {
+        let Some(index) = self.index.clone() else {
             return Box::pin(async {
                 Err(ModuleError::Unavailable("file module not loaded".into()))
             });
         };
+        let exclude = Arc::clone(&self.exclude);
+        let exclude_noise = Arc::clone(&self.exclude_noise);
         let limit = ctx.result_limit;
         let last_items = Arc::clone(&self.last_items);
         Box::pin(async move {
-            let clause = refreshed_clause(&exclude);
-            let search = effective_search(&search, exclude_noise, &clause);
-            let entries = backend
-                .query(search, limit as u32)
-                .await
-                // oneshot Canceled = 被更新的输入顶掉(latest-wins);
-                // Core 反正会按 ticket 丢弃这个过期完成。
-                .map_err(|_| ModuleError::QueryFailed("IPC 请求被取代".into()))??;
-            let items: Vec<ModuleItem> = entries
-                .into_iter()
-                .map(|e| ModuleItem::new(ItemId(e.item_id()), e))
-                .collect();
+            let snapshot = index.wait_snapshot().await;
+            let (fragments, changed) = refreshed_fragments(&exclude);
+            if changed {
+                // 名单变了:查询级过滤立即用新名单,索引级剪枝
+                // 由这次重爬跟上。
+                index.request_rescan();
+            }
+            let noise = exclude_noise.load(Ordering::Relaxed);
+            let items: Vec<ModuleItem> =
+                index::search_entries(&snapshot, &search, noise, &fragments, limit)
+                    .into_iter()
+                    .map(|e| ModuleItem::new(ItemId(e.item_id()), e))
+                    .collect();
             *last_items.lock().unwrap() = items.iter().map(|i| i.id()).collect();
             Ok(QueryResponse { items })
         })
@@ -594,7 +626,7 @@ mod tests {
     use super::*;
 
     fn entry(path: &str, is_dir: bool, size: Option<u64>) -> FileEntry {
-        everything::test_entry(path, is_dir, size)
+        index::test_entry(path, is_dir, size)
     }
 
     #[test]
@@ -676,11 +708,11 @@ mod tests {
     }
 
     /// `/ cue` 这种带前导空白的剩余输入(标点触发不去空白),
-    /// 模块内 trim——Everything 语义上前导空白无意义。
+    /// 模块内 trim。
     #[test]
     fn query_trims_whitespace() {
         let mut m = FileModule::new();
-        // trim 后为空 → 走空查询路径(不需要 backend)
+        // trim 后为空 → 走空查询路径(不需要索引)
         let r = futures::executor::block_on(m.query(QueryContext {
             query: "  ".into(),
             result_limit: 8,
@@ -689,71 +721,46 @@ mod tests {
         assert!(r.items.is_empty());
     }
 
-    /// 默认排除噪声目录:普通查询拼上否定子句;关掉开关、空名单、
-    /// 或查询含 `\`(显式路径)时原样发送。
-    #[test]
-    fn effective_search_excludes_noise_by_default() {
-        let clause = clause_from_fragments(&default_fragments());
-        let noisy = effective_search("ds", true, &clause);
-        assert!(noisy.starts_with("ds "));
-        for frag in [
-            r#"!"C:\Windows\""#,
-            r#"!"C:\Program Files\""#,
-            r#"!"C:\Program Files (x86)\""#,
-            r#"!"\$Recycle.Bin\""#,
-            r#"!"\node_modules\""#,
-            r#"!"\.git\""#,
-            r#"\AppData\""#,
-            r#"\.vscode\""#,
-            r#"\.cargo\""#,
-        ] {
-            assert!(noisy.contains(frag), "missing {frag} in {noisy}");
-        }
-        assert_eq!(effective_search("ds", false, &clause), "ds");
-        assert_eq!(effective_search("ds", true, ""), "ds");
-        assert_eq!(
-            effective_search(r"C:\Windows\explorer", true, &clause),
-            r"C:\Windows\explorer"
-        );
-        // Everything 查询函数(如 ext:)不含反斜杠,仍走默认排除。
-        assert!(effective_search("ext:pdf report", true, &clause).contains(r#"!"C:\Windows\""#));
-    }
+    // 排除语义(默认生效 / 开关关闭 / `\` 逃生口 / ext: 子集 /
+    // 排序)的覆盖在 index::tests(search_entries 纯函数)。
+    // 这里保留名单文件链路的测试。
 
     /// TOML 解析:literal string 反斜杠逐字、注释与空行自由、
     /// 无 excluded 键 = 空名单;语法错误与非字符串元素报 Err。
+    /// 归一化:trim、去空、小写。
     #[test]
-    fn build_clause_parses_toml_list() {
-        assert_eq!(build_clause("").unwrap(), "");
-        assert_eq!(build_clause("# 只有注释\n").unwrap(), "");
+    fn build_fragments_parses_toml_list() {
+        assert!(build_fragments("").unwrap().is_empty());
+        assert!(build_fragments("# 只有注释\n").unwrap().is_empty());
         assert_eq!(
-            build_clause(
-                "# 系统目录\nexcluded = [\n  'C:\\Windows\\',\n  '\\node_modules\\', # 依赖\n]\n"
+            build_fragments(
+                "# 系统目录\nexcluded = [\n  'C:\\Windows\\',\n  '\\Node_Modules\\', # 依赖\n]\n"
             )
             .unwrap(),
-            r#"!"C:\Windows\" !"\node_modules\""#
+            vec![r"c:\windows\".to_string(), r"\node_modules\".to_string()]
         );
         // 单行数组 + 基本字符串(双引号,反斜杠需转义)也能解析。
         assert_eq!(
-            build_clause("excluded = [\"C:\\\\Windows\\\\\"]").unwrap(),
-            r#"!"C:\Windows\""#
+            build_fragments("excluded = [\"C:\\\\Windows\\\\\"]").unwrap(),
+            vec![r"c:\windows\".to_string()]
         );
-        assert!(build_clause("excluded = ['unterminated").is_err());
-        assert!(build_clause("excluded = [1]").is_err());
+        assert!(build_fragments("excluded = ['unterminated").is_err());
+        assert!(build_fragments("excluded = [1]").is_err());
     }
 
-    /// 播种的文件带注释头与默认片段,且能编译出子句。
+    /// 播种的文件带注释头与默认片段,且能解析归一化(小写)。
     #[test]
-    fn seed_file_roundtrips_into_clause() {
+    fn seed_file_roundtrips_into_fragments() {
         let dir = std::env::temp_dir().join(format!("cue-file-seed-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join(EXCLUDE_FILE_NAME);
         seed_exclude_file(&file).unwrap();
         let content = std::fs::read_to_string(&file).unwrap();
         assert!(content.starts_with("# CUE"));
-        let clause = build_clause(&content).expect("seed parses");
-        assert!(clause.contains(r#"!"\node_modules\""#));
-        assert!(clause.contains(r#"\AppData\""#));
-        assert!(clause.contains(r#"!"C:\ProgramData\""#));
+        let frags = build_fragments(&content).expect("seed parses");
+        assert!(frags.contains(&r"\node_modules\".to_string()));
+        assert!(frags.contains(&r"\appdata\".to_string()));
+        assert!(frags.contains(&r"c:\programdata\".to_string()));
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -790,9 +797,10 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// mtime 指纹:变了才重读重编译;文件消失/读取失败保留旧子句。
+    /// mtime 指纹:变了才重读;文件消失/读取失败保留旧名单。
+    /// 返回的 changed 标记驱动索引重爬(§138)。
     #[test]
-    fn refreshed_clause_follows_mtime() {
+    fn refreshed_fragments_follow_mtime() {
         let dir = std::env::temp_dir().join(format!("cue-file-mtime-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("list.toml");
@@ -801,11 +809,16 @@ mod tests {
         let state = Mutex::new(ExcludeState {
             path: Some(file.clone()),
             mtime: None,
-            clause: "old".into(),
+            fragments: vec!["old".into()],
             logger: None,
         });
-        // mtime None ≠ Some → 首读
-        assert_eq!(refreshed_clause(&state), r#"!"\alpha\""#);
+        // mtime None ≠ Some → 首读,标记 changed
+        assert_eq!(
+            refreshed_fragments(&state),
+            (vec![r"\alpha\".to_string()], true)
+        );
+        // 同一版本再查:不重读,changed = false
+        assert!(!refreshed_fragments(&state).1);
         let first_mtime = state.lock().unwrap().mtime.unwrap();
 
         // 内容变了但 mtime 没变(写后强制回拨)→ 不重读
@@ -816,7 +829,7 @@ mod tests {
             .unwrap()
             .set_modified(first_mtime)
             .unwrap();
-        assert_eq!(refreshed_clause(&state), r#"!"\alpha\""#);
+        assert_eq!(refreshed_fragments(&state).0, vec![r"\alpha\".to_string()]);
 
         // 推进 mtime → 重读
         std::fs::File::options()
@@ -825,18 +838,21 @@ mod tests {
             .unwrap()
             .set_modified(first_mtime + std::time::Duration::from_secs(10))
             .unwrap();
-        assert_eq!(refreshed_clause(&state), r#"!"\beta\""#);
+        assert_eq!(
+            refreshed_fragments(&state),
+            (vec![r"\beta\".to_string()], true)
+        );
 
-        // 文件消失 → 保留旧子句,不 panic
+        // 文件消失 → 保留旧名单,不 panic
         std::fs::remove_file(&file).unwrap();
-        assert_eq!(refreshed_clause(&state), r#"!"\beta\""#);
+        assert_eq!(refreshed_fragments(&state).0, vec![r"\beta\".to_string()]);
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// 语法错误(编辑器半保存):保留旧子句,但 mtime 照记——
+    /// 语法错误(编辑器半保存):保留旧名单,但 mtime 照记——
     /// 同一坏版本不重复重读重报;改对之后正常生效。
     #[test]
-    fn malformed_toml_keeps_previous_clause() {
+    fn malformed_toml_keeps_previous_fragments() {
         let dir = std::env::temp_dir().join(format!("cue-file-bad-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("list.toml");
@@ -845,10 +861,10 @@ mod tests {
         let state = Mutex::new(ExcludeState {
             path: Some(file.clone()),
             mtime: None,
-            clause: "old".into(),
+            fragments: vec!["old".into()],
             logger: None,
         });
-        assert_eq!(refreshed_clause(&state), r#"!"\alpha\""#);
+        assert_eq!(refreshed_fragments(&state).0, vec![r"\alpha\".to_string()]);
         let bump = |secs: u64| {
             let t = state.lock().unwrap().mtime.unwrap() + std::time::Duration::from_secs(secs);
             std::fs::File::options()
@@ -859,13 +875,13 @@ mod tests {
                 .unwrap();
         };
 
-        // 写坏 + 推进 mtime → 子句不动,mtime 已记
+        // 写坏 + 推进 mtime → 名单不动,mtime 已记
         std::fs::write(&file, "excluded = ['oops\n").unwrap();
         bump(10);
-        assert_eq!(refreshed_clause(&state), r#"!"\alpha\""#);
+        assert_eq!(refreshed_fragments(&state).0, vec![r"\alpha\".to_string()]);
         let seen = state.lock().unwrap().mtime.unwrap();
 
-        // 同一坏版本再查:不重读(把文件改回 alpha 但回拨 mtime,子句不变)
+        // 同一坏版本再查:不重读(把文件改回 alpha 但回拨 mtime,名单不变)
         std::fs::write(&file, "excluded = ['\\alpha\\']\n").unwrap();
         std::fs::File::options()
             .write(true)
@@ -873,24 +889,25 @@ mod tests {
             .unwrap()
             .set_modified(seen)
             .unwrap();
-        assert_eq!(refreshed_clause(&state), r#"!"\alpha\""#);
+        assert_eq!(refreshed_fragments(&state).0, vec![r"\alpha\".to_string()]);
 
         // 改对 + 推进 → 生效
         std::fs::write(&file, "excluded = ['\\beta\\']\n").unwrap();
         bump(10);
-        assert_eq!(refreshed_clause(&state), r#"!"\beta\""#);
+        assert_eq!(refreshed_fragments(&state).0, vec![r"\beta\".to_string()]);
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// schema 声明 Bool 总开关 + Path 名单文件;try_apply 只管开关,
-    /// 类型错误返回 Err 而不是 panic。
+    /// schema 声明 Bool 总开关 + Path 名单文件 + String 额外索引
+    /// 目录(RestartApplication);try_apply 只管开关,类型错误返回
+    /// Err 而不是 panic。
     #[test]
     fn exclude_settings_roundtrip() {
         let mut m = FileModule::new();
-        assert!(m.exclude_noise);
-        assert!(!m.exclude.lock().unwrap().clause.is_empty());
+        assert!(m.exclude_noise.load(Ordering::Relaxed));
+        assert!(!m.exclude.lock().unwrap().fragments.is_empty());
         let schema = m.settings_schema();
-        assert_eq!(schema.len(), 2);
+        assert_eq!(schema.len(), 3);
         assert_eq!(schema[0].key.0.as_ref(), KEY_EXCLUDE_NOISE);
         assert_eq!(schema[0].kind, SettingKind::Bool);
         assert_eq!(schema[1].key.0.as_ref(), KEY_EXCLUDE_FILE);
@@ -898,6 +915,11 @@ mod tests {
         assert!(
             matches!(&schema[1].default, SettingValue::Path(p) if p.ends_with(EXCLUDE_FILE_NAME))
         );
+        assert_eq!(schema[2].key.0.as_ref(), KEY_INDEX_DIRS);
+        assert!(matches!(
+            schema[2].apply_policy,
+            ApplyPolicy::RestartApplication
+        ));
 
         let mut off = SettingsChangeSet::default();
         off.changes.push((
@@ -905,7 +927,7 @@ mod tests {
             SettingValue::Bool(false),
         ));
         m.try_apply_settings(off).expect("apply ok");
-        assert!(!m.exclude_noise);
+        assert!(!m.exclude_noise.load(Ordering::Relaxed));
 
         let mut bad = SettingsChangeSet::default();
         bad.changes.push((
@@ -913,6 +935,6 @@ mod tests {
             SettingValue::String("x".into()),
         ));
         assert!(m.try_apply_settings(bad).is_err());
-        assert!(!m.exclude_noise); // 失败不留半拉子状态
+        assert!(!m.exclude_noise.load(Ordering::Relaxed)); // 失败不留半拉子状态
     }
 }
