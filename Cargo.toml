@@ -1,32 +1,32 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/cue",
-    "crates/cue-core",
-    "crates/cue-module-app",
-    "crates/cue-module-bookmark",
-    "crates/cue-module-file",
-    "crates/cue-module-system",
-    "crates/cue-protocol",
-    "crates/cue-ui",
-    "crates/cue-util-win",
-    "crates/cue-windows",
+    "crates/sakana",
+    "crates/sakana-core",
+    "crates/sakana-module-app",
+    "crates/sakana-module-bookmark",
+    "crates/sakana-module-file",
+    "crates/sakana-module-system",
+    "crates/sakana-protocol",
+    "crates/sakana-ui",
+    "crates/sakana-util-win",
+    "crates/sakana-windows",
 ]
 
 [workspace.package]
 edition = "2024"
 
-# crate 统一 cue- 前缀。`cue` 为 binary(composition root)。
+# crate 统一 sakana- 前缀。`sakana` 为 binary(composition root)。
 [workspace.dependencies]
-cue-protocol = { path = "crates/cue-protocol" }
-cue-core = { path = "crates/cue-core" }
-cue-ui = { path = "crates/cue-ui" }
-cue-windows = { path = "crates/cue-windows" }
-cue-module-app = { path = "crates/cue-module-app" }
-cue-module-bookmark = { path = "crates/cue-module-bookmark" }
-cue-module-file = { path = "crates/cue-module-file" }
-cue-module-system = { path = "crates/cue-module-system" }
-cue-util-win = { path = "crates/cue-util-win" }
+sakana-protocol = { path = "crates/sakana-protocol" }
+sakana-core = { path = "crates/sakana-core" }
+sakana-ui = { path = "crates/sakana-ui" }
+sakana-windows = { path = "crates/sakana-windows" }
+sakana-module-app = { path = "crates/sakana-module-app" }
+sakana-module-bookmark = { path = "crates/sakana-module-bookmark" }
+sakana-module-file = { path = "crates/sakana-module-file" }
+sakana-module-system = { path = "crates/sakana-module-system" }
+sakana-util-win = { path = "crates/sakana-util-win" }
 
 futures = "0.3"
 gpui = { version = "0.2", default-features = false, features = ["windows-manifest"] }

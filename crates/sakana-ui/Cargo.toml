@@ -1,0 +1,13 @@
+[package]
+name = "sakana-ui"
+version = "0.1.0"
+edition.workspace = true
+
+[dependencies]
+sakana-protocol.workspace = true
+sakana-core.workspace = true
+futures.workspace = true
+gpui.workspace = true
+# 与 gpui 0.2.2 同源锁定(RenderImage::new 的 Frame/SmallVec 类型匹配)
+image = "0.25"
+smallvec = "1"

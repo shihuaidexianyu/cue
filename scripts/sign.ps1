@@ -1,4 +1,4 @@
-﻿# CUE 代码签名。
+# sakana 代码签名。
 # 用法:
 #   签名(dev 自签名):  powershell -ExecutionPolicy Bypass -File scripts\sign.ps1 -SelfSignedDev
 #   签名(已有证书):   ... sign.ps1 -Thumbprint <sha1>        (CurrentUser\My 或 LocalMachine\My)
@@ -8,7 +8,7 @@
 # SmartScreen 信誉需要 OV/EV 代码签名证书(公开分发再购买)。
 # 本脚本不会把任何证书导入受信任根存储(不改机器信任链)。
 param(
-    [string]$ExePath = "target\release\cue.exe",
+    [string]$ExePath = "target\release\sakana.exe",
     [string]$Thumbprint,
     [string]$PfxPath,
     [string]$PfxPassword,
@@ -28,7 +28,7 @@ if (-not $signtool) { throw "signtool.exe not found (install Windows SDK)" }
 $ExePath = Resolve-Path $ExePath
 
 if ($SelfSignedDev) {
-    $subject = "CN=CUE Dev (self-signed)"
+    $subject = "CN=sakana Dev (self-signed)"
     $cert = Get-ChildItem Cert:\CurrentUser\My -CodeSigningCert |
         Where-Object { $_.Subject -eq $subject } |
         Select-Object -First 1

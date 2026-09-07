@@ -1,0 +1,23 @@
+[package]
+name = "sakana"
+version = "0.5.0"
+edition.workspace = true
+
+[[bin]]
+name = "sakana"
+path = "src/main.rs"
+
+[dependencies]
+sakana-protocol.workspace = true
+sakana-core.workspace = true
+sakana-ui.workspace = true
+sakana-windows.workspace = true
+sakana-module-app.workspace = true
+sakana-module-bookmark.workspace = true
+sakana-module-file.workspace = true
+sakana-module-system.workspace = true
+futures.workspace = true
+gpui.workspace = true
+
+[build-dependencies]
+embed-resource = "3"

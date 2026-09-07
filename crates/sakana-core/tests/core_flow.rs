@@ -1,0 +1,1501 @@
+//! 可测试性:异步模型的注入点(Spawner、事件队列)同时是测试点。
+//! 这些测试不启动 GPUI、不创建窗口。
+
+use futures::channel::oneshot;
+use futures::future::BoxFuture;
+use sakana_core::*;
+use sakana_protocol::*;
+use std::collections::VecDeque;
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
+
+// ---------------------------------------------------------------------
+// 手动 Spawner(测试实现):不真正执行,只排队;
+// poll_all 把队列中的 future 各 poll 一次,未完成的保留——
+// 从而精确控制"哪些完成、哪些仍在途",且永远不会阻塞。
+// ---------------------------------------------------------------------
+
+struct ManualSpawner {
+    queue: Mutex<Vec<BoxFuture<'static, ()>>>,
+}
+
+impl ManualSpawner {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            queue: Mutex::new(Vec::new()),
+        })
+    }
+
+    fn poll_all(&self) {
+        let waker = futures::task::noop_waker();
+        let mut cx = std::task::Context::from_waker(&waker);
+        let mut queue = self.queue.lock().unwrap();
+        let mut remaining = Vec::new();
+        for mut f in queue.drain(..) {
+            if f.as_mut().poll(&mut cx).is_pending() {
+                remaining.push(f);
+            }
+        }
+        queue.extend(remaining);
+    }
+}
+
+impl TaskSpawner for ManualSpawner {
+    fn spawn(&self, fut: BoxFuture<'static, ()>) {
+        self.queue.lock().unwrap().push(fut);
+    }
+}
+
+// ---------------------------------------------------------------------
+// FakeModule:可预设 query 计划的演示模块。
+// ---------------------------------------------------------------------
+
+struct FakeItem {
+    title: String,
+}
+
+enum QueryPlan {
+    Ready(Vec<ModuleItem>),
+    Pending(oneshot::Receiver<QueryResult>),
+}
+
+struct FakeModule {
+    descriptor: ModuleDescriptor,
+    trigger: Option<String>,
+    is_default: bool,
+    plans: Mutex<VecDeque<QueryPlan>>,
+    pending_activations: Mutex<VecDeque<oneshot::Receiver<ModuleOutcome>>>,
+    sink: Arc<Mutex<Option<ModuleEventSink>>>,
+    /// 收到的查询原文(路由断言用)。
+    queries: Arc<Mutex<Vec<String>>>,
+    /// actions() 返回的动作集(默认仅 PRIMARY)。
+    menu_actions: Vec<ActionDescriptor>,
+    /// activate 收到的 ActionId(动作路由断言用)。
+    activated: Arc<Mutex<Vec<ActionId>>>,
+    /// 声明的设置规格(默认空)。
+    schema: SettingsSchema,
+    /// try_apply_settings 收到的改动(设置事务断言用)。
+    applied_settings: Arc<Mutex<Vec<(String, SettingValue)>>>,
+    /// load 时收到的设置快照(§128:Core 合成的触发词行不得混入)。
+    received_settings: Arc<Mutex<Option<ModuleSettings>>>,
+}
+
+impl FakeModule {
+    fn new(id: &'static str) -> Self {
+        Self {
+            descriptor: ModuleDescriptor {
+                id: ModuleId::from_static(id),
+                name: "Fake",
+                version: "0.1.0",
+            },
+            trigger: None,
+            is_default: true,
+            plans: Mutex::new(VecDeque::new()),
+            pending_activations: Mutex::new(VecDeque::new()),
+            sink: Arc::new(Mutex::new(None)),
+            queries: Arc::new(Mutex::new(Vec::new())),
+            menu_actions: vec![ActionDescriptor {
+                id: ActionId::PRIMARY,
+                label: "Open".into(),
+                shortcut: None,
+            }],
+            activated: Arc::new(Mutex::new(Vec::new())),
+            schema: Vec::new(),
+            applied_settings: Arc::new(Mutex::new(Vec::new())),
+            received_settings: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    fn with_trigger(id: &'static str, trigger: &str) -> Self {
+        Self {
+            trigger: Some(trigger.to_string()),
+            is_default: false,
+            ..Self::new(id)
+        }
+    }
+
+    fn queries_handle(&self) -> Arc<Mutex<Vec<String>>> {
+        Arc::clone(&self.queries)
+    }
+
+    fn push_ready(&self, titles: &[&str]) {
+        self.plans
+            .lock()
+            .unwrap()
+            .push_back(QueryPlan::Ready(make_items(titles)));
+    }
+
+    fn push_pending(&self) -> oneshot::Sender<QueryResult> {
+        let (tx, rx) = oneshot::channel();
+        self.plans.lock().unwrap().push_back(QueryPlan::Pending(rx));
+        tx
+    }
+
+    fn push_pending_activation(&self) -> oneshot::Sender<ModuleOutcome> {
+        let (tx, rx) = oneshot::channel();
+        self.pending_activations.lock().unwrap().push_back(rx);
+        tx
+    }
+
+    fn sink_handle(&self) -> Arc<Mutex<Option<ModuleEventSink>>> {
+        Arc::clone(&self.sink)
+    }
+
+    fn with_menu_actions(mut self, actions: Vec<ActionDescriptor>) -> Self {
+        self.menu_actions = actions;
+        self
+    }
+
+    fn activated_handle(&self) -> Arc<Mutex<Vec<ActionId>>> {
+        Arc::clone(&self.activated)
+    }
+
+    fn applied_settings_handle(&self) -> Arc<Mutex<Vec<(String, SettingValue)>>> {
+        Arc::clone(&self.applied_settings)
+    }
+
+    fn received_settings_handle(&self) -> Arc<Mutex<Option<ModuleSettings>>> {
+        Arc::clone(&self.received_settings)
+    }
+}
+
+fn make_items(titles: &[&str]) -> Vec<ModuleItem> {
+    titles
+        .iter()
+        .enumerate()
+        .map(|(i, t)| {
+            ModuleItem::new(
+                ItemId(i as u64),
+                FakeItem {
+                    title: t.to_string(),
+                },
+            )
+        })
+        .collect()
+}
+
+fn ready_items(titles: &[&str]) -> QueryResult {
+    Ok(QueryResponse {
+        items: make_items(titles),
+    })
+}
+
+impl Module for FakeModule {
+    fn descriptor(&self) -> &ModuleDescriptor {
+        &self.descriptor
+    }
+
+    fn load(&mut self, ctx: ModuleContext) -> Result<(), ModuleError> {
+        *self.sink.lock().unwrap() = Some(ctx.events);
+        *self.received_settings.lock().unwrap() = Some(ctx.settings);
+        Ok(())
+    }
+
+    fn unload(&mut self) {}
+
+    fn settings_schema(&self) -> SettingsSchema {
+        self.schema.clone()
+    }
+
+    fn try_apply_settings(&mut self, changes: SettingsChangeSet) -> Result<(), ModuleError> {
+        let mut applied = self.applied_settings.lock().unwrap();
+        for (key, value) in changes.changes {
+            applied.push((key.0.to_string(), value));
+        }
+        Ok(())
+    }
+}
+
+impl LauncherModule for FakeModule {
+    fn launcher_descriptor(&self) -> LauncherDescriptor {
+        LauncherDescriptor {
+            trigger: self.trigger.clone(),
+            is_default: self.is_default,
+        }
+    }
+
+    fn query(&mut self, ctx: QueryContext) -> QueryFuture {
+        self.queries.lock().unwrap().push(ctx.query.clone());
+        match self.plans.lock().unwrap().pop_front() {
+            Some(QueryPlan::Ready(items)) => Box::pin(async move { Ok(QueryResponse { items }) }),
+            Some(QueryPlan::Pending(rx)) => Box::pin(async move {
+                rx.await
+                    .unwrap_or_else(|_| Err(ModuleError::Internal("sender dropped".into())))
+            }),
+            None => Box::pin(async move { Ok(QueryResponse { items: vec![] }) }),
+        }
+    }
+
+    fn present(&self, item: &ModuleItem) -> ResultPresentation {
+        let fake = item
+            .downcast_ref::<FakeItem>()
+            .expect("FakeModule received a foreign ModuleItem");
+        ResultPresentation::new(fake.title.clone())
+    }
+
+    fn actions(&self, _item: &ModuleItem) -> Vec<ActionDescriptor> {
+        self.menu_actions.clone()
+    }
+
+    fn activate(&mut self, item: &ModuleItem, action: ActionId) -> ActivationFuture {
+        self.activated.lock().unwrap().push(action);
+        if let Some(rx) = self.pending_activations.lock().unwrap().pop_front() {
+            return Box::pin(async move {
+                rx.await.unwrap_or_else(|_| {
+                    ModuleOutcome::failed(ModuleError::Internal("dropped".into()))
+                })
+            });
+        }
+        let title = item
+            .downcast_ref::<FakeItem>()
+            .map(|f| f.title.clone())
+            .unwrap_or_default();
+        Box::pin(async move {
+            ModuleOutcome::success(
+                SessionDisposition::Close,
+                Some(UsageRecordRequest {
+                    item_key: title,
+                    action_id: action,
+                }),
+            )
+        })
+    }
+}
+
+// ---------------------------------------------------------------------
+// 测试工具
+// ---------------------------------------------------------------------
+
+fn test_config() -> CoreConfig {
+    CoreConfig {
+        storage_root: std::env::temp_dir().join(format!("sakana-core-test-{}", std::process::id())),
+        ..CoreConfig::default()
+    }
+}
+
+fn setup(module: FakeModule) -> (Core, Arc<ManualSpawner>) {
+    setup_many(vec![module])
+}
+
+fn setup_many(modules: Vec<FakeModule>) -> (Core, Arc<ManualSpawner>) {
+    let spawner = ManualSpawner::new();
+    let mut registry = ModuleRegistry::new();
+    for m in modules {
+        registry.register(Box::new(m)).unwrap();
+    }
+    let core = Core::new(test_config(), registry, spawner.clone()).unwrap();
+    (core, spawner)
+}
+
+fn drain(core: &mut Core, rx: &mut futures::channel::mpsc::UnboundedReceiver<CoreEvent>) {
+    while let Ok(ev) = rx.try_recv() {
+        core.handle_event(ev);
+    }
+}
+
+fn results(core: &Core) -> usize {
+    core.session().map(|s| s.results.len()).unwrap_or(0)
+}
+
+fn selected(core: &Core) -> Option<usize> {
+    core.session().and_then(|s| s.selected)
+}
+
+// ---------------------------------------------------------------------
+// 路由:字母触发词的词边界规则
+// ---------------------------------------------------------------------
+
+#[test]
+fn alphanumeric_trigger_requires_word_boundary() {
+    let default_mod = FakeModule::new("default");
+    let default_queries = default_mod.queries_handle();
+    let bm = FakeModule::with_trigger("bm", "b");
+    let bm_queries = bm.queries_handle();
+    let (mut core, _spawner) = setup_many(vec![default_mod, bm]);
+    let mut rx = core.take_event_receiver();
+
+    core.open_session();
+    core.input_changed("baidu".into()); // 无词边界:必须留给 default
+    core.input_changed("b gh".into()); // 边界命中:路由给 bm,查询去掉空白
+    core.input_changed("b".into()); // EOI 也是边界:空查询
+    drain(&mut core, &mut rx);
+
+    assert_eq!(
+        default_queries.lock().unwrap().as_slice(),
+        ["", "baidu"],
+        "baidu 不能被触发词 b 吞掉"
+    );
+    assert_eq!(bm_queries.lock().unwrap().as_slice(), ["gh", ""]);
+}
+
+// ---------------------------------------------------------------------
+// 触发词自定义(§128):设置行合成、路由改读生效值、校验
+// ---------------------------------------------------------------------
+
+#[test]
+fn trigger_spec_is_synthesized_for_non_default_modules() {
+    let default_mod = FakeModule::new("default");
+    let bm = FakeModule::with_trigger("bm", "b");
+    let (mut core, _spawner) = setup_many(vec![default_mod, bm]);
+
+    core.open_settings();
+    let model = core.settings_model().unwrap();
+    // 5 行 core.* + bm 的触发词行;默认模块(无触发词)没有该行。
+    assert_eq!(model.rows.len(), 6);
+    let keys: Vec<&str> = model.rows.iter().map(|r| r.key.as_ref()).collect();
+    assert!(keys.contains(&"module.bm.trigger"));
+    assert!(!keys.contains(&"module.default.trigger"));
+    let row = model
+        .rows
+        .iter()
+        .find(|r| r.key.as_ref() == "module.bm.trigger")
+        .unwrap();
+    assert_eq!(row.kind, SettingKind::String);
+    assert_eq!(row.value, SettingValue::String("b".to_string()));
+}
+
+#[test]
+fn custom_trigger_reroutes_input() {
+    let default_mod = FakeModule::new("default");
+    let default_queries = default_mod.queries_handle();
+    let bm = FakeModule::with_trigger("bm", "b");
+    let bm_queries = bm.queries_handle();
+    let bm_applied = bm.applied_settings_handle();
+    let (mut core, _spawner) = setup_many(vec![default_mod, bm]);
+    let mut rx = core.take_event_receiver();
+
+    // 改成双字母触发词(带空白,commit 时 trim 归一)。
+    core.apply_setting(
+        "module.bm.trigger",
+        SettingValue::String(" bk ".to_string()),
+    )
+    .unwrap();
+    // 触发词归 Core 路由——不经过模块 try_apply。
+    assert!(bm_applied.lock().unwrap().is_empty());
+
+    core.open_session();
+    core.input_changed("bk gh".into()); // 新触发词命中(词边界规则不变)
+    core.input_changed("b gh".into()); // 旧触发词不再认领
+    drain(&mut core, &mut rx);
+
+    assert_eq!(bm_queries.lock().unwrap().as_slice(), ["gh"]);
+    assert_eq!(default_queries.lock().unwrap().as_slice(), ["", "b gh"]);
+}
+
+#[test]
+fn empty_trigger_is_rejected() {
+    let bm = FakeModule::with_trigger("bm", "b");
+    let (mut core, _spawner) = setup_many(vec![FakeModule::new("default"), bm]);
+
+    // §128 用户决策:触发词必填,空(含 trim 后为空)拒绝。
+    assert!(
+        core.apply_setting("module.bm.trigger", SettingValue::String(String::new()))
+            .is_err()
+    );
+    assert!(
+        core.apply_setting("module.bm.trigger", SettingValue::String("   ".into()))
+            .is_err()
+    );
+}
+
+#[test]
+fn legacy_empty_trigger_falls_back_to_declared() {
+    // settings.tsv 里的空值(手工改坏/旧版残留):路由按声明值处理,
+    // 模块入口不丢——空值不可能经设置事务产生。
+    let dir = std::env::temp_dir().join(format!("sakana-trigger-fallback-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("settings.tsv");
+    std::fs::write(&file, "cue-settings-v1\nmodule.bm.trigger\t\n").unwrap();
+
+    let bm = FakeModule::with_trigger("bm", "b");
+    let bm_queries = bm.queries_handle();
+    let spawner = ManualSpawner::new();
+    let mut registry = ModuleRegistry::new();
+    registry
+        .register(Box::new(FakeModule::new("default")))
+        .unwrap();
+    registry.register(Box::new(bm)).unwrap();
+    let config = CoreConfig {
+        settings_file: Some(file),
+        ..test_config()
+    };
+    let mut core = Core::new(config, registry, spawner).unwrap();
+    let mut rx = core.take_event_receiver();
+
+    core.open_session();
+    core.input_changed("b gh".into());
+    drain(&mut core, &mut rx);
+    assert_eq!(bm_queries.lock().unwrap().as_slice(), ["gh"]);
+
+    // 显示层同样自愈:设置页该行的值归一为声明值
+    //(仅内存归一不写盘,随下次事务落盘)。
+    core.open_settings();
+    let model = core.settings_model().unwrap();
+    let row = model
+        .rows
+        .iter()
+        .find(|r| r.key.as_ref() == "module.bm.trigger")
+        .unwrap();
+    assert_eq!(row.value, SettingValue::String("b".to_string()));
+}
+
+#[test]
+fn registry_rejects_empty_declared_trigger() {
+    // 声明层必填(§128):空触发词会按标点分支匹配一切输入,吞掉默认路由。
+    let mut registry = ModuleRegistry::new();
+    registry
+        .register(Box::new(FakeModule::new("default")))
+        .unwrap();
+    assert!(matches!(
+        registry.register(Box::new(FakeModule::with_trigger("bad", ""))),
+        Err(RegistryError::EmptyTrigger(_))
+    ));
+}
+
+#[test]
+fn trigger_spec_does_not_leak_into_module_settings() {
+    // §128:触发词是 Core 路由状态,不属于模块 schema——
+    // 不得出现在模块收到的设置快照里。
+    let bm = FakeModule::with_trigger("bm", "b");
+    let seen = bm.received_settings_handle();
+    let (_core, _spawner) = setup_many(vec![FakeModule::new("default"), bm]);
+
+    let snapshot = seen.lock().unwrap();
+    let snapshot = snapshot.as_ref().expect("module loaded");
+    assert!(snapshot.get("trigger").is_none());
+}
+
+#[test]
+fn trigger_validation_rejects_bad_values() {
+    let default_mod = FakeModule::new("default");
+    let bm = FakeModule::with_trigger("bm", "b");
+    let fm = FakeModule::with_trigger("fm", "/");
+    let (mut core, _spawner) = setup_many(vec![default_mod, bm, fm]);
+
+    // 内含空白、超长、与其他模块生效触发词冲突——拒绝。
+    assert!(
+        core.apply_setting("module.bm.trigger", SettingValue::String("a b".into()))
+            .is_err()
+    );
+    assert!(
+        core.apply_setting("module.bm.trigger", SettingValue::String("x".repeat(17)))
+            .is_err()
+    );
+    assert!(
+        core.apply_setting("module.bm.trigger", SettingValue::String("/".into()))
+            .is_err()
+    );
+
+    // 全部拒绝:值未被破坏。
+    core.open_settings();
+    let model = core.settings_model().unwrap();
+    let row = model
+        .rows
+        .iter()
+        .find(|r| r.key.as_ref() == "module.bm.trigger")
+        .unwrap();
+    assert_eq!(row.value, SettingValue::String("b".to_string()));
+}
+
+// ---------------------------------------------------------------------
+// ticket 校验
+// ---------------------------------------------------------------------
+
+#[test]
+fn open_session_runs_empty_query_and_selects_first() {
+    let module = FakeModule::new("fake");
+    module.push_ready(&["Alpha", "Beta"]);
+    let (mut core, spawner) = setup(module);
+    let mut rx = core.take_event_receiver();
+
+    core.open_session();
+    spawner.poll_all();
+    drain(&mut core, &mut rx);
+
+    assert!(core.is_visible());
+    assert_eq!(results(&core), 2);
+    // 非空默认选中第 0 项。
+    assert_eq!(selected(&core), Some(0));
+
+    let effects = core.take_effects();
+    assert!(effects.contains(&CoreEffect::ShowLauncher));
+    assert!(effects.contains(&CoreEffect::FocusInput));
+}
+
+#[test]
+fn stale_generation_is_dropped() {
+    let module = FakeModule::new("fake");
+    let tx_empty = module.push_pending(); // 空查询(gen 0)
+    let tx_a = module.push_pending(); // 输入 "a"(gen 1)
+    let (mut core, spawner) = setup(module);
+    let mut rx = core.take_event_receiver();
+
+    core.open_session();
+    core.input_changed("a".into());
+
+    // 新 query(gen 1)先完成。
+    tx_a.send(ready_items(&["New"])).unwrap();
+    spawner.poll_all();
+    drain(&mut core, &mut rx);
+    assert_eq!(results(&core), 1);
+
+    // 旧 query(gen 0)后完成,必须被丢弃。
+    tx_empty.send(ready_items(&["Old", "Older"])).unwrap();
+    spawner.poll_all();
+    drain(&mut core, &mut rx);
+    assert_eq!(results(&core), 1);
+}
+
+#[test]
+fn cross_session_same_generation_is_dropped() {
+    let module = FakeModule::new("fake");
+    let tx_a = module.push_pending(); // session A 空查询(gen 0)
+    let tx_b = module.push_pending(); // session B 空查询(gen 0)
+    let (mut core, spawner) = setup(module);
+    let mut rx = core.take_event_receiver();
+
+    core.open_session();
+    core.close_session();
+    core.open_session();
+
+    tx_b.send(ready_items(&["B"])).unwrap();
+    spawner.poll_all();
+    drain(&mut core, &mut rx);
+    assert_eq!(results(&core), 1);
+
+    // session A 的结果带着相同的 generation 到达——session_id 拦截。
+    tx_a.send(ready_items(&["A", "A2"])).unwrap();
+    spawner.poll_all();
+    drain(&mut core, &mut rx);
+    assert_eq!(results(&core), 1);
+}
+
+#[test]
+fn module_epoch_is_dropped_after_reload() {
+    let module = FakeModule::new("fake");
+    let tx_old = module.push_pending(); // 旧实例的空查询
+    let (mut core, spawner) = setup(module);
+    let mut rx = core.take_event_receiver();
+
+    core.open_session();
+
+    // reload:epoch 递增,旧实例的在途 query 必死。
+    let new_module = FakeModule::new("fake");
+    new_module.push_ready(&["Fresh"]);
+    core.reload_module(Box::new(new_module)).unwrap();
+
+    tx_old.send(ready_items(&["Stale"])).unwrap();
+    spawner.poll_all();
+    drain(&mut core, &mut rx);
+    assert_eq!(results(&core), 0);
+
+    // 新实例正常工作。
+    core.input_changed("f".into());
+    spawner.poll_all();
+    drain(&mut core, &mut rx);
+    assert_eq!(results(&core), 1);
+}
+
+#[test]
+fn query_error_commits_error_state() {
+    let module = FakeModule::new("fake");
+    let tx = module.push_pending(); // 空查询
+    let (mut core, spawner) = setup(module);
+    let mut rx = core.take_event_receiver();
+
+    core.open_session();
+
+    tx.send(Err(ModuleError::Unavailable("backend down".into())))
+        .unwrap();
+    spawner.poll_all();
+    drain(&mut core, &mut rx);
+
+    // Err 经同一 ticket 校验提交:结果清空、选中清空、错误进状态(§115)。
+    let s = core.session().unwrap();
+    assert!(s.error.is_some());
+    assert!(s.results.is_empty());
+    assert_eq!(s.selected, None);
+}
+
+#[test]
+fn stale_query_error_is_dropped() {
+    let module = FakeModule::new("fake");
+    let tx_empty = module.push_pending(); // 空查询(gen 0)
+    let tx_a = module.push_pending(); // 输入 "a"(gen 1)
+    let (mut core, spawner) = setup(module);
+    let mut rx = core.take_event_receiver();
+
+    core.open_session();
+    core.input_changed("a".into());
+
+    // 新 query(gen 1)先完成。
+    tx_a.send(ready_items(&["New"])).unwrap();
+    spawner.poll_all();
+    drain(&mut core, &mut rx);
+    assert_eq!(results(&core), 1);
+
+    // 旧 generation 的 Err 后到达——同一 ticket 校验,必死:
+    // 不覆盖现有结果,也不写出 error。
+    tx_empty
+        .send(Err(ModuleError::Unavailable("late error".into())))
+        .unwrap();
+    spawner.poll_all();
+    drain(&mut core, &mut rx);
+    assert_eq!(results(&core), 1);
+    assert!(core.session().unwrap().error.is_none());
+}
+
+// ---------------------------------------------------------------------
+// 输入与选择
+// ---------------------------------------------------------------------
+
+#[test]
+fn input_change_clears_results_immediately() {
+    let module = FakeModule::new("fake");
+    module.push_ready(&["Alpha"]);
+    let _tx = module.push_pending(); // 下一次 query 永不完成
+    let (mut core, spawner) = setup(module);
+    let mut rx = core.take_event_receiver();
+
+    core.open_session();
+    spawner.poll_all();
+    drain(&mut core, &mut rx);
+    assert_eq!(results(&core), 1);
+    assert_eq!(selected(&core), Some(0));
+
+    // 输入变化立即清空,stale 结果永不可激活。
+    core.input_changed("x".into());
+    assert_eq!(results(&core), 0);
+    assert_eq!(selected(&core), None);
+}
+
+#[test]
+fn noop_input_change_does_not_requery_or_reset_selection() {
+    let module = FakeModule::new("fake");
+    module.push_ready(&["A", "B", "C"]);
+    let (mut core, spawner) = setup(module);
+    let mut rx = core.take_event_receiver();
+
+    core.open_session();
+    spawner.poll_all();
+    drain(&mut core, &mut rx);
+    assert_eq!(results(&core), 3);
+
+    core.select_next();
+    core.select_next();
+    assert_eq!(selected(&core), Some(2));
+
+    // 空输入上的 Backspace = 输入未变:不推进 generation、不重查、
+    // 不把选择重置回第 0 行。
+    core.backspace();
+    spawner.poll_all();
+    drain(&mut core, &mut rx);
+    assert_eq!(selected(&core), Some(2));
+    assert_eq!(results(&core), 3);
+    assert_eq!(core.session().unwrap().generation, 0);
+}
+
+#[test]
+fn selection_clamps_at_edges() {
+    let module = FakeModule::new("fake");
+    module.push_ready(&["A", "B", "C"]);
+    let (mut core, spawner) = setup(module);
+    let mut rx = core.take_event_receiver();
+
+    core.open_session();
+    spawner.poll_all();
+    drain(&mut core, &mut rx);
+
+    core.select_next();
+    core.select_next();
+    core.select_next(); // 钳制在末尾
+    assert_eq!(selected(&core), Some(2));
+    core.select_prev();
+    core.select_prev();
+    core.select_prev(); // 钳制在开头
+    assert_eq!(selected(&core), Some(0));
+}
+
+// ---------------------------------------------------------------------
+// activation
+// ---------------------------------------------------------------------
+
+#[test]
+fn activation_close_records_usage_and_hides() {
+    let module = FakeModule::new("fake");
+    module.push_ready(&["Alpha"]);
+    let (mut core, spawner) = setup(module);
+    let mut rx = core.take_event_receiver();
+
+    core.open_session();
+    spawner.poll_all();
+    drain(&mut core, &mut rx);
+    core.take_effects();
+
+    core.activate_selected();
+    spawner.poll_all();
+    drain(&mut core, &mut rx);
+
+    // success + Close → session 关闭。
+    assert!(core.session().is_none());
+    assert!(core.take_effects().contains(&CoreEffect::HideLauncher));
+    // usage 总是记录。
+    let stat = core
+        .usage_stat(&ModuleId::from_static("fake"), "Alpha", ActionId::PRIMARY)
+        .expect("usage recorded");
+    assert_eq!(stat.count, 1);
+}
+
+#[test]
+fn activation_from_old_session_does_not_close_new_session() {
+    let module = FakeModule::new("fake");
+    module.push_ready(&["A"]);
+    module.push_ready(&["B"]);
+    let tx_act = module.push_pending_activation();
+    let (mut core, spawner) = setup(module);
+    let mut rx = core.take_event_receiver();
+
+    // Session A:激活 "A"(activation 在途),立即 Esc。
+    core.open_session();
+    spawner.poll_all();
+    drain(&mut core, &mut rx);
+    core.activate_selected();
+    core.close_session();
+
+    // Session B 打开。
+    core.open_session();
+    spawner.poll_all();
+    drain(&mut core, &mut rx);
+    core.take_effects();
+
+    // session A 的 activation 晚于 session B 打开才完成。
+    tx_act
+        .send(ModuleOutcome::success(
+            SessionDisposition::Close,
+            Some(UsageRecordRequest {
+                item_key: "a-key".into(),
+                action_id: ActionId::PRIMARY,
+            }),
+        ))
+        .unwrap();
+    spawner.poll_all();
+    drain(&mut core, &mut rx);
+
+    // usage 仍然记录,但 session B 不被误关。
+    assert!(core.session().is_some());
+    assert!(!core.take_effects().contains(&CoreEffect::HideLauncher));
+    assert!(
+        core.usage_stat(&ModuleId::from_static("fake"), "a-key", ActionId::PRIMARY)
+            .is_some()
+    );
+}
+
+#[test]
+fn failed_activation_keeps_session_open_with_error() {
+    let module = FakeModule::new("fake");
+    module.push_ready(&["Alpha"]);
+    let tx_act = module.push_pending_activation();
+    let (mut core, spawner) = setup(module);
+    let mut rx = core.take_event_receiver();
+
+    core.open_session();
+    spawner.poll_all();
+    drain(&mut core, &mut rx);
+    core.activate_selected();
+
+    tx_act
+        .send(ModuleOutcome::failed(ModuleError::ActivationFailed(
+            "boom".into(),
+        )))
+        .unwrap();
+    spawner.poll_all();
+    drain(&mut core, &mut rx);
+
+    // 失败默认 KeepOpen + 错误展示。
+    assert!(core.session().is_some());
+    assert!(core.session().unwrap().error.is_some());
+    assert!(!core.take_effects().contains(&CoreEffect::HideLauncher));
+}
+
+#[test]
+fn activation_from_old_epoch_is_not_disposed() {
+    let module = FakeModule::new("fake");
+    module.push_ready(&["Alpha"]);
+    let tx_act = module.push_pending_activation();
+    let (mut core, spawner) = setup(module);
+    let mut rx = core.take_event_receiver();
+
+    core.open_session();
+    spawner.poll_all();
+    drain(&mut core, &mut rx);
+    core.take_effects();
+    core.activate_selected();
+
+    // reload 换掉实例:旧实例的 activation 仍在途,epoch 已递增。
+    let new_module = FakeModule::new("fake");
+    new_module.push_ready(&["Fresh"]);
+    core.reload_module(Box::new(new_module)).unwrap();
+
+    // 旧实例的 Close outcome 到达:usage 记录、in-flight flag 复位,
+    // 但处置不落到当前实例——session 不得被关闭(§96 三元绑定)。
+    tx_act
+        .send(ModuleOutcome::success(
+            SessionDisposition::Close,
+            Some(UsageRecordRequest {
+                item_key: "alpha".into(),
+                action_id: ActionId::PRIMARY,
+            }),
+        ))
+        .unwrap();
+    spawner.poll_all();
+    drain(&mut core, &mut rx);
+
+    assert!(core.session().is_some());
+    assert!(!core.session().unwrap().activation_in_flight);
+    assert!(!core.take_effects().contains(&CoreEffect::HideLauncher));
+    assert!(
+        core.usage_stat(&ModuleId::from_static("fake"), "alpha", ActionId::PRIMARY)
+            .is_some()
+    );
+}
+
+// ---------------------------------------------------------------------
+// 次级动作菜单(Tab)
+// ---------------------------------------------------------------------
+
+fn three_actions() -> Vec<ActionDescriptor> {
+    vec![
+        ActionDescriptor {
+            id: ActionId::PRIMARY,
+            label: "Open".into(),
+            shortcut: None,
+        },
+        ActionDescriptor {
+            id: ActionId(1),
+            label: "Copy".into(),
+            shortcut: None,
+        },
+        ActionDescriptor {
+            id: ActionId(2),
+            label: "Reveal".into(),
+            shortcut: None,
+        },
+    ]
+}
+
+#[test]
+fn tab_opens_menu_on_selected_item_and_navigates() {
+    let module = FakeModule::new("fake").with_menu_actions(three_actions());
+    module.push_ready(&["Alpha", "Beta"]);
+    let (mut core, spawner) = setup(module);
+    let mut rx = core.take_event_receiver();
+
+    core.open_session();
+    spawner.poll_all();
+    drain(&mut core, &mut rx);
+
+    core.open_action_menu();
+    assert!(core.in_action_menu());
+    let model = core.action_menu_model().unwrap();
+    assert_eq!(
+        model.rows.iter().map(|r| &*r.label).collect::<Vec<_>>(),
+        ["Open", "Copy", "Reveal"]
+    );
+    assert_eq!(model.selected, 0);
+
+    core.action_menu_select_next();
+    core.action_menu_select_next();
+    core.action_menu_select_next(); // 钳制在末尾
+    assert_eq!(core.action_menu_model().unwrap().selected, 2);
+    core.action_menu_select_prev();
+    core.action_menu_select_prev();
+    core.action_menu_select_prev(); // 钳制在开头
+    assert_eq!(core.action_menu_model().unwrap().selected, 0);
+
+    // 关闭再打开:选择归零,菜单是新的快照。
+    core.close_action_menu();
+    assert!(!core.in_action_menu());
+    core.open_action_menu();
+    assert_eq!(core.action_menu_model().unwrap().selected, 0);
+}
+
+#[test]
+fn menu_requires_selected_item_and_nonempty_actions() {
+    // 无选中项:不开。
+    let module = FakeModule::new("fake");
+    module.push_ready(&[]);
+    let (mut core, spawner) = setup(module);
+    let mut rx = core.take_event_receiver();
+    core.open_session();
+    spawner.poll_all();
+    drain(&mut core, &mut rx);
+    core.open_action_menu();
+    assert!(!core.in_action_menu());
+    core.close_session();
+
+    // 模块返回空动作列表:不开。
+    let module = FakeModule::new("fake").with_menu_actions(vec![]);
+    module.push_ready(&["Alpha"]);
+    let (mut core, spawner) = setup(module);
+    let mut rx = core.take_event_receiver();
+    core.open_session();
+    spawner.poll_all();
+    drain(&mut core, &mut rx);
+    core.open_action_menu();
+    assert!(!core.in_action_menu());
+}
+
+#[test]
+fn menu_enter_activates_with_chosen_action_id() {
+    let module = FakeModule::new("fake").with_menu_actions(three_actions());
+    let activated = module.activated_handle();
+    module.push_ready(&["Alpha"]);
+    let (mut core, spawner) = setup(module);
+    let mut rx = core.take_event_receiver();
+
+    core.open_session();
+    spawner.poll_all();
+    drain(&mut core, &mut rx);
+
+    core.open_action_menu();
+    core.action_menu_select_next(); // "Copy" = ActionId(1)
+    core.activate_action_menu_selection();
+    // 菜单在激活发起时即关。
+    assert!(!core.in_action_menu());
+    spawner.poll_all();
+    drain(&mut core, &mut rx);
+
+    assert_eq!(*activated.lock().unwrap(), [ActionId(1)]);
+    // success + Close → session 关闭;usage 记在 ActionId(1) 名下。
+    assert!(core.session().is_none());
+    assert!(
+        core.usage_stat(&ModuleId::from_static("fake"), "Alpha", ActionId(1))
+            .is_some()
+    );
+    assert!(
+        core.usage_stat(&ModuleId::from_static("fake"), "Alpha", ActionId::PRIMARY)
+            .is_none()
+    );
+}
+
+#[test]
+fn plain_enter_still_activates_primary() {
+    let module = FakeModule::new("fake").with_menu_actions(three_actions());
+    let activated = module.activated_handle();
+    module.push_ready(&["Alpha"]);
+    let (mut core, spawner) = setup(module);
+    let mut rx = core.take_event_receiver();
+
+    core.open_session();
+    spawner.poll_all();
+    drain(&mut core, &mut rx);
+    core.activate_selected();
+    spawner.poll_all();
+    drain(&mut core, &mut rx);
+
+    assert_eq!(*activated.lock().unwrap(), [ActionId::PRIMARY]);
+}
+
+#[test]
+fn input_change_closes_menu() {
+    let module = FakeModule::new("fake").with_menu_actions(three_actions());
+    module.push_ready(&["Alpha"]);
+    module.push_ready(&["Beta"]);
+    let (mut core, spawner) = setup(module);
+    let mut rx = core.take_event_receiver();
+
+    core.open_session();
+    spawner.poll_all();
+    drain(&mut core, &mut rx);
+    core.open_action_menu();
+    assert!(core.in_action_menu());
+
+    // 输入变化,stale 结果与动作快照一并失效。
+    core.input_changed("x".into());
+    assert!(!core.in_action_menu());
+}
+
+// ---------------------------------------------------------------------
+// Module 自发事件
+// ---------------------------------------------------------------------
+
+#[test]
+fn presentation_invalidated_only_for_visible_items() {
+    let module = FakeModule::new("fake");
+    module.push_ready(&["Alpha", "Beta"]);
+    let sink = module.sink_handle();
+    let (mut core, spawner) = setup(module);
+    let mut rx = core.take_event_receiver();
+
+    core.open_session();
+    spawner.poll_all();
+    drain(&mut core, &mut rx);
+
+    let sink = sink.lock().unwrap().clone().expect("sink bound at load");
+
+    // 可见 item(ItemId 1 = "Beta")→ changed。
+    sink.send(ModuleEvent::PresentationInvalidated {
+        items: vec![ItemId(1)],
+    });
+    let ev = rx.try_recv().unwrap();
+    assert!(core.handle_event(ev));
+
+    // 不可见 item → 忽略。
+    sink.send(ModuleEvent::PresentationInvalidated {
+        items: vec![ItemId(999)],
+    });
+    let ev = rx.try_recv().unwrap();
+    assert!(!core.handle_event(ev));
+
+    // session 关闭后 → 丢弃。
+    core.close_session();
+    sink.send(ModuleEvent::PresentationInvalidated {
+        items: vec![ItemId(0)],
+    });
+    let ev = rx.try_recv().unwrap();
+    assert!(!core.handle_event(ev));
+}
+
+// ---------------------------------------------------------------------
+// toggle / 失焦
+// ---------------------------------------------------------------------
+
+#[test]
+fn hotkey_toggles_and_focus_loss_hides() {
+    let module = FakeModule::new("fake");
+    module.push_ready(&[]);
+    module.push_ready(&[]);
+    let (mut core, spawner) = setup(module);
+    let mut rx = core.take_event_receiver();
+
+    // 隐藏 → 打开
+    core.hotkey_pressed();
+    assert!(core.is_visible());
+    let effects = core.take_effects();
+    assert!(effects.contains(&CoreEffect::ShowLauncher));
+
+    // 可见且聚焦 → 关闭
+    core.hotkey_pressed();
+    assert!(!core.is_visible());
+    assert!(core.take_effects().contains(&CoreEffect::HideLauncher));
+
+    // 再次打开,失焦 → 隐藏(hide_on_focus_loss 默认 true)
+    core.hotkey_pressed();
+    assert!(core.is_visible());
+    spawner.poll_all();
+    drain(&mut core, &mut rx);
+    core.take_effects();
+    core.focus_lost();
+    assert!(!core.is_visible());
+    assert!(core.take_effects().contains(&CoreEffect::HideLauncher));
+}
+
+// ---------------------------------------------------------------------
+// 免打扰模式(§127):前台全屏时热键不唤起
+// ---------------------------------------------------------------------
+
+/// 带 fullscreen_probe 的 setup;probe 由调用方注入。
+fn setup_with_probe(probe: impl FnMut() -> bool + 'static) -> Core {
+    let spawner = ManualSpawner::new();
+    let mut registry = ModuleRegistry::new();
+    registry
+        .register(Box::new(FakeModule::new("fake")))
+        .unwrap();
+    let config = CoreConfig {
+        fullscreen_probe: Some(Box::new(probe)),
+        ..test_config()
+    };
+    Core::new(config, registry, spawner).unwrap()
+}
+
+#[test]
+fn dnd_mode_suppresses_hotkey_show_when_fullscreen() {
+    let mut core = setup_with_probe(|| true);
+    // 设置默认 true + 全屏 → 静默忽略:无效果、不可见。
+    core.hotkey_pressed();
+    assert!(!core.is_visible());
+    assert!(core.take_effects().is_empty());
+}
+
+#[test]
+fn dnd_mode_off_still_shows_when_fullscreen() {
+    let mut core = setup_with_probe(|| true);
+    // 关掉 core.dnd_mode:事务式设置(§42)commit 后 getter 立即生效。
+    core.apply_setting(KEY_DND_MODE, SettingValue::Bool(false))
+        .unwrap();
+    core.hotkey_pressed();
+    assert!(core.is_visible());
+    assert!(core.take_effects().contains(&CoreEffect::ShowLauncher));
+}
+
+#[test]
+fn dnd_mode_does_not_suppress_when_not_fullscreen() {
+    let mut core = setup_with_probe(|| false);
+    core.hotkey_pressed();
+    assert!(core.is_visible());
+    assert!(core.take_effects().contains(&CoreEffect::ShowLauncher));
+}
+
+#[test]
+fn dnd_mode_still_allows_hide_toggle_when_fullscreen() {
+    let mut core = setup_with_probe(|| true);
+    core.open_session();
+    core.take_effects();
+    // 已可见时热键照常关闭(门控只在 show 半段)。
+    core.hotkey_pressed();
+    assert!(!core.is_visible());
+    assert!(core.take_effects().contains(&CoreEffect::HideLauncher));
+}
+
+#[test]
+fn dnd_mode_does_not_gate_show_requested() {
+    let mut core = setup_with_probe(|| true);
+    // 托盘/第二实例唤起不受门控(§127:只拦热键)。
+    core.show_requested();
+    assert!(core.is_visible());
+    assert!(core.take_effects().contains(&CoreEffect::ShowLauncher));
+}
+
+/// 带 notify_dnd_mode 的 setup;通知序列录进 log。
+fn setup_with_dnd_notify(log: Arc<Mutex<Vec<bool>>>) -> Core {
+    let spawner = ManualSpawner::new();
+    let mut registry = ModuleRegistry::new();
+    registry
+        .register(Box::new(FakeModule::new("fake")))
+        .unwrap();
+    let config = CoreConfig {
+        notify_dnd_mode: Some(Box::new(move |on| log.lock().unwrap().push(on))),
+        ..test_config()
+    };
+    Core::new(config, registry, spawner).unwrap()
+}
+
+#[test]
+fn dnd_mode_notify_fires_initial_and_on_commit() {
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let mut core = setup_with_dnd_notify(log.clone());
+    // 初始值(默认 true)在 Core::new 时通知一次。
+    assert_eq!(*log.lock().unwrap(), vec![true]);
+
+    core.apply_setting(KEY_DND_MODE, SettingValue::Bool(false))
+        .unwrap();
+    core.apply_setting(KEY_DND_MODE, SettingValue::Bool(true))
+        .unwrap();
+    assert_eq!(*log.lock().unwrap(), vec![true, false, true]);
+}
+
+#[test]
+fn dnd_mode_notify_skips_other_keys_and_failed_transactions() {
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let mut core = setup_with_dnd_notify(log.clone());
+
+    // 其他 key 的 commit 不通知。
+    core.apply_setting(KEY_START_ON_BOOT, SettingValue::Bool(true))
+        .unwrap();
+    // 失败事务不通知:类型不符 / 未知 key。
+    core.apply_setting(KEY_DND_MODE, SettingValue::Integer(1))
+        .unwrap_err();
+    core.apply_setting("core.nonexistent", SettingValue::Bool(true))
+        .unwrap_err();
+
+    assert_eq!(*log.lock().unwrap(), vec![true]); // 仍只有初始那次
+}
+
+// ---------------------------------------------------------------------
+// present 路由
+// ---------------------------------------------------------------------
+
+#[test]
+fn present_delegates_to_active_module() {
+    let module = FakeModule::new("fake");
+    module.push_ready(&["Alpha"]);
+    let (mut core, spawner) = setup(module);
+    let mut rx = core.take_event_receiver();
+
+    core.open_session();
+    spawner.poll_all();
+    drain(&mut core, &mut rx);
+
+    let item = core.session().unwrap().results[0].clone();
+    let presentation = core.present(&item).expect("presentation");
+    assert_eq!(&*presentation.title, "Alpha");
+}
+
+// ---------------------------------------------------------------------
+// 设置事务:validate → try-apply → commit → persist
+// ---------------------------------------------------------------------
+
+fn setup_with_config(module: FakeModule, config: CoreConfig) -> (Core, Arc<ManualSpawner>) {
+    let spawner = ManualSpawner::new();
+    let mut registry = ModuleRegistry::new();
+    registry.register(Box::new(module)).unwrap();
+    let core = Core::new(config, registry, spawner.clone()).unwrap();
+    (core, spawner)
+}
+
+#[test]
+fn hotkey_apply_failure_keeps_old_value() {
+    // try-apply 失败(热键被占用):不 commit,旧值保留。
+    let mut config = test_config();
+    config.apply_hotkey = Some(Box::new(|_| Err("occupied by another app".to_string())));
+    let (mut core, _spawner) = setup_with_config(FakeModule::new("fake"), config);
+
+    core.open_settings();
+    let before = core.hotkey();
+    let candidate: Hotkey = "ctrl+alt+k".parse().unwrap();
+    let err = core
+        .apply_setting("core.hotkey", SettingValue::Hotkey(candidate))
+        .expect_err("must fail");
+    assert!(err.contains("occupied"));
+    assert_eq!(core.hotkey(), before); // 旧值保留
+    // 错误进入模型,UI 据此展示;再次成功 apply 后错误清除。
+    let model = core.settings_model().unwrap();
+    assert!(model.error.is_some());
+}
+
+#[test]
+fn hotkey_apply_success_commits() {
+    let applied = Arc::new(Mutex::new(Vec::new()));
+    let mut config = test_config();
+    let seen = Arc::clone(&applied);
+    config.apply_hotkey = Some(Box::new(move |h: &Hotkey| {
+        seen.lock().unwrap().push(*h);
+        Ok(())
+    }));
+    let (mut core, _spawner) = setup_with_config(FakeModule::new("fake"), config);
+
+    let candidate: Hotkey = "ctrl+shift+f5".parse().unwrap();
+    core.apply_setting("core.hotkey", SettingValue::Hotkey(candidate))
+        .unwrap();
+    assert_eq!(core.hotkey(), candidate);
+    assert_eq!(applied.lock().unwrap().as_slice(), &[candidate]);
+}
+
+#[test]
+fn start_on_boot_apply_failure_keeps_old_value() {
+    // try-apply 失败(注册表写入被拒):不 commit,旧值保留。
+    let mut config = test_config();
+    config.apply_start_on_boot = Some(Box::new(|_| Err("registry denied".to_string())));
+    let (mut core, _spawner) = setup_with_config(FakeModule::new("fake"), config);
+
+    core.open_settings();
+    let err = core
+        .apply_setting("core.start_on_boot", SettingValue::Bool(true))
+        .expect_err("must fail");
+    assert!(err.contains("registry denied"));
+    let model = core.settings_model().unwrap();
+    let row = model
+        .rows
+        .iter()
+        .find(|r| r.key.as_ref() == "core.start_on_boot")
+        .unwrap();
+    assert_eq!(row.value, SettingValue::Bool(false)); // 旧值保留
+    assert!(model.error.is_some());
+}
+
+#[test]
+fn start_on_boot_apply_success_commits() {
+    let applied = Arc::new(Mutex::new(Vec::new()));
+    let mut config = test_config();
+    let seen = Arc::clone(&applied);
+    config.apply_start_on_boot = Some(Box::new(move |on: bool| {
+        seen.lock().unwrap().push(on);
+        Ok(())
+    }));
+    let (mut core, _spawner) = setup_with_config(FakeModule::new("fake"), config);
+
+    core.open_settings();
+    core.apply_setting("core.start_on_boot", SettingValue::Bool(true))
+        .unwrap();
+    assert_eq!(applied.lock().unwrap().as_slice(), &[true]);
+    let model = core.settings_model().unwrap();
+    let row = model
+        .rows
+        .iter()
+        .find(|r| r.key.as_ref() == "core.start_on_boot")
+        .unwrap();
+    assert_eq!(row.value, SettingValue::Bool(true));
+}
+
+#[test]
+fn module_setting_transaction_reaches_module() {
+    // 首个 module.* 设置路径:try-apply 直达模块、commit 进模型、
+    // 模块构造时的设置快照带默认值。
+    let applied = Arc::new(Mutex::new(Vec::new()));
+    let mut module = FakeModule::new("fake");
+    module.schema = vec![SettingSpec {
+        key: SettingKey("module.fake.reduce_noise".into()),
+        label: "fake bool".into(),
+        description: None,
+        kind: SettingKind::Bool,
+        default: SettingValue::Bool(true),
+        apply_policy: ApplyPolicy::Immediate,
+    }];
+    module.applied_settings = Arc::clone(&applied);
+    let (mut core, _spawner) = setup_with_config(module, test_config());
+
+    core.open_settings();
+    core.apply_setting("module.fake.reduce_noise", SettingValue::Bool(false))
+        .unwrap();
+    assert_eq!(
+        applied.lock().unwrap().as_slice(),
+        &[(
+            "module.fake.reduce_noise".to_string(),
+            SettingValue::Bool(false)
+        )]
+    );
+    let model = core.settings_model().unwrap();
+    let row = model
+        .rows
+        .iter()
+        .find(|r| r.key.as_ref() == "module.fake.reduce_noise")
+        .expect("module setting row");
+    assert_eq!(row.value, SettingValue::Bool(false));
+
+    // 未知模块设置 key 走 validate 拒绝。
+    assert!(
+        core.apply_setting("module.fake.nope", SettingValue::Bool(true))
+            .is_err()
+    );
+}
+
+#[test]
+fn open_setting_path_invokes_host_callback() {
+    // Path 行激活 = 打开当前路径值:host 回调收到值,不产生 commit
+    // (值不变、不 persist);非 Path kind / 未知 key 报错并进模型。
+    let mut module = FakeModule::new("fake");
+    module.schema = vec![SettingSpec {
+        key: SettingKey("module.fake.list_file".into()),
+        label: "fake path".into(),
+        description: None,
+        kind: SettingKind::Path,
+        default: SettingValue::Path(PathBuf::from(r"C:\fake\list.txt")),
+        apply_policy: ApplyPolicy::Immediate,
+    }];
+    let opened = Arc::new(Mutex::new(Vec::new()));
+    let opened2 = Arc::clone(&opened);
+    let mut config = test_config();
+    config.open_path = Some(Box::new(move |p: &std::path::Path| {
+        opened2.lock().unwrap().push(p.to_path_buf());
+        Ok(())
+    }));
+    let (mut core, _spawner) = setup_with_config(module, config);
+
+    core.open_settings();
+    core.open_setting_path("module.fake.list_file").unwrap();
+    assert_eq!(
+        opened.lock().unwrap().as_slice(),
+        &[PathBuf::from(r"C:\fake\list.txt")]
+    );
+    // 打开不是值变更:模型值仍是默认,host 无持久化文件可写。
+    let model = core.settings_model().unwrap();
+    let row = model
+        .rows
+        .iter()
+        .find(|r| r.key.as_ref() == "module.fake.list_file")
+        .unwrap();
+    assert_eq!(
+        row.value,
+        SettingValue::Path(PathBuf::from(r"C:\fake\list.txt"))
+    );
+    assert!(model.error.is_none());
+
+    // 非 Path kind 拒绝,错误进模型。
+    assert!(core.open_setting_path("core.hide_on_focus_loss").is_err());
+    let model = core.settings_model().unwrap();
+    assert!(model.error.is_some());
+    // 未知 key 拒绝。
+    assert!(core.open_setting_path("module.fake.nope").is_err());
+    // 回调失败:错误返回并进模型。
+    let mut module = FakeModule::new("fake");
+    module.schema = vec![SettingSpec {
+        key: SettingKey("module.fake.list_file".into()),
+        label: "fake path".into(),
+        description: None,
+        kind: SettingKind::Path,
+        default: SettingValue::Path(PathBuf::from(r"C:\fake\list.txt")),
+        apply_policy: ApplyPolicy::Immediate,
+    }];
+    let mut config = test_config();
+    config.open_path = Some(Box::new(|_: &std::path::Path| Err("没有默认关联".into())));
+    let (mut core, _spawner) = setup_with_config(module, config);
+    core.open_settings();
+    assert_eq!(
+        core.open_setting_path("module.fake.list_file").unwrap_err(),
+        "没有默认关联"
+    );
+    assert!(core.settings_model().unwrap().error.is_some());
+}
+
+#[test]
+fn apply_setting_validates_type_and_value() {
+    let (mut core, _spawner) = setup(FakeModule::new("fake"));
+
+    // 类型不匹配
+    assert!(
+        core.apply_setting("core.hotkey", SettingValue::Bool(true))
+            .is_err()
+    );
+    // 取值不合法:无修饰键
+    let no_mod = Hotkey {
+        modifiers: Modifiers::NONE,
+        key: Key::Space,
+    };
+    assert!(
+        core.apply_setting("core.hotkey", SettingValue::Hotkey(no_mod))
+            .is_err()
+    );
+    // 未知 key
+    assert!(
+        core.apply_setting("core.nope", SettingValue::Bool(true))
+            .is_err()
+    );
+    // 默认值未被破坏
+    assert_eq!(core.hotkey(), Hotkey::default());
+}
+
+#[test]
+fn settings_view_lifecycle_and_effects() {
+    let (mut core, spawner) = setup(FakeModule::new("fake"));
+    let mut rx = core.take_event_receiver();
+
+    // 打开设置:搜索会话退场,窗口显示 + 聚焦。
+    core.open_session();
+    spawner.poll_all();
+    drain(&mut core, &mut rx);
+    core.take_effects();
+
+    core.open_settings();
+    assert!(core.in_settings());
+    assert!(core.session().is_none());
+    let model = core.settings_model().unwrap();
+    assert_eq!(model.rows.len(), 5); // log_file + hotkey + hide_on_focus_loss + start_on_boot + dnd_mode
+    assert!(model.rows.iter().any(|r| r.key.as_ref() == "core.log_file"));
+    assert_eq!(model.selected, 0);
+
+    core.settings_select_next();
+    core.settings_select_next();
+    core.settings_select_next();
+    core.settings_select_next(); // 夹紧在最后一行
+    assert_eq!(core.settings_model().unwrap().selected, 4);
+    core.settings_select_prev();
+    assert_eq!(core.settings_model().unwrap().selected, 3);
+
+    // 热键在设置页 = Esc(关闭设置)。
+    core.hotkey_pressed();
+    assert!(!core.in_settings());
+    assert!(core.take_effects().contains(&CoreEffect::HideLauncher));
+
+    // Bool 切换立即生效并体现在 Core 行为上。
+    core.open_settings();
+    core.settings_select_next(); // hide_on_focus_loss 行
+    core.apply_setting("core.hide_on_focus_loss", SettingValue::Bool(false))
+        .unwrap();
+    core.dismiss_settings();
+    core.open_session();
+    spawner.poll_all();
+    drain(&mut core, &mut rx);
+    core.take_effects();
+    core.focus_lost(); // 关闭后:失焦不隐藏
+    assert!(core.is_visible());
+}

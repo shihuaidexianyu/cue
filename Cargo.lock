@@ -989,106 +989,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e2931af7e13dc045d8e9d26afccc6fa115d64e115c9c84b1166288b46f6782c2"
 
 [[package]]
-name = "cue"
-version = "0.4.10"
-dependencies = [
- "cue-core",
- "cue-module-app",
- "cue-module-bookmark",
- "cue-module-file",
- "cue-module-system",
- "cue-protocol",
- "cue-ui",
- "cue-windows",
- "embed-resource",
- "futures",
- "gpui",
-]
-
-[[package]]
-name = "cue-core"
-version = "0.1.0"
-dependencies = [
- "cue-protocol",
- "futures",
-]
-
-[[package]]
-name = "cue-module-app"
-version = "0.1.0"
-dependencies = [
- "cue-protocol",
- "cue-util-win",
- "futures",
- "image",
- "pinyin",
- "windows 0.62.2",
-]
-
-[[package]]
-name = "cue-module-bookmark"
-version = "0.1.0"
-dependencies = [
- "cue-protocol",
- "cue-util-win",
- "pinyin",
- "serde_json",
-]
-
-[[package]]
-name = "cue-module-file"
-version = "0.1.0"
-dependencies = [
- "cue-protocol",
- "cue-util-win",
- "futures",
- "toml 1.1.4+spec-1.1.0",
- "windows 0.62.2",
-]
-
-[[package]]
-name = "cue-module-system"
-version = "0.1.0"
-dependencies = [
- "cue-protocol",
- "cue-util-win",
- "windows 0.62.2",
-]
-
-[[package]]
-name = "cue-protocol"
-version = "0.1.0"
-
-[[package]]
-name = "cue-ui"
-version = "0.1.0"
-dependencies = [
- "cue-core",
- "cue-protocol",
- "futures",
- "gpui",
- "image",
- "smallvec",
-]
-
-[[package]]
-name = "cue-util-win"
-version = "0.1.0"
-dependencies = [
- "cue-protocol",
- "image",
- "windows 0.62.2",
-]
-
-[[package]]
-name = "cue-windows"
-version = "0.1.0"
-dependencies = [
- "cue-protocol",
- "windows 0.62.2",
-]
-
-[[package]]
 name = "data-url"
 version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3924,6 +3824,106 @@ name = "ryu"
 version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
+
+[[package]]
+name = "sakana"
+version = "0.5.0"
+dependencies = [
+ "embed-resource",
+ "futures",
+ "gpui",
+ "sakana-core",
+ "sakana-module-app",
+ "sakana-module-bookmark",
+ "sakana-module-file",
+ "sakana-module-system",
+ "sakana-protocol",
+ "sakana-ui",
+ "sakana-windows",
+]
+
+[[package]]
+name = "sakana-core"
+version = "0.1.0"
+dependencies = [
+ "futures",
+ "sakana-protocol",
+]
+
+[[package]]
+name = "sakana-module-app"
+version = "0.1.0"
+dependencies = [
+ "futures",
+ "image",
+ "pinyin",
+ "sakana-protocol",
+ "sakana-util-win",
+ "windows 0.62.2",
+]
+
+[[package]]
+name = "sakana-module-bookmark"
+version = "0.1.0"
+dependencies = [
+ "pinyin",
+ "sakana-protocol",
+ "sakana-util-win",
+ "serde_json",
+]
+
+[[package]]
+name = "sakana-module-file"
+version = "0.1.0"
+dependencies = [
+ "futures",
+ "sakana-protocol",
+ "sakana-util-win",
+ "toml 1.1.4+spec-1.1.0",
+ "windows 0.62.2",
+]
+
+[[package]]
+name = "sakana-module-system"
+version = "0.1.0"
+dependencies = [
+ "sakana-protocol",
+ "sakana-util-win",
+ "windows 0.62.2",
+]
+
+[[package]]
+name = "sakana-protocol"
+version = "0.1.0"
+
+[[package]]
+name = "sakana-ui"
+version = "0.1.0"
+dependencies = [
+ "futures",
+ "gpui",
+ "image",
+ "sakana-core",
+ "sakana-protocol",
+ "smallvec",
+]
+
+[[package]]
+name = "sakana-util-win"
+version = "0.1.0"
+dependencies = [
+ "image",
+ "sakana-protocol",
+ "windows 0.62.2",
+]
+
+[[package]]
+name = "sakana-windows"
+version = "0.1.0"
+dependencies = [
+ "sakana-protocol",
+ "windows 0.62.2",
+]
 
 [[package]]
 name = "same-file"

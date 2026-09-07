@@ -1,4 +1,6 @@
-# CUE — Product & Architecture Specification v0.2
+# sakana — Product & Architecture Specification v0.2
+
+> 原名 CUE,§139 起改名 sakana;历史章节中的 CUE 字样不改写。
 
 ## 0. 文档状态
 
@@ -44,7 +46,7 @@
 | §74–§88 | [architecture/08-scope-contract.md](architecture/08-scope-contract.md) | V1 范围、非功能需求、最终边界、**§86 最终 Contract**、判断规则、实现顺序 |
 | §89–§106 | [architecture/09-async.md](architecture/09-async.md) | V1 成功标准、设计哲学、异步任务模型(QueryTicket 北极星) |
 | §107–§116 | [architecture/10-v1-landing.md](architecture/10-v1-landing.md) | V1 落地决策:IME、Row 布局、Module 事件、跨平台、CoreEffect、单实例、性能契约、UX 不变量、托盘 |
-| §117–§138 | [architecture/records/](architecture/records/) | V1.x 实现记录,**每章一文件**,文件名即 § 编号 |
+| §117–§139 | [architecture/records/](architecture/records/) | V1.x 实现记录,**每章一文件**,文件名即 § 编号 |
 
 ### records/ 速查
 
@@ -72,6 +74,7 @@
 | §136 | [136-settings-value-visuals.md](architecture/records/136-settings-value-visuals.md) | 设置页值槽位视觉分层(开关/键帽/中间省略) |
 | §137 | [137-app-icon-cache.md](architecture/records/137-app-icon-cache.md) | 应用图标磁盘缓存 + 启动预载 |
 | §138 | [138-file-index.md](architecture/records/138-file-index.md) | FileModule 自建索引(取代 Everything / §31 / §118) |
+| §139 | [139-rename-sakana.md](architecture/records/139-rename-sakana.md) | 产品改名 CUE → sakana(全量 + 数据迁移) |
 
 ## 0.3 阅读顺序
 

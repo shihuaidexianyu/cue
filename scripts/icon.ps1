@@ -1,17 +1,17 @@
-﻿# SVG → 多尺寸 ICO(assets/cue.ico)。
+# SVG → 多尺寸 ICO(assets/sakana.ico)。
 # 无第三方依赖:Edge headless 按每个目标尺寸直接矢量重栅格化
 # (比从 512 降采样锐利),System.Drawing 仅作兜底;ICO 容器手卷
 # (PNG-in-ICO,Vista+ 全尺寸合法)。
 # 用法:powershell -File scripts/icon.ps1 [-Svg path] [-Out path]
 param(
-    [string]$Svg = "C:\Users\exqin\Desktop\cue\assets\cue.svg",
-    [string]$Out = "C:\Users\exqin\Desktop\cue\assets\cue.ico"
+    [string]$Svg = (Join-Path (Split-Path -Parent $PSScriptRoot) "assets\sakana.svg"),
+    [string]$Out = (Join-Path (Split-Path -Parent $PSScriptRoot) "assets\sakana.ico")
 )
 $ErrorActionPreference = "Stop"
 Add-Type -AssemblyName System.Drawing
 
 $sizes = @(16, 24, 32, 48, 64, 128, 256)
-$work = Join-Path $env:TEMP "cue-icon-gen"
+$work = Join-Path $env:TEMP "sakana-icon-gen"
 Remove-Item -Recurse -Force $work -ErrorAction SilentlyContinue | Out-Null
 New-Item -ItemType Directory -Force $work | Out-Null
 
