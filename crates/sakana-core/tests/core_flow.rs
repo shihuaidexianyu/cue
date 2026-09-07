@@ -340,8 +340,9 @@ fn trigger_spec_is_synthesized_for_non_default_modules() {
 
     core.open_settings();
     let model = core.settings_model().unwrap();
-    // 5 行 core.* + bm 的触发词行;默认模块(无触发词)没有该行。
-    assert_eq!(model.rows.len(), 6);
+    // 11 行 core.*(5 基础 + 6 锁键 §140)+ bm 的触发词行;
+    // 默认模块(无触发词)没有该行。
+    assert_eq!(model.rows.len(), 12);
     let keys: Vec<&str> = model.rows.iter().map(|r| r.key.as_ref()).collect();
     assert!(keys.contains(&"module.bm.trigger"));
     assert!(!keys.contains(&"module.default.trigger"));
@@ -1202,6 +1203,104 @@ fn dnd_mode_notify_skips_other_keys_and_failed_transactions() {
 }
 
 // ---------------------------------------------------------------------
+// 锁键服务设置(§140):Core 合成 6 行,校验 = protocol from_settings,
+// commit 后全量配置通知(NotifyLockKeys,dnd_mode 同款模式)。
+// ---------------------------------------------------------------------
+
+/// 带 notify_lockkeys 的 setup;通知序列录进 log。
+fn setup_with_lockkeys_notify(log: Arc<Mutex<Vec<LockKeysConfig>>>) -> Core {
+    let spawner = ManualSpawner::new();
+    let mut registry = ModuleRegistry::new();
+    registry
+        .register(Box::new(FakeModule::new("fake")))
+        .unwrap();
+    let config = CoreConfig {
+        notify_lockkeys: Some(Box::new(move |c| log.lock().unwrap().push(c))),
+        ..test_config()
+    };
+    Core::new(config, registry, spawner).unwrap()
+}
+
+#[test]
+fn lockkeys_notify_fires_initial_with_defaults_and_on_commit() {
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let mut core = setup_with_lockkeys_notify(log.clone());
+    // 初始通知:持久化为空 → protocol 默认配置。
+    assert_eq!(*log.lock().unwrap(), vec![LockKeysConfig::default()]);
+
+    core.apply_setting("core.lockkeys.hold_ms", SettingValue::String("500".into()))
+        .unwrap();
+    // commit 后下发全量配置,改过的行已生效。
+    let last = log.lock().unwrap().last().copied().unwrap();
+    assert_eq!(last.hold_ms, 500);
+    assert_eq!(
+        last,
+        LockKeysConfig {
+            hold_ms: 500,
+            ..LockKeysConfig::default()
+        }
+    );
+    assert_eq!(log.lock().unwrap().len(), 2);
+}
+
+#[test]
+fn lockkeys_invalid_candidate_fails_without_commit_or_notify() {
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let mut core = setup_with_lockkeys_notify(log.clone());
+
+    // allowlist 之外 / 越界 / 非数字:都不 commit、不通知。
+    core.apply_setting(
+        "core.lockkeys.remap_key",
+        SettingValue::String("num_lock".into()),
+    )
+    .unwrap_err();
+    core.apply_setting("core.lockkeys.hold_ms", SettingValue::String("99".into()))
+        .unwrap_err();
+    core.apply_setting("core.lockkeys.hold_ms", SettingValue::String("abc".into()))
+        .unwrap_err();
+    core.apply_setting(
+        "core.lockkeys.numlock_mode",
+        SettingValue::String("locked".into()),
+    )
+    .unwrap_err();
+    assert_eq!(log.lock().unwrap().len(), 1); // 只有初始那次
+    // 生效值仍是默认(通知载荷即全量生效配置,最后一次 = 初始默认)。
+    assert_eq!(
+        log.lock().unwrap().last().unwrap(),
+        &LockKeysConfig::default()
+    );
+}
+
+#[test]
+fn lockkeys_notify_covers_all_six_rows_and_skips_unrelated() {
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let mut core = setup_with_lockkeys_notify(log.clone());
+
+    // 非锁键行不通知。
+    core.apply_setting(KEY_START_ON_BOOT, SettingValue::Bool(true))
+        .unwrap();
+    assert_eq!(log.lock().unwrap().len(), 1);
+
+    core.apply_setting("core.lockkeys.enabled", SettingValue::Bool(false))
+        .unwrap();
+    assert!(!log.lock().unwrap().last().unwrap().enabled);
+    core.apply_setting("core.lockkeys.osd", SettingValue::Bool(false))
+        .unwrap();
+    assert!(!log.lock().unwrap().last().unwrap().osd);
+    core.apply_setting(
+        "core.lockkeys.numlock_mode",
+        SettingValue::String("always_on".into()),
+    )
+    .unwrap();
+    assert_eq!(
+        log.lock().unwrap().last().unwrap().numlock_mode,
+        NumLockMode::AlwaysOn
+    );
+    // 初始 + 3 次锁键行 commit。
+    assert_eq!(log.lock().unwrap().len(), 4);
+}
+
+// ---------------------------------------------------------------------
 // present 路由
 // ---------------------------------------------------------------------
 
@@ -1469,17 +1568,19 @@ fn settings_view_lifecycle_and_effects() {
     assert!(core.in_settings());
     assert!(core.session().is_none());
     let model = core.settings_model().unwrap();
-    assert_eq!(model.rows.len(), 5); // log_file + hotkey + hide_on_focus_loss + start_on_boot + dnd_mode
+    // log_file + hotkey + hide_on_focus_loss + start_on_boot + dnd_mode + 6 锁键行(§140)
+    assert_eq!(model.rows.len(), 11);
     assert!(model.rows.iter().any(|r| r.key.as_ref() == "core.log_file"));
     assert_eq!(model.selected, 0);
 
-    core.settings_select_next();
-    core.settings_select_next();
-    core.settings_select_next();
-    core.settings_select_next(); // 夹紧在最后一行
-    assert_eq!(core.settings_model().unwrap().selected, 4);
+    // 超量 next:夹紧在最后一行(行数变动不破坏本测试)。
+    let last = model.rows.len() - 1;
+    for _ in 0..=last {
+        core.settings_select_next();
+    }
+    assert_eq!(core.settings_model().unwrap().selected, last);
     core.settings_select_prev();
-    assert_eq!(core.settings_model().unwrap().selected, 3);
+    assert_eq!(core.settings_model().unwrap().selected, last - 1);
 
     // 热键在设置页 = Esc(关闭设置)。
     core.hotkey_pressed();

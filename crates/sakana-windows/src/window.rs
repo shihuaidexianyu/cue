@@ -4,25 +4,28 @@
 //! (raw window handle),把 GPUI 版本漂移关在门外。
 
 use sakana_protocol::logln;
-use std::sync::atomic::{AtomicIsize, Ordering};
+use std::collections::HashMap;
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::Graphics::Gdi::{InvalidateRect, UpdateWindow};
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::{BOOL, Error};
 
-/// 枚举本进程的顶层窗口,返回 GPUI 主窗口的 HWND。
-///
-/// 按类名过滤:GPUI 0.2 的主窗口类名是 `Zed::Window`。host window
-/// 也是本进程的顶层(隐藏)窗口,不过滤就会张冠李戴;
-/// 也不过滤可见性——Launcher 窗口创建时就是隐藏的。
-pub fn find_main_window_hwnd() -> Option<HWND> {
+/// 枚举本进程的顶层窗口,返回 GPUI 窗口(`Zed::Window` 类)的 HWND。
+/// exclude 用于多窗口场景(§140 OSD):发现 OSD 窗口时排除已知的
+/// Launcher HWND。host window 也是本进程的顶层(隐藏)窗口,类名
+/// 过滤把它挡在门外;也不过滤可见性——Launcher/OSD 创建时都是隐藏的。
+fn find_zed_window(exclude: Option<HWND>) -> Option<HWND> {
     struct Search {
         pid: u32,
+        exclude: isize,
         result: HWND,
     }
     unsafe extern "system" fn enum_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
         unsafe {
             let search = &mut *(lparam.0 as *mut Search);
+            if hwnd.0 as isize == search.exclude {
+                return BOOL(1);
+            }
             let mut pid = 0u32;
             GetWindowThreadProcessId(hwnd, Some(&mut pid));
             if pid != search.pid {
@@ -40,11 +43,25 @@ pub fn find_main_window_hwnd() -> Option<HWND> {
     unsafe {
         let mut search = Search {
             pid: std::process::id(),
+            exclude: exclude.map(|h| h.0 as isize).unwrap_or(0),
             result: HWND::default(),
         };
         let _ = EnumWindows(Some(enum_proc), LPARAM(&mut search as *mut Search as isize));
         (!search.result.0.is_null()).then_some(search.result)
     }
+}
+
+/// 唯一的 GPUI 窗口场景:取第一个 `Zed::Window`(Launcher)。
+/// **多窗口下必须先发现 Launcher 再创建 OSD**——本函数取枚举序
+/// 第一个,两个 GPUI 窗口都在时结果不保证是 Launcher。
+pub fn find_main_window_hwnd() -> Option<HWND> {
+    find_zed_window(None)
+}
+
+/// 发现 OSD(第二个 GPUI)窗口:排除已知的 Launcher HWND(§140)。
+/// 窗口创建顺序见 main.rs:launcher → 发现 → OSD → 本函数。
+pub fn find_window_hwnd_excluding(exclude: HWND) -> Option<HWND> {
+    find_zed_window(Some(exclude))
 }
 
 /// Hotkey 路径的显示 + 前台聚焦。WM_HOTKEY 处理是系统认可的
@@ -95,6 +112,10 @@ pub fn hide(hwnd: HWND) {
 /// 还有 WM_DPICHANGED,GPUI 在那两条路径上自行重挂显示器;渲染只依赖
 /// scale_factor,不依赖 display handle。窗口可见时不吞,GPUI 的
 /// 复原逻辑照常工作。窗口与进程同寿,无需还原子类。
+///
+/// 多窗口支持(§140):原 wndproc 按 HWND 存进映射表——Launcher 与
+/// OSD 窗口各装各的,单个 static 会被第二次安装覆盖(Launcher 的
+/// 链就断了)。
 pub fn install_display_change_guard(hwnd: HWND) {
     unsafe {
         // 返回值是原 wndproc;类过程指针不可能为 0,为 0 即失败。
@@ -106,11 +127,16 @@ pub fn install_display_change_guard(hwnd: HWND) {
             );
             return;
         }
-        ORIG_LAUNCHER_WNDPROC.store(orig, Ordering::SeqCst);
+        ORIG_WNDPROCS
+            .lock()
+            .unwrap()
+            .get_or_insert_with(HashMap::new)
+            .insert(hwnd.0 as isize, orig);
     }
 }
 
-static ORIG_LAUNCHER_WNDPROC: AtomicIsize = AtomicIsize::new(0);
+static ORIG_WNDPROCS: std::sync::Mutex<Option<std::collections::HashMap<isize, isize>>> =
+    std::sync::Mutex::new(None);
 
 unsafe extern "system" fn display_guard_proc(
     hwnd: HWND,
@@ -125,7 +151,15 @@ unsafe extern "system" fn display_guard_proc(
             );
             return LRESULT(0);
         }
-        let orig = ORIG_LAUNCHER_WNDPROC.load(Ordering::SeqCst);
+        let orig = ORIG_WNDPROCS
+            .lock()
+            .unwrap()
+            .as_ref()
+            .and_then(|m| m.get(&(hwnd.0 as isize)).copied());
+        let Some(orig) = orig else {
+            // 不该发生(安装失败时根本没换 wndproc);防御性直通。
+            return DefWindowProcW(hwnd, msg, wparam, lparam);
+        };
         let orig: WNDPROC = std::mem::transmute::<isize, WNDPROC>(orig);
         CallWindowProcW(orig, hwnd, msg, wparam, lparam)
     }

@@ -97,16 +97,11 @@ fn frame_margins(hwnd: HWND) -> (i32, i32, i32, i32) {
 /// 第一步移动后窗口 DPI 已与目标显示器同步,此时量取的边框
 /// 差值才是当前 DPI 下的真值;位置也改按客户区居中/定位,
 /// 可见内容与旧版几乎重合(旧版客户端偏上约 4px)。
-pub fn place_on_active_monitor(hwnd: HWND, logical_w: i32, logical_h: i32) {
-    let (monitor, work) = active_monitor();
-    let dpi = monitor_dpi(monitor, hwnd);
-    let w = logical_to_physical(logical_w, dpi);
-    let h = logical_to_physical(logical_h, dpi);
-    let area_w = work.right - work.left;
-    let area_h = work.bottom - work.top;
-    let x = work.left + (area_w - w).max(0) / 2;
-    // 窗口过高时保证底边不超出工作区。
-    let y = (work.top + area_h / 4).min(work.bottom - h).max(work.top);
+/// 两步 SetWindowPos 的公共段:第一步移动+显示(NOACTIVATE,顺带
+/// 完成跨 DPI 显示器的 WM_DPICHANGED 同步),第二步在同一显示器上
+/// 按客户区定最终尺寸(边框差值此时才是当前 DPI 真值)。
+/// x/y 是客户区左上角目标位置,w/h 是客户区物理尺寸。
+fn place_two_step(hwnd: HWND, x: i32, y: i32, w: i32, h: i32) {
     unsafe {
         let _ = SetWindowPos(
             hwnd,
@@ -129,4 +124,34 @@ pub fn place_on_active_monitor(hwnd: HWND, logical_w: i32, logical_h: i32) {
             SWP_SHOWWINDOW | SWP_NOACTIVATE,
         );
     }
+}
+
+pub fn place_on_active_monitor(hwnd: HWND, logical_w: i32, logical_h: i32) {
+    let (monitor, work) = active_monitor();
+    let dpi = monitor_dpi(monitor, hwnd);
+    let w = logical_to_physical(logical_w, dpi);
+    let h = logical_to_physical(logical_h, dpi);
+    let area_w = work.right - work.left;
+    let area_h = work.bottom - work.top;
+    let x = work.left + (area_w - w).max(0) / 2;
+    // 窗口过高时保证底边不超出工作区。
+    let y = (work.top + area_h / 4).min(work.bottom - h).max(work.top);
+    place_two_step(hwnd, x, y, w, h);
+}
+
+/// 把窗口放置到活跃显示器正中央(§140 锁键 OSD:用户明确要"屏幕
+/// 中间",与 Launcher 的 1/4 高度不同)。其余纪律与
+/// `place_on_active_monitor` 完全相同:物理像素换算、两步
+/// SetWindowPos 防跨 DPI 双重缩放、客户区精确尺寸、SWP_NOACTIVATE
+/// 恒不抢焦(OSD 永远不拿焦点)。
+pub fn place_centered_on_active_monitor(hwnd: HWND, logical_w: i32, logical_h: i32) {
+    let (monitor, work) = active_monitor();
+    let dpi = monitor_dpi(monitor, hwnd);
+    let w = logical_to_physical(logical_w, dpi);
+    let h = logical_to_physical(logical_h, dpi);
+    let area_w = work.right - work.left;
+    let area_h = work.bottom - work.top;
+    let x = work.left + (area_w - w).max(0) / 2;
+    let y = work.top + (area_h - h).max(0) / 2;
+    place_two_step(hwnd, x, y, w, h);
 }

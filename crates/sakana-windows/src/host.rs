@@ -19,7 +19,8 @@ use windows::Win32::UI::Accessibility::{HWINEVENTHOOK, SetWinEventHook, UnhookWi
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::{Error, PCWSTR, w};
 
-/// Host 上报给编排层的事件(由 sakana binary 翻译成 Core 的 HostEvent)。
+/// Host 上报给编排层的事件(由 sakana binary 翻译成 Core 的 HostEvent,
+/// 或直接在 handler 内拦截——见 main.rs)。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HostMsg {
     HotkeyPressed,
@@ -31,6 +32,15 @@ pub enum HostMsg {
     QuitRequested,
     /// 前台焦点离开 Launcher 窗口。
     FocusLost,
+    /// 锁键状态变化(§140,lockkeys worker 的状态 diff 上报)。
+    /// 不进 Core:编排层直接路由给 OSD。
+    LockKeyChanged {
+        key: crate::lockkeys::LockKey,
+        on: bool,
+    },
+    /// 会话级复位信号(锁屏/挂起/唤醒):lockkeys worker 丢弃挂起
+    /// 手势,OSD 收起。不进 Core(锁屏的 FocusLost 另行上报)。
+    SessionReset,
 }
 
 /// 窗口类名。同时是第二实例 `FindWindow` 的定位依据。
@@ -48,6 +58,9 @@ pub const WM_SAKANA_TRAY: u32 = WM_APP + 3;
 pub const WM_SAKANA_TRAY_CMD: u32 = WM_APP + 4;
 /// 托盘命令的定时器 id 基数:timer id = 基数 + 命令 id(免去全局状态)。
 pub const TRAY_CMD_TIMER_BASE: usize = 0xC0E0;
+/// 锁键状态变化(§140):lockkeys worker 投递,wParam = 键(0 caps /
+/// 1 num),lParam = 开关态。
+pub const WM_SAKANA_LOCKKEY: u32 = WM_APP + 5;
 
 /// WTS 会话通知(winuser.h;windows crate 未导出,按 ABI 值定义)。
 /// 用途见 wnd_proc 的 WM_WTSSESSION 分支:锁屏 = 失焦。
@@ -185,8 +198,30 @@ unsafe extern "system" fn host_wnd_proc(
                     // 残留可见是误唤醒,主动 show 更是。
                     if wparam.0 == WTS_SESSION_LOCK || wparam.0 == WTS_CONSOLE_DISCONNECT {
                         logln!("[host] session lock/disconnect -> FocusLost");
+                        // 锁屏后按键的释放事件不会送达(安全桌面),
+                        // 手势可能挂着等不到结算——一并复位(§140)。
+                        handler(HostMsg::SessionReset);
                         handler(HostMsg::FocusLost);
                     }
+                }
+                // 挂起/唤醒同理会吞掉按键释放(WinCaps 同款处理)。
+                WM_POWERBROADCAST
+                    if matches!(
+                        wparam.0 as u32,
+                        PBT_APMSUSPEND | PBT_APMRESUMEAUTOMATIC | PBT_APMRESUMESUSPEND
+                    ) =>
+                {
+                    handler(HostMsg::SessionReset);
+                }
+                m if m == WM_SAKANA_LOCKKEY => {
+                    let key = match wparam.0 {
+                        0 => crate::lockkeys::LockKey::Caps,
+                        _ => crate::lockkeys::LockKey::Num,
+                    };
+                    handler(HostMsg::LockKeyChanged {
+                        key,
+                        on: lparam.0 != 0,
+                    });
                 }
                 m if m == WM_SAKANA_TRAY => crate::tray::handle_message(hwnd, lparam, handler),
                 m if m == WM_SAKANA_TRAY_CMD => {

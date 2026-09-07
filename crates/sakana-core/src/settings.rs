@@ -37,6 +37,12 @@ pub type OpenPath = Box<dyn FnMut(&std::path::Path) -> Result<(), String>>;
 /// 重复同值 commit 也会通知(host 侧换图标幂等,无需 Core 去重)。
 pub type NotifyDndMode = Box<dyn FnMut(bool)>;
 
+/// core.lockkeys.* 的 commit 后通知(§140,锁键 worker 配置下发):
+/// 与 NotifyDndMode 同一模式——Host 注入、UI 线程调用、无返回值,
+/// 不参与事务。Core::new 以初始值调一次,此后任一锁键行成功
+/// commit 后以全量配置再调一次。
+pub type NotifyLockKeys = Box<dyn FnMut(LockKeysConfig)>;
+
 const HEADER: &str = "cue-settings-v1";
 
 pub const KEY_HOTKEY: &str = "core.hotkey";
@@ -48,6 +54,18 @@ pub const KEY_LOG_FILE: &str = "core.log_file";
 /// 旧 key(§127,2026-08-24 更名免打扰模式前):read_persisted 读入时
 /// 映射到新 key,下次整体重写时旧 key 自愈消失。
 const KEY_GAME_MODE_LEGACY: &str = "core.game_mode";
+
+/// 锁键服务(§140)的 Core 合成行。校验唯一入口是 protocol 的
+/// `LockKeysConfig::from_settings`;任一行的 commit 都触发全量
+/// 配置通知(NotifyLockKeys)。
+pub const KEY_LOCKKEYS_ENABLED: &str = "core.lockkeys.enabled";
+pub const KEY_LOCKKEYS_REMAP_KEY: &str = "core.lockkeys.remap_key";
+pub const KEY_LOCKKEYS_TAP_ACTION: &str = "core.lockkeys.tap_action";
+pub const KEY_LOCKKEYS_HOLD_MS: &str = "core.lockkeys.hold_ms";
+pub const KEY_LOCKKEYS_NUMLOCK_MODE: &str = "core.lockkeys.numlock_mode";
+pub const KEY_LOCKKEYS_OSD: &str = "core.lockkeys.osd";
+/// 锁键行命名空间前缀(apply 流程按它识别锁键行)。
+pub const LOCKKEYS_PREFIX: &str = "core.lockkeys.";
 
 /// 给 UI 的渲染模型:Core 出模型,sakana-ui 只渲染——
 /// Module 永远不画 GPUI(禁止 `render_settings_gpui`)。
@@ -216,6 +234,74 @@ impl SettingsHost {
             Some(SettingValue::Bool(b)) => *b,
             _ => true,
         }
+    }
+
+    /// 锁键服务(§140)的当前全量配置。持久化文件被手改成非法值时
+    /// warn + 回落默认(设置页所见与生效值的偏差随下次事务自愈,
+    /// 与 §128 空触发词同款思路)。
+    pub fn lockkeys_config(&self) -> LockKeysConfig {
+        match self.assemble_lockkeys(None) {
+            Ok(c) => c,
+            Err(e) => {
+                logln!("[warn] invalid persisted lockkeys settings, using defaults: {e}");
+                LockKeysConfig::default()
+            }
+        }
+    }
+
+    /// core.lockkeys.* 行的事务前校验:把候选值合并进当前已 commit
+    /// 值,跑 protocol 的 from_settings(唯一校验点)。失败不 commit。
+    pub fn validate_lockkeys_change(
+        &self,
+        key: &str,
+        candidate: &SettingValue,
+    ) -> Result<(), String> {
+        self.assemble_lockkeys(Some((key, candidate)))
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+
+    /// 组装全量配置:override_kv 给出"某行将变成候选值",其余行取
+    /// 当前已 commit 值。缺行的兜底默认值仅防御用——register_specs
+    /// 保证每个已注册行都有值;值类型由 apply 流程的 kind_matches
+    /// 保证,不匹配按缺行处理。
+    fn assemble_lockkeys(
+        &self,
+        override_kv: Option<(&str, &SettingValue)>,
+    ) -> Result<LockKeysConfig, LockKeysConfigError> {
+        let bool_of = |k: &str, def: bool| -> bool {
+            if let Some((ok, ov)) = override_kv
+                && ok == k
+            {
+                return matches!(ov, SettingValue::Bool(true));
+            }
+            match self.values.get(k) {
+                Some(SettingValue::Bool(b)) => *b,
+                _ => def,
+            }
+        };
+        let str_of = |k: &str, def: &str| -> String {
+            if let Some((ok, ov)) = override_kv
+                && ok == k
+            {
+                return match ov {
+                    SettingValue::String(s) => s.clone(),
+                    _ => String::new(),
+                };
+            }
+            match self.values.get(k) {
+                Some(SettingValue::String(s)) => s.clone(),
+                _ => def.to_string(),
+            }
+        };
+        LockKeysConfig::from_settings(
+            bool_of(KEY_LOCKKEYS_ENABLED, true),
+            &str_of(KEY_LOCKKEYS_REMAP_KEY, "caps_lock"),
+            &str_of(KEY_LOCKKEYS_TAP_ACTION, "ctrl_space"),
+            &str_of(KEY_LOCKKEYS_HOLD_MS, "350"),
+            &str_of(KEY_LOCKKEYS_NUMLOCK_MODE, "hold"),
+            bool_of(KEY_LOCKKEYS_OSD, true),
+        )
     }
 
     /// 模块设置快照(ModuleContext.settings):短 key(去掉
@@ -416,6 +502,65 @@ fn core_specs(log_path: PathBuf) -> Vec<SettingSpec> {
             default: SettingValue::Bool(true),
             apply_policy: ApplyPolicy::Immediate,
         },
+        // 锁键服务(§140):String 行的取值校验在 apply 流程由
+        // LockKeysConfig::from_settings 集中完成,spec 层不设防。
+        SettingSpec {
+            key: SettingKey(Arc::from(KEY_LOCKKEYS_ENABLED)),
+            label: "锁键手势".into(),
+            description: Some(
+                "锁键服务总开关(§140):触发键手势、NumLock 守护与状态提示;关闭后按键全部恢复系统原生行为"
+                    .into(),
+            ),
+            kind: SettingKind::Bool,
+            default: SettingValue::Bool(true),
+            apply_policy: ApplyPolicy::Immediate,
+        },
+        SettingSpec {
+            key: SettingKey(Arc::from(KEY_LOCKKEYS_REMAP_KEY)),
+            label: "手势触发键".into(),
+            description: Some(
+                "中文输入法前台:轻点切输入法、长按切换大写;可选 caps_lock / scroll_lock".into(),
+            ),
+            kind: SettingKind::String,
+            default: SettingValue::String("caps_lock".into()),
+            apply_policy: ApplyPolicy::Immediate,
+        },
+        SettingSpec {
+            key: SettingKey(Arc::from(KEY_LOCKKEYS_TAP_ACTION)),
+            label: "轻点动作".into(),
+            description: Some(
+                "轻点触发键时注入的输入法切换快捷键:ctrl_space(微软拼音等)/ shift".into(),
+            ),
+            kind: SettingKind::String,
+            default: SettingValue::String("ctrl_space".into()),
+            apply_policy: ApplyPolicy::Immediate,
+        },
+        SettingSpec {
+            key: SettingKey(Arc::from(KEY_LOCKKEYS_HOLD_MS)),
+            label: "长按阈值(毫秒)".into(),
+            description: Some("轻点与长按的分界,150–1000;触发键手势与 NumLock 防误触共用".into()),
+            kind: SettingKind::String,
+            default: SettingValue::String("350".into()),
+            apply_policy: ApplyPolicy::Immediate,
+        },
+        SettingSpec {
+            key: SettingKey(Arc::from(KEY_LOCKKEYS_NUMLOCK_MODE)),
+            label: "NumLock 模式".into(),
+            description: Some(
+                "native 不干预 / hold 长按才切换(防误触)/ always_on 常开守护,被关掉立即打回开".into(),
+            ),
+            kind: SettingKind::String,
+            default: SettingValue::String("hold".into()),
+            apply_policy: ApplyPolicy::Immediate,
+        },
+        SettingSpec {
+            key: SettingKey(Arc::from(KEY_LOCKKEYS_OSD)),
+            label: "锁键状态提示".into(),
+            description: Some("大小写 / 数字键盘锁定状态变化时在屏幕中央弹出提示卡片,片刻自动消失".into()),
+            kind: SettingKind::Bool,
+            default: SettingValue::Bool(true),
+            apply_policy: ApplyPolicy::Immediate,
+        },
     ]
 }
 
@@ -486,6 +631,36 @@ mod tests {
         let host = SettingsHost::new(Some(file.clone()), None, None, None);
         assert_eq!(host.hotkey(), Hotkey::from_str("ctrl+alt+k").unwrap());
         assert!(!host.hide_on_focus_loss());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn lockkeys_config_falls_back_to_default_on_persisted_junk() {
+        let dir = std::env::temp_dir().join(format!("sakana-lockkeys-test-{}", std::process::id()));
+        let file = dir.join("settings.tsv");
+        std::fs::create_dir_all(&dir).unwrap();
+        // 手工改坏的持久化值:hold_ms 非数字。lockkeys_config() 不 panic,
+        // 整体回落 protocol 默认(§140;§128 空触发词同款自愈思路)。
+        std::fs::write(
+            &file,
+            "cue-settings-v1\ncore.lockkeys.hold_ms\tabc\ncore.lockkeys.enabled\tfalse\n",
+        )
+        .unwrap();
+        let host = SettingsHost::new(Some(file.clone()), None, None, None);
+        assert_eq!(host.lockkeys_config(), LockKeysConfig::default());
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // 合法持久化照常生效。
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            &file,
+            "cue-settings-v1\ncore.lockkeys.hold_ms\t500\ncore.lockkeys.numlock_mode\talways_on\n",
+        )
+        .unwrap();
+        let host = SettingsHost::new(Some(file.clone()), None, None, None);
+        let c = host.lockkeys_config();
+        assert_eq!(c.hold_ms, 500);
+        assert_eq!(c.numlock_mode, NumLockMode::AlwaysOn);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
