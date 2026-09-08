@@ -194,6 +194,7 @@ impl SettingsHost {
                 .persisted
                 .get(&key)
                 .and_then(|raw| decode_value(spec.kind, raw))
+                .filter(|v| spec.kind.validate(v).is_ok())
                 .unwrap_or_else(|| spec.default.clone());
             self.values.insert(key, value);
             self.specs.push(spec);
@@ -236,9 +237,8 @@ impl SettingsHost {
         }
     }
 
-    /// 锁键服务(§140)的当前全量配置。持久化文件被手改成非法值时
-    /// warn + 回落默认(设置页所见与生效值的偏差随下次事务自愈,
-    /// 与 §128 空触发词同款思路)。
+    /// 锁键服务当前全量配置。注册时逐项修复非法持久化值;
+    /// 此处的整体默认仅作内部不变量失效时的最后兜底。
     pub fn lockkeys_config(&self) -> LockKeysConfig {
         match self.assemble_lockkeys(None) {
             Ok(c) => c,
@@ -263,7 +263,7 @@ impl SettingsHost {
 
     /// 组装全量配置:override_kv 给出"某行将变成候选值",其余行取
     /// 当前已 commit 值。缺行的兜底默认值仅防御用——register_specs
-    /// 保证每个已注册行都有值;值类型由 apply 流程的 kind_matches
+    /// 保证每个已注册行都有值;值类型由 apply 流程的 SettingKind::validate
     /// 保证,不匹配按缺行处理。
     fn assemble_lockkeys(
         &self,
@@ -285,12 +285,14 @@ impl SettingsHost {
                 && ok == k
             {
                 return match ov {
-                    SettingValue::String(s) => s.clone(),
+                    SettingValue::String(s) | SettingValue::Enum(s) => s.clone(),
+                    SettingValue::Integer(n) => n.to_string(),
                     _ => String::new(),
                 };
             }
             match self.values.get(k) {
-                Some(SettingValue::String(s)) => s.clone(),
+                Some(SettingValue::String(s) | SettingValue::Enum(s)) => s.clone(),
+                Some(SettingValue::Integer(n)) => n.to_string(),
                 _ => def.to_string(),
             }
         };
@@ -502,8 +504,7 @@ fn core_specs(log_path: PathBuf) -> Vec<SettingSpec> {
             default: SettingValue::Bool(true),
             apply_policy: ApplyPolicy::Immediate,
         },
-        // 锁键服务(§140):String 行的取值校验在 apply 流程由
-        // LockKeysConfig::from_settings 集中完成,spec 层不设防。
+        // 锁键服务(§141):范围与候选项进入规格,UI 与持久化共用校验。
         SettingSpec {
             key: SettingKey(Arc::from(KEY_LOCKKEYS_ENABLED)),
             label: "锁键手势".into(),
@@ -519,38 +520,48 @@ fn core_specs(log_path: PathBuf) -> Vec<SettingSpec> {
             key: SettingKey(Arc::from(KEY_LOCKKEYS_REMAP_KEY)),
             label: "手势触发键".into(),
             description: Some(
-                "中文输入法前台:轻点切输入法、长按切换大写;可选 caps_lock / scroll_lock".into(),
+                "中文输入法前台:轻点切输入法、长按切换锁定状态;左右键切换触发键".into(),
             ),
-            kind: SettingKind::String,
-            default: SettingValue::String("caps_lock".into()),
+            kind: SettingKind::Enum(&[
+                SettingOption { value: "caps_lock", label: "大小写锁定键" },
+                SettingOption { value: "scroll_lock", label: "滚动锁定键" },
+            ]),
+            default: SettingValue::Enum("caps_lock".into()),
             apply_policy: ApplyPolicy::Immediate,
         },
         SettingSpec {
             key: SettingKey(Arc::from(KEY_LOCKKEYS_TAP_ACTION)),
             label: "轻点动作".into(),
             description: Some(
-                "轻点触发键时注入的输入法切换快捷键:ctrl_space(微软拼音等)/ shift".into(),
+                "轻点时发送的输入法切换快捷键;左右键选择 Ctrl + 空格或 Shift".into(),
             ),
-            kind: SettingKind::String,
-            default: SettingValue::String("ctrl_space".into()),
+            kind: SettingKind::Enum(&[
+                SettingOption { value: "ctrl_space", label: "Ctrl + 空格" },
+                SettingOption { value: "shift", label: "Shift" },
+            ]),
+            default: SettingValue::Enum("ctrl_space".into()),
             apply_policy: ApplyPolicy::Immediate,
         },
         SettingSpec {
             key: SettingKey(Arc::from(KEY_LOCKKEYS_HOLD_MS)),
             label: "长按阈值(毫秒)".into(),
             description: Some("轻点与长按的分界,150–1000;触发键手势与 NumLock 防误触共用".into()),
-            kind: SettingKind::String,
-            default: SettingValue::String("350".into()),
+            kind: SettingKind::Integer { min: *LockKeysConfig::HOLD_MS_RANGE.start() as i64, max: *LockKeysConfig::HOLD_MS_RANGE.end() as i64 },
+            default: SettingValue::Integer(350),
             apply_policy: ApplyPolicy::Immediate,
         },
         SettingSpec {
             key: SettingKey(Arc::from(KEY_LOCKKEYS_NUMLOCK_MODE)),
             label: "NumLock 模式".into(),
             description: Some(
-                "native 不干预 / hold 长按才切换(防误触)/ always_on 常开守护,被关掉立即打回开".into(),
+                "左右键切换:系统原生不干预、长按切换防误触、始终开启自动恢复数字键盘".into(),
             ),
-            kind: SettingKind::String,
-            default: SettingValue::String("hold".into()),
+            kind: SettingKind::Enum(&[
+                SettingOption { value: "native", label: "系统原生" },
+                SettingOption { value: "hold", label: "长按切换" },
+                SettingOption { value: "always_on", label: "始终开启" },
+            ]),
+            default: SettingValue::Enum("hold".into()),
             apply_policy: ApplyPolicy::Immediate,
         },
         SettingSpec {
@@ -577,10 +588,10 @@ fn encode_value(v: &SettingValue) -> String {
 fn decode_value(kind: SettingKind, raw: &str) -> Option<SettingValue> {
     Some(match kind {
         SettingKind::Bool => SettingValue::Bool(raw == "true"),
-        SettingKind::Integer => SettingValue::Integer(raw.parse().ok()?),
+        SettingKind::Integer { .. } => SettingValue::Integer(raw.parse().ok()?),
         SettingKind::Hotkey => SettingValue::Hotkey(raw.parse().ok()?),
         SettingKind::String => SettingValue::String(unescape(raw)?),
-        SettingKind::Enum => SettingValue::Enum(unescape(raw)?),
+        SettingKind::Enum(_) => SettingValue::Enum(unescape(raw)?),
         SettingKind::Path => SettingValue::Path(PathBuf::from(unescape(raw)?)),
     })
 }
@@ -635,19 +646,25 @@ mod tests {
     }
 
     #[test]
-    fn lockkeys_config_falls_back_to_default_on_persisted_junk() {
+    fn invalid_persisted_field_preserves_other_lockkeys_settings() {
         let dir = std::env::temp_dir().join(format!("sakana-lockkeys-test-{}", std::process::id()));
         let file = dir.join("settings.tsv");
         std::fs::create_dir_all(&dir).unwrap();
         // 手工改坏的持久化值:hold_ms 非数字。lockkeys_config() 不 panic,
-        // 整体回落 protocol 默认(§140;§128 空触发词同款自愈思路)。
+        // 只修复阈值,保留用户关闭服务的选择(§141)。
         std::fs::write(
             &file,
             "cue-settings-v1\ncore.lockkeys.hold_ms\tabc\ncore.lockkeys.enabled\tfalse\n",
         )
         .unwrap();
         let host = SettingsHost::new(Some(file.clone()), None, None, None);
-        assert_eq!(host.lockkeys_config(), LockKeysConfig::default());
+        assert_eq!(
+            host.lockkeys_config(),
+            LockKeysConfig {
+                enabled: false,
+                ..LockKeysConfig::default()
+            }
+        );
         let _ = std::fs::remove_dir_all(&dir);
 
         // 合法持久化照常生效。

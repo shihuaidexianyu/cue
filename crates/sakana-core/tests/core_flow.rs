@@ -287,6 +287,113 @@ fn setup_many(modules: Vec<FakeModule>) -> (Core, Arc<ManualSpawner>) {
     (core, spawner)
 }
 
+#[test]
+fn longest_custom_trigger_is_reachable_and_keeps_word_boundaries() {
+    let (mut core, _) = setup_many(vec![
+        FakeModule::new("app"),
+        FakeModule::with_trigger("file", "/"),
+        FakeModule::with_trigger("system", ">"),
+    ]);
+    core.apply_setting("module.system.trigger", SettingValue::String("//".into()))
+        .unwrap();
+    core.open_session();
+    core.input_changed("//shutdown".into());
+    assert_eq!(core.session().unwrap().active_module.as_str(), "system");
+    core.input_changed("/file".into());
+    assert_eq!(core.session().unwrap().active_module.as_str(), "file");
+    core.apply_setting("module.system.trigger", SettingValue::String("/s".into()))
+        .unwrap();
+    core.input_changed("/search".into());
+    assert_eq!(core.session().unwrap().active_module.as_str(), "file");
+    core.input_changed("/s shutdown".into());
+    assert_eq!(core.session().unwrap().active_module.as_str(), "system");
+}
+
+#[test]
+fn regained_host_focus_makes_next_hotkey_hide() {
+    let (mut core, _) = setup(FakeModule::new("app"));
+    core.apply_setting("core.hide_on_focus_loss", SettingValue::Bool(false))
+        .unwrap();
+    core.open_session();
+    core.handle_event(CoreEvent::Host(HostEvent::FocusLost));
+    assert!(core.is_visible());
+    core.handle_event(CoreEvent::Host(HostEvent::FocusGained));
+    core.take_effects();
+    core.hotkey_pressed();
+    assert!(!core.is_visible());
+    assert_eq!(core.take_effects(), vec![CoreEffect::HideLauncher]);
+}
+
+#[test]
+fn quit_flushes_usage_before_requesting_platform_exit() {
+    let dir = std::env::temp_dir().join(format!("sakana-quit-test-{}", std::process::id()));
+    let file = dir.join("usage.tsv");
+    let module = FakeModule::new("app");
+    module.push_ready(&["launched"]);
+    let mut registry = ModuleRegistry::new();
+    registry.register(Box::new(module)).unwrap();
+    let spawner = ManualSpawner::new();
+    let mut core = Core::new(
+        CoreConfig {
+            usage_file: Some(file.clone()),
+            storage_root: dir.clone(),
+            ..Default::default()
+        },
+        registry,
+        spawner.clone(),
+    )
+    .unwrap();
+    let mut rx = core.take_event_receiver();
+    core.open_session();
+    spawner.poll_all();
+    drain(&mut core, &mut rx);
+    core.activate_selected();
+    spawner.poll_all();
+    drain(&mut core, &mut rx);
+    core.take_effects();
+    core.handle_event(CoreEvent::Host(HostEvent::QuitRequested));
+    let reloaded = UsageStore::new(Some(file));
+    assert_eq!(
+        reloaded
+            .stat(&ModuleId::from_static("app"), "launched", ActionId::PRIMARY)
+            .unwrap()
+            .count,
+        1
+    );
+    assert_eq!(core.take_effects(), vec![CoreEffect::QuitApplication]);
+    drop(reloaded);
+    drop(core);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn integer_editor_reports_errors_and_commits_typed_values() {
+    let (mut core, _) = setup(FakeModule::new("app"));
+    core.open_settings();
+    assert!(
+        core.apply_setting_text("core.lockkeys.hold_ms", "abc")
+            .is_err()
+    );
+    assert!(core.settings_model().unwrap().error.is_some());
+    assert!(
+        core.apply_setting_text("core.lockkeys.hold_ms", "149")
+            .is_err()
+    );
+    core.apply_setting_text("core.lockkeys.hold_ms", " 500 ")
+        .unwrap();
+    let model = core.settings_model().unwrap();
+    assert!(model.error.is_none());
+    assert_eq!(
+        model
+            .rows
+            .iter()
+            .find(|r| r.key.as_ref() == "core.lockkeys.hold_ms")
+            .unwrap()
+            .value,
+        SettingValue::Integer(500)
+    );
+}
+
 fn drain(core: &mut Core, rx: &mut futures::channel::mpsc::UnboundedReceiver<CoreEvent>) {
     while let Ok(ev) = rx.try_recv() {
         core.handle_event(ev);
@@ -1228,7 +1335,7 @@ fn lockkeys_notify_fires_initial_with_defaults_and_on_commit() {
     // 初始通知:持久化为空 → protocol 默认配置。
     assert_eq!(*log.lock().unwrap(), vec![LockKeysConfig::default()]);
 
-    core.apply_setting("core.lockkeys.hold_ms", SettingValue::String("500".into()))
+    core.apply_setting("core.lockkeys.hold_ms", SettingValue::Integer(500))
         .unwrap();
     // commit 后下发全量配置,改过的行已生效。
     let last = log.lock().unwrap().last().copied().unwrap();
@@ -1251,16 +1358,16 @@ fn lockkeys_invalid_candidate_fails_without_commit_or_notify() {
     // allowlist 之外 / 越界 / 非数字:都不 commit、不通知。
     core.apply_setting(
         "core.lockkeys.remap_key",
-        SettingValue::String("num_lock".into()),
+        SettingValue::Enum("num_lock".into()),
     )
     .unwrap_err();
-    core.apply_setting("core.lockkeys.hold_ms", SettingValue::String("99".into()))
+    core.apply_setting("core.lockkeys.hold_ms", SettingValue::Integer(99))
         .unwrap_err();
     core.apply_setting("core.lockkeys.hold_ms", SettingValue::String("abc".into()))
         .unwrap_err();
     core.apply_setting(
         "core.lockkeys.numlock_mode",
-        SettingValue::String("locked".into()),
+        SettingValue::Enum("locked".into()),
     )
     .unwrap_err();
     assert_eq!(log.lock().unwrap().len(), 1); // 只有初始那次
@@ -1289,7 +1396,7 @@ fn lockkeys_notify_covers_all_six_rows_and_skips_unrelated() {
     assert!(!log.lock().unwrap().last().unwrap().osd);
     core.apply_setting(
         "core.lockkeys.numlock_mode",
-        SettingValue::String("always_on".into()),
+        SettingValue::Enum("always_on".into()),
     )
     .unwrap();
     assert_eq!(

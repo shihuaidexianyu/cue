@@ -13,9 +13,9 @@
 //! (索引级跟上)。
 //!
 //! 线程模型:一个索引线程(首爬 → 事件合批 → 增量应用/回退重爬);
-//! 每个根一个阻塞 ReadDirectoryChangesW watcher 线程。快照
+//! 每个根一个可取消的 overlapped ReadDirectoryChangesW watcher。快照
 //! `Arc<Vec>` 整体换入,查询零锁读。首爬完成前 query 在就绪门内
-//! 等待(§115:不闪"无结果")。watcher 先开、首爬后做,爬取窗口
+//! 等待(§115:不闪"无结果")。watcher 首次读取投递后才首爬,爬取窗口
 //! 的变更积在队列里随后合批补上——不丢变更。
 
 use sakana_protocol::{LogLevel, ModuleLogger};
@@ -25,19 +25,22 @@ use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::os::windows::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, TrySendError, sync_channel};
 use std::sync::{Arc, Mutex};
 use std::task::{Poll, Waker};
 use std::time::{Duration, SystemTime};
-use windows::Win32::Foundation::{CloseHandle, HANDLE};
+use windows::Win32::Foundation::{CloseHandle, HANDLE, WAIT_TIMEOUT};
 use windows::Win32::Storage::FileSystem::{
     CreateFileW, FILE_ACTION, FILE_ACTION_ADDED, FILE_ACTION_MODIFIED, FILE_ACTION_REMOVED,
     FILE_ACTION_RENAMED_NEW_NAME, FILE_ACTION_RENAMED_OLD_NAME, FILE_FLAG_BACKUP_SEMANTICS,
-    FILE_LIST_DIRECTORY, FILE_NOTIFY_CHANGE_DIR_NAME, FILE_NOTIFY_CHANGE_FILE_NAME,
-    FILE_NOTIFY_CHANGE_LAST_WRITE, FILE_NOTIFY_CHANGE_SIZE, FILE_NOTIFY_INFORMATION,
-    FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING, ReadDirectoryChangesW,
+    FILE_FLAG_OVERLAPPED, FILE_LIST_DIRECTORY, FILE_NOTIFY_CHANGE_DIR_NAME,
+    FILE_NOTIFY_CHANGE_FILE_NAME, FILE_NOTIFY_CHANGE_LAST_WRITE, FILE_NOTIFY_CHANGE_SIZE,
+    FILE_NOTIFY_INFORMATION, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+    ReadDirectoryChangesW,
 };
 use windows::Win32::System::Com::CoTaskMemFree;
+use windows::Win32::System::IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED};
+use windows::Win32::System::Threading::{CreateEventW, ResetEvent, WaitForSingleObject};
 use windows::Win32::UI::Shell::{
     FOLDERID_Desktop, FOLDERID_Documents, FOLDERID_Downloads, KF_FLAG_DEFAULT, SHGetKnownFolderPath,
 };
@@ -154,7 +157,48 @@ struct Inner {
 pub struct FileIndex {
     inner: Arc<Mutex<Inner>>,
     /// 手动请求全量重爬(排除开关/名单变更时由模块调用)。
-    rescan_tx: Sender<WatchEvent>,
+    rescan_tx: EventSender,
+    service: Arc<Service>,
+}
+
+struct Service {
+    stop: Arc<AtomicBool>,
+    worker: Mutex<Option<std::thread::JoinHandle<()>>>,
+}
+
+impl Service {
+    fn shutdown(&self) {
+        self.stop.store(true, Ordering::Release);
+        if let Some(worker) = self.worker.lock().unwrap().take() {
+            let _ = worker.join();
+        }
+    }
+}
+
+impl Drop for Service {
+    fn drop(&mut self) {
+        self.shutdown();
+    }
+}
+
+/// 队列满时只保留一个重扫标记,watcher 永不阻塞在发送上。
+#[derive(Clone)]
+struct EventSender {
+    tx: SyncSender<WatchEvent>,
+    overflow: Arc<AtomicBool>,
+}
+
+impl EventSender {
+    fn send(&self, event: WatchEvent) -> Result<(), ()> {
+        match self.tx.try_send(event) {
+            Ok(()) => Ok(()),
+            Err(TrySendError::Full(_)) => {
+                self.overflow.store(true, Ordering::Release);
+                Ok(())
+            }
+            Err(TrySendError::Disconnected(_)) => Err(()),
+        }
+    }
 }
 
 enum WatchEvent {
@@ -168,8 +212,7 @@ enum WatchEvent {
 }
 
 impl FileIndex {
-    /// 启动索引线程与 watcher 线程。线程随进程生命(同 AppModule
-    /// catalog 线程的先例,模块 unload 不回收)。
+    /// 启动索引与 watcher;unload 主动停止,最后一个句柄释放也会回收。
     pub fn start(
         roots: Vec<PathBuf>,
         exclude: Arc<Mutex<ExcludeState>>,
@@ -180,15 +223,39 @@ impl FileIndex {
             snapshot: None,
             wakers: Vec::new(),
         }));
-        let (tx, rx) = channel::<WatchEvent>();
-        let handle = Self {
-            inner: Arc::clone(&inner),
-            rescan_tx: tx.clone(),
+        let (sender, rx) = sync_channel::<WatchEvent>(BATCH_CAP);
+        let tx = EventSender {
+            tx: sender,
+            overflow: Arc::new(AtomicBool::new(false)),
         };
-        std::thread::spawn(move || {
-            index_thread_main(inner, roots, exclude, exclude_noise, tx, rx, logger)
+        let stop = Arc::new(AtomicBool::new(false));
+        let worker_stop = Arc::clone(&stop);
+        let worker_inner = Arc::clone(&inner);
+        let worker_tx = tx.clone();
+        let worker = std::thread::spawn(move || {
+            index_thread_main(
+                worker_inner,
+                roots,
+                exclude,
+                exclude_noise,
+                worker_tx,
+                rx,
+                logger,
+                worker_stop,
+            )
         });
-        handle
+        Self {
+            inner: Arc::clone(&inner),
+            rescan_tx: tx,
+            service: Arc::new(Service {
+                stop,
+                worker: Mutex::new(Some(worker)),
+            }),
+        }
+    }
+
+    pub fn shutdown(&self) {
+        self.service.shutdown();
     }
 
     /// 等待首个快照就绪(首爬完成)。克隆代价 = 一个 Arc。
@@ -199,7 +266,9 @@ impl FileIndex {
             match &st.snapshot {
                 Some(snap) => Poll::Ready(Arc::clone(snap)),
                 None => {
-                    st.wakers.push(cx.waker().clone());
+                    if !st.wakers.iter().any(|w| w.will_wake(cx.waker())) {
+                        st.wakers.push(cx.waker().clone());
+                    }
                     Poll::Pending
                 }
             }
@@ -311,9 +380,13 @@ fn walk_into(
     exclude_noise: bool,
     out: &mut Vec<Arc<IndexEntry>>,
     stats: &mut CrawlStats,
+    stop: &AtomicBool,
 ) {
     let mut stack = vec![dir.to_path_buf()];
     while let Some(d) = stack.pop() {
+        if stop.load(Ordering::Acquire) {
+            return;
+        }
         let rd = match std::fs::read_dir(&d) {
             Ok(rd) => rd,
             Err(_) => {
@@ -322,6 +395,9 @@ fn walk_into(
             }
         };
         for item in rd {
+            if stop.load(Ordering::Acquire) {
+                return;
+            }
             let (path, meta) = match item.and_then(|de| de.metadata().map(|m| (de.path(), m))) {
                 Ok(v) => v,
                 Err(_) => {
@@ -352,15 +428,26 @@ fn crawl(
     fragments_lower: &[String],
     exclude_noise: bool,
     logger: &ModuleLogger,
+    stop: &AtomicBool,
 ) -> Vec<Arc<IndexEntry>> {
     let started = std::time::Instant::now();
     let mut out = Vec::new();
     let mut stats = CrawlStats::default();
     for root in roots {
+        if stop.load(Ordering::Acquire) {
+            break;
+        }
         match std::fs::metadata(root) {
             Ok(meta) => {
                 out.push(entry_for(root, &meta));
-                walk_into(root, fragments_lower, exclude_noise, &mut out, &mut stats);
+                walk_into(
+                    root,
+                    fragments_lower,
+                    exclude_noise,
+                    &mut out,
+                    &mut stats,
+                    stop,
+                );
             }
             Err(_) => stats.errors += 1,
         }
@@ -381,19 +468,38 @@ fn crawl(
 
 // ---- watcher ----
 
-fn spawn_watchers(roots: &[PathBuf], tx: &Sender<WatchEvent>, logger: &ModuleLogger) {
+fn spawn_watchers(
+    roots: &[PathBuf],
+    tx: &EventSender,
+    logger: &ModuleLogger,
+    stop: &Arc<AtomicBool>,
+) -> Vec<std::thread::JoinHandle<()>> {
+    let mut workers = Vec::new();
     for root in roots {
         let tx = tx.clone();
         let root = root.clone();
         let logger = logger.clone();
-        std::thread::spawn(move || watch_root(root, tx, logger));
+        let stop = Arc::clone(stop);
+        let (ready_tx, ready_rx) = sync_channel(1);
+        workers.push(std::thread::spawn(move || {
+            watch_root(root, tx, logger, stop, ready_tx)
+        }));
+        // 首个异步读取已投递或打开失败后才首爬,关闭启动竞态窗口。
+        let _ = ready_rx.recv();
     }
+    workers
 }
 
-/// 单根阻塞式 watcher:句柄打不开/读失败 → WatcherDied 后退出。
+/// 单根异步 watcher:句柄打不开/读失败 → WatcherDied 后退出。
 /// 缓冲区溢出(returned == 0)→ Overflow(内容全量重爬,watch
 /// 本身继续——溢出不会杀死句柄)。
-fn watch_root(root: PathBuf, tx: Sender<WatchEvent>, logger: ModuleLogger) {
+fn watch_root(
+    root: PathBuf,
+    tx: EventSender,
+    logger: ModuleLogger,
+    stop: Arc<AtomicBool>,
+    ready: SyncSender<()>,
+) {
     let wide: Vec<u16> = root
         .as_os_str()
         .encode_wide()
@@ -406,7 +512,7 @@ fn watch_root(root: PathBuf, tx: Sender<WatchEvent>, logger: ModuleLogger) {
             FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
             None,
             OPEN_EXISTING,
-            FILE_FLAG_BACKUP_SEMANTICS,
+            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OVERLAPPED,
             None,
         )
     };
@@ -421,11 +527,30 @@ fn watch_root(root: PathBuf, tx: Sender<WatchEvent>, logger: ModuleLogger) {
             return;
         }
     };
+    let event = match unsafe { CreateEventW(None, true, false, None) } {
+        Ok(event) => event,
+        Err(_) => {
+            let _ = tx.send(WatchEvent::WatcherDied(root));
+            unsafe {
+                let _ = CloseHandle(handle);
+            }
+            return;
+        }
+    };
+    let mut ready = Some(ready);
     // u64 缓冲保证 FILE_NOTIFY_INFORMATION 的 4 字节对齐。
     let mut buf = vec![0u64; WATCH_BUF_BYTES / 8];
     loop {
+        if stop.load(Ordering::Acquire) {
+            break;
+        }
         let mut returned = 0u32;
-        let ok = unsafe {
+        let mut overlapped = OVERLAPPED {
+            hEvent: event,
+            ..Default::default()
+        };
+        let mut ok = unsafe {
+            let _ = ResetEvent(event);
             ReadDirectoryChangesW(
                 handle,
                 buf.as_mut_ptr() as *mut core::ffi::c_void,
@@ -435,11 +560,31 @@ fn watch_root(root: PathBuf, tx: Sender<WatchEvent>, logger: ModuleLogger) {
                     | FILE_NOTIFY_CHANGE_DIR_NAME
                     | FILE_NOTIFY_CHANGE_SIZE
                     | FILE_NOTIFY_CHANGE_LAST_WRITE,
-                Some(&mut returned),
                 None,
+                Some(&mut overlapped),
                 None,
             )
         };
+        if let Some(ready) = ready.take() {
+            let _ = ready.send(());
+        }
+        if ok.is_ok() {
+            unsafe {
+                while WaitForSingleObject(event, 100) == WAIT_TIMEOUT {
+                    if stop.load(Ordering::Acquire) {
+                        break;
+                    }
+                }
+                if stop.load(Ordering::Acquire) {
+                    let _ = CancelIoEx(handle, Some(&overlapped));
+                }
+                // 取消只提交请求;必须等待完成后才能释放缓冲与 OVERLAPPED。
+                ok = GetOverlappedResult(handle, &overlapped, &mut returned, true);
+            }
+        }
+        if stop.load(Ordering::Acquire) {
+            break;
+        }
         match ok {
             Err(e) => {
                 logger.log(
@@ -490,35 +635,55 @@ fn watch_root(root: PathBuf, tx: Sender<WatchEvent>, logger: ModuleLogger) {
         }
     }
     unsafe {
+        let _ = CloseHandle(event);
         let _ = CloseHandle(handle);
     }
 }
 
 // ---- 索引线程:首爬 → 事件合批 → 增量应用 / 回退重爬 ----
 
+#[allow(clippy::too_many_arguments)]
 fn index_thread_main(
     inner: Arc<Mutex<Inner>>,
     roots: Vec<PathBuf>,
     exclude: Arc<Mutex<ExcludeState>>,
     exclude_noise: Arc<AtomicBool>,
-    tx: Sender<WatchEvent>,
+    tx: EventSender,
     rx: Receiver<WatchEvent>,
     logger: ModuleLogger,
+    stop: Arc<AtomicBool>,
 ) {
     // watcher 先开:首爬期间的变更积进队列,爬完后合批补上。
-    spawn_watchers(&roots, &tx, &logger);
-    full_rescan(&inner, &roots, &exclude, &exclude_noise, &logger);
+    let watchers = spawn_watchers(&roots, &tx, &logger, &stop);
+    let mut policy = (
+        refreshed_fragments(&exclude).0,
+        exclude_noise.load(Ordering::Acquire),
+    );
+    publish(&inner, crawl(&roots, &policy.0, policy.1, &logger, &stop));
     let mut batch: Vec<WatchEvent> = Vec::new();
-    while let Ok(first) = rx.recv() {
-        batch.push(first);
+    while !stop.load(Ordering::Acquire) {
+        match rx.recv_timeout(Duration::from_millis(BATCH_QUIET_MS)) {
+            Ok(first) => batch.push(first),
+            Err(RecvTimeoutError::Timeout) => {
+                if !tx.overflow.load(Ordering::Acquire) {
+                    continue;
+                }
+            }
+            Err(RecvTimeoutError::Disconnected) => break,
+        }
         // 合批:静默窗结束或攒够上限,取先者。
-        while batch.len() < BATCH_CAP {
+        let started = std::time::Instant::now();
+        while !batch.is_empty()
+            && batch.len() < BATCH_CAP
+            && !stop.load(Ordering::Acquire)
+            && started.elapsed() < Duration::from_millis(BATCH_QUIET_MS)
+        {
             match rx.recv_timeout(Duration::from_millis(BATCH_QUIET_MS)) {
                 Ok(ev) => batch.push(ev),
                 Err(RecvTimeoutError::Timeout | RecvTimeoutError::Disconnected) => break,
             }
         }
-        let mut rescan = false;
+        let mut rescan = tx.overflow.swap(false, Ordering::AcqRel);
         for ev in &batch {
             match ev {
                 // WatcherDied 不重生该根的 watcher(记录在案的限制:
@@ -538,25 +703,34 @@ fn index_thread_main(
                 WatchEvent::Change { .. } => {}
             }
         }
-        if rescan {
-            full_rescan(&inner, &roots, &exclude, &exclude_noise, &logger);
+        // 和已发布快照的策略比较,不依赖哪个线程先读取配置的 mtime。
+        let next_policy = (
+            refreshed_fragments(&exclude).0,
+            exclude_noise.load(Ordering::Acquire),
+        );
+        if rescan || policy != next_policy {
+            // 丢弃重扫前积压的旧事件;重扫期间的新事件留在队列里补齐。
+            for _ in 0..BATCH_CAP {
+                if rx.try_recv().is_err() {
+                    break;
+                }
+            }
+            publish(
+                &inner,
+                crawl(&roots, &next_policy.0, next_policy.1, &logger, &stop),
+            );
+            policy = next_policy;
         } else {
-            apply_batch(&inner, &batch, &exclude, &exclude_noise, &logger);
+            apply_batch(&inner, &batch, &policy.0, policy.1, &logger, &stop);
         }
         batch.clear();
     }
-}
-
-fn full_rescan(
-    inner: &Arc<Mutex<Inner>>,
-    roots: &[PathBuf],
-    exclude: &Arc<Mutex<ExcludeState>>,
-    exclude_noise: &AtomicBool,
-    logger: &ModuleLogger,
-) {
-    let fragments = refreshed_fragments(exclude).0;
-    let noise = exclude_noise.load(Ordering::Relaxed);
-    publish(inner, crawl(roots, &fragments, noise, logger));
+    stop.store(true, Ordering::Release);
+    for watcher in watchers {
+        let _ = watcher.join();
+    }
+    // 首爬取消也唤醒等待者,不遗留永远 Pending 的查询。
+    publish(&inner, Vec::new());
 }
 
 /// 一批变更对旧快照的增量应用。rename 拆成"删旧 + 增新"(不配对:
@@ -566,10 +740,25 @@ fn full_rescan(
 fn apply_batch(
     inner: &Arc<Mutex<Inner>>,
     batch: &[WatchEvent],
-    exclude: &Arc<Mutex<ExcludeState>>,
-    exclude_noise: &AtomicBool,
+    fragments: &[String],
+    noise: bool,
     logger: &ModuleLogger,
+    stop: &AtomicBool,
 ) {
+    // 首爬剪掉的目录,其后代的文件事件也必须剪掉。先过滤以免
+    // AppData 等噪声变更触发 O(N) 快照重建。
+    let batch: Vec<_> = batch
+        .iter()
+        .filter(|ev| match ev {
+            WatchEvent::Change { path, .. } => {
+                !(noise && path.parent().is_some_and(|p| dir_pruned(p, fragments)))
+            }
+            _ => false,
+        })
+        .collect();
+    if batch.is_empty() {
+        return;
+    }
     let old = {
         let st = inner.lock().unwrap();
         match &st.snapshot {
@@ -577,8 +766,6 @@ fn apply_batch(
             None => return, // 首爬前的积压在首爬后才有意义;为 None 直接丢
         }
     };
-    let fragments = refreshed_fragments(exclude).0;
-    let noise = exclude_noise.load(Ordering::Relaxed);
 
     // 目录成员集:删除子树需要知道被删路径是不是目录(文件已消失,
     // 只能靠旧索引判断)。
@@ -608,6 +795,9 @@ fn apply_batch(
 
     let mut stats = CrawlStats::default();
     for ev in batch {
+        if stop.load(Ordering::Acquire) {
+            return;
+        }
         let WatchEvent::Change { path, action } = ev else {
             continue;
         };
@@ -636,7 +826,7 @@ fn apply_batch(
                     let lower: Box<str> = path.to_string_lossy().to_lowercase().into();
                     if meta.is_dir() {
                         let reparse = meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0;
-                        if reparse || (noise && dir_pruned(path, &fragments)) {
+                        if reparse || (noise && dir_pruned(path, fragments)) {
                             // 改名进了被剪枝/接合的名字:连子树移除。
                             remove_path(
                                 path,
@@ -650,7 +840,7 @@ fn apply_batch(
                             // 搬入/新建的目录可能自带内容:RDCW 不报
                             // 子项,就地补爬子树。
                             let mut children = Vec::new();
-                            walk_into(path, &fragments, noise, &mut children, &mut stats);
+                            walk_into(path, fragments, noise, &mut children, &mut stats, stop);
                             for c in children {
                                 upserts.insert(c.path_lower.clone(), c);
                             }
@@ -852,7 +1042,13 @@ mod tests {
 
         let frags = vec![r"\node_modules\".to_string()];
         let logger: ModuleLogger = Arc::new(TestLog);
-        let entries = crawl(std::slice::from_ref(&root), &frags, true, &logger);
+        let entries = crawl(
+            std::slice::from_ref(&root),
+            &frags,
+            true,
+            &logger,
+            &AtomicBool::new(false),
+        );
         let names: Vec<String> = entries.iter().map(|e| e.entry.path.to_string()).collect();
         let root_s = root.to_string_lossy().to_string();
         assert!(names.contains(&root_s));
@@ -871,7 +1067,13 @@ mod tests {
             .unwrap();
         assert_eq!(sub.entry.size, None);
         // 开关关闭 → 不剪枝
-        let entries = crawl(std::slice::from_ref(&root), &frags, false, &logger);
+        let entries = crawl(
+            std::slice::from_ref(&root),
+            &frags,
+            false,
+            &logger,
+            &AtomicBool::new(false),
+        );
         assert!(
             entries
                 .iter()
@@ -879,6 +1081,169 @@ mod tests {
         );
 
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    struct Fixture(PathBuf);
+    impl Fixture {
+        fn new(label: &str) -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "sakana-index-{label}-{}-{}",
+                std::process::id(),
+                SystemTime::now()
+                    .duration_since(SystemTime::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            std::fs::create_dir_all(&path).unwrap();
+            Self(path)
+        }
+    }
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    fn exclusion(path: Option<PathBuf>) -> Arc<Mutex<ExcludeState>> {
+        Arc::new(Mutex::new(ExcludeState {
+            path,
+            mtime: None,
+            fragments: vec![r"\node_modules\".into()],
+            logger: None,
+        }))
+    }
+    fn wait_for(mut predicate: impl FnMut() -> bool) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !predicate() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "index update timed out"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+    fn indexed(index: &FileIndex, path: &Path) -> bool {
+        index
+            .inner
+            .lock()
+            .unwrap()
+            .snapshot
+            .as_ref()
+            .is_some_and(|s| {
+                s.iter()
+                    .any(|e| e.entry.path.as_ref() == path.to_string_lossy())
+            })
+    }
+
+    #[test]
+    fn incremental_updates_preserve_crawl_pruning() {
+        let fixture = Fixture::new("pruning");
+        std::fs::create_dir_all(fixture.0.join("node_modules")).unwrap();
+        let hidden = fixture.0.join("node_modules\\hidden.txt");
+        std::fs::write(&hidden, "fixture").unwrap();
+        let fragments = vec![r"\node_modules\".into()];
+        let logger: ModuleLogger = Arc::new(TestLog);
+        let stop = AtomicBool::new(false);
+        let old = Arc::new(crawl(
+            std::slice::from_ref(&fixture.0),
+            &fragments,
+            true,
+            &logger,
+            &stop,
+        ));
+        let inner = Arc::new(Mutex::new(Inner {
+            snapshot: Some(old.clone()),
+            wakers: vec![],
+        }));
+        apply_batch(
+            &inner,
+            &[WatchEvent::Change {
+                path: hidden,
+                action: FILE_ACTION_ADDED,
+            }],
+            &fragments,
+            true,
+            &logger,
+            &stop,
+        );
+        assert!(
+            Arc::ptr_eq(&old, inner.lock().unwrap().snapshot.as_ref().unwrap()),
+            "noise must not rebuild the snapshot"
+        );
+    }
+
+    #[test]
+    fn watcher_tracks_create_rename_delete_and_consumed_policy_change() {
+        let fixture = Fixture::new("watch");
+        std::fs::create_dir_all(fixture.0.join("node_modules")).unwrap();
+        let hidden = fixture.0.join("node_modules\\restore.txt");
+        std::fs::write(&hidden, "fixture").unwrap();
+        let exclude = exclusion(None);
+        let index = FileIndex::start(
+            vec![fixture.0.clone()],
+            exclude.clone(),
+            Arc::new(AtomicBool::new(true)),
+            Arc::new(TestLog),
+        );
+        wait_for(|| index.inner.lock().unwrap().snapshot.is_some());
+        assert!(!indexed(&index, &hidden));
+        let created = fixture.0.join("created.txt");
+        std::fs::write(&created, "new").unwrap();
+        wait_for(|| indexed(&index, &created));
+        let renamed = fixture.0.join("renamed.txt");
+        std::fs::rename(&created, &renamed).unwrap();
+        wait_for(|| indexed(&index, &renamed) && !indexed(&index, &created));
+        std::fs::remove_file(&renamed).unwrap();
+        wait_for(|| !indexed(&index, &renamed));
+
+        // 模拟另一个后台读取者先消费了名单版本,查询看不到 changed。
+        let config = fixture.0.join("excluded.toml");
+        std::fs::write(&config, "excluded = []\n").unwrap();
+        exclude.lock().unwrap().path = Some(config);
+        let _ = refreshed_fragments(&exclude);
+        assert!(!refreshed_fragments(&exclude).1);
+        index
+            .rescan_tx
+            .send(WatchEvent::Change {
+                path: created,
+                action: FILE_ACTION_REMOVED,
+            })
+            .unwrap();
+        wait_for(|| indexed(&index, &hidden));
+        let clone = index.clone();
+        index.shutdown();
+        assert!(clone.service.worker.lock().unwrap().is_none());
+        assert!(futures::executor::block_on(clone.wait_snapshot()).is_empty());
+    }
+
+    #[test]
+    fn bounded_event_queue_requests_recovery_instead_of_growing() {
+        let (tx, rx) = sync_channel(1);
+        let sender = EventSender {
+            tx,
+            overflow: Arc::new(AtomicBool::new(false)),
+        };
+        for _ in 0..10_000 {
+            sender.send(WatchEvent::Overflow).unwrap();
+        }
+        assert!(sender.overflow.load(Ordering::Acquire));
+        assert!(rx.try_recv().is_ok());
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn dropping_index_stops_workers_even_without_file_events() {
+        let fixture = Fixture::new("stop");
+        let index = FileIndex::start(
+            vec![fixture.0.clone()],
+            exclusion(None),
+            Arc::new(AtomicBool::new(true)),
+            Arc::new(TestLog),
+        );
+        let stopped = Arc::clone(&index.service.stop);
+        drop(index);
+        assert!(stopped.load(Ordering::Acquire));
+        // 删除成功也验证 watcher 未遗留一个正在使用的目录句柄。
+        std::fs::remove_dir(&fixture.0).unwrap();
     }
 
     struct TestLog;

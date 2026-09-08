@@ -2,7 +2,7 @@ use sakana_protocol::logln;
 use sakana_protocol::{ActionId, ModuleId, UsageRead, UsageReader, UsageRecordRequest, UsageStat};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock, mpsc};
 use std::time::{Duration, SystemTime};
 
 type UsageKey = (ModuleId, String, ActionId);
@@ -16,7 +16,7 @@ type UsageKey = (ModuleId, String, ActionId);
 /// 读取它做 ranking,因此内部用 RwLock;Core 其余状态一律不加锁。
 ///
 /// 持久化:整体重写 + tmp rename。记录频率 = 用户启动应用的节奏,
-/// 聚合后文件有界(每行一条统计),写穿比 flush 调度更简单且抗崩溃。
+/// 内存立即提交,容量为 1 的通知队列合并写入;后台串行落盘,正常退出 flush。
 /// 格式(制表符分隔,item_key 转义后永远最后一个字段):
 ///
 /// ```text
@@ -30,7 +30,26 @@ type UsageKey = (ModuleId, String, ActionId);
 pub struct UsageStore {
     inner: Arc<RwLock<HashMap<UsageKey, UsageStat>>>,
     /// None = 纯内存(测试)。
-    file: Option<PathBuf>,
+    writer: Option<Arc<Writer>>,
+}
+
+enum WriteRequest {
+    Dirty,
+    Flush(mpsc::SyncSender<()>),
+}
+
+struct Writer {
+    tx: Option<mpsc::SyncSender<WriteRequest>>,
+    thread: Mutex<Option<std::thread::JoinHandle<()>>>,
+}
+
+impl Drop for Writer {
+    fn drop(&mut self) {
+        self.tx.take();
+        if let Some(thread) = self.thread.lock().unwrap().take() {
+            let _ = thread.join();
+        }
+    }
 }
 
 const HEADER: &str = "cue-usage-v1";
@@ -38,10 +57,33 @@ const HEADER: &str = "cue-usage-v1";
 impl UsageStore {
     pub fn new(file: Option<PathBuf>) -> Self {
         let map = file.as_deref().and_then(parse_file).unwrap_or_default();
-        Self {
-            inner: Arc::new(RwLock::new(map)),
-            file,
-        }
+        let inner = Arc::new(RwLock::new(map));
+        let writer = file.and_then(|path| {
+            let data = Arc::clone(&inner);
+            let (tx, rx) = mpsc::sync_channel(1);
+            match std::thread::Builder::new()
+                .name("usage-writer".into())
+                .spawn(move || {
+                    while let Ok(request) = rx.recv() {
+                        // 不持锁做序列化和 IO,查询/激活不等待磁盘。
+                        let snapshot = data.read().expect("usage store poisoned").clone();
+                        persist(&path, &snapshot);
+                        if let WriteRequest::Flush(done) = request {
+                            let _ = done.send(());
+                        }
+                    }
+                }) {
+                Ok(thread) => Some(Arc::new(Writer {
+                    tx: Some(tx),
+                    thread: Mutex::new(Some(thread)),
+                })),
+                Err(e) => {
+                    logln!("[warn] usage writer unavailable: {e}");
+                    None
+                }
+            }
+        });
+        Self { inner, writer }
     }
 
     /// activation 完成时调用(usage 总是记录)。
@@ -54,10 +96,12 @@ impl UsageStore {
                     count: 0,
                     last_used: SystemTime::UNIX_EPOCH,
                 });
-            stat.count += 1;
+            stat.count = stat.count.saturating_add(1);
             stat.last_used = SystemTime::now();
         }
-        self.persist();
+        if let Some(writer) = &self.writer {
+            let _ = writer.tx.as_ref().unwrap().try_send(WriteRequest::Dirty);
+        }
     }
 
     pub fn stat(&self, module: &ModuleId, item_key: &str, action: ActionId) -> Option<UsageStat> {
@@ -76,18 +120,31 @@ impl UsageStore {
         })
     }
 
-    /// 整体重写(文件有界:聚合统计一行一条)。tmp + rename 避免
-    /// 半截文件;失败只告警,下次 record 再试。
-    fn persist(&self) {
-        let Some(path) = &self.file else { return };
-        let text = render(&self.inner.read().expect("usage store poisoned"));
-        if let Some(dir) = path.parent() {
-            let _ = std::fs::create_dir_all(dir);
+    /// 仅正常退出/测试调用;等待此前的所有内存提交完成一次落盘。
+    pub fn flush(&self) {
+        if let Some(writer) = &self.writer {
+            let (done, finished) = mpsc::sync_channel(1);
+            if writer
+                .tx
+                .as_ref()
+                .unwrap()
+                .send(WriteRequest::Flush(done))
+                .is_ok()
+            {
+                let _ = finished.recv();
+            }
         }
-        let tmp = path.with_extension("tmp");
-        if std::fs::write(&tmp, text).is_err() || std::fs::rename(&tmp, path).is_err() {
-            logln!("[warn] usage persist failed: {}", path.display());
-        }
+    }
+}
+
+fn persist(path: &Path, snapshot: &HashMap<UsageKey, UsageStat>) {
+    let text = render(snapshot);
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let tmp = path.with_extension("tmp");
+    if std::fs::write(&tmp, text).is_err() || std::fs::rename(&tmp, path).is_err() {
+        logln!("[warn] usage persist failed: {}", path.display());
     }
 }
 
@@ -170,12 +227,12 @@ fn parse(text: &str) -> Option<HashMap<UsageKey, UsageStat>> {
         let (Some(module), Some(key)) = (unescape(m), unescape(k)) else {
             continue;
         };
+        let Some(last_used) = SystemTime::UNIX_EPOCH.checked_add(Duration::from_secs(secs)) else {
+            continue;
+        };
         map.insert(
             (ModuleId::new(module), key, ActionId(action)),
-            UsageStat {
-                count,
-                last_used: SystemTime::UNIX_EPOCH + Duration::from_secs(secs),
-            },
+            UsageStat { count, last_used },
         );
     }
     Some(map)
@@ -274,6 +331,7 @@ mod tests {
                 action_id: ActionId::PRIMARY,
             },
         );
+        store.flush();
         assert!(file.exists());
 
         let reloaded = UsageStore::new(Some(file));
@@ -284,5 +342,56 @@ mod tests {
         assert!(s.last_used.elapsed().unwrap().as_secs() < 60);
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn busy_writer_coalesces_without_blocking_record() {
+        // 不消费队列来模拟磁盘写入阻塞;record 仍必须完成所有内存提交。
+        let (tx, rx) = mpsc::sync_channel(1);
+        let store = UsageStore {
+            inner: Arc::new(RwLock::new(HashMap::new())),
+            writer: Some(Arc::new(Writer {
+                tx: Some(tx),
+                thread: Mutex::new(None),
+            })),
+        };
+        let module = ModuleId::from_static("app");
+        for _ in 0..1000 {
+            store.record(
+                &module,
+                &UsageRecordRequest {
+                    item_key: "key".into(),
+                    action_id: ActionId::PRIMARY,
+                },
+            );
+        }
+        assert_eq!(
+            store.stat(&module, "key", ActionId::PRIMARY).unwrap().count,
+            1000
+        );
+        assert!(rx.try_recv().is_ok());
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn last_store_drop_drains_coalesced_updates() {
+        let dir = std::env::temp_dir().join(format!("sakana-usage-drain-{}", std::process::id()));
+        let file = dir.join("usage.tsv");
+        let store = UsageStore::new(Some(file.clone()));
+        for _ in 0..1000 {
+            store.record(
+                &ModuleId::from_static("app"),
+                &UsageRecordRequest {
+                    item_key: "key".into(),
+                    action_id: ActionId::PRIMARY,
+                },
+            );
+        }
+        drop(store);
+        assert_eq!(
+            parse_file(&file).unwrap().values().next().unwrap().count,
+            1000
+        );
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }

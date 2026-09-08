@@ -29,8 +29,10 @@ pub enum HostEvent {
     ShowRequested,
     /// 前台焦点离开 Launcher 窗口。
     FocusLost,
+    FocusGained,
     /// 托盘菜单"设置"(入口, 设置页)。
     OpenSettings,
+    QuitRequested,
 }
 
 /// 单一事件队列:所有异步完成都从这里回流到 UI 线程。

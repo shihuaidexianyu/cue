@@ -9,6 +9,10 @@ sakana-protocol.workspace = true
 [dev-dependencies]
 image = { version = "0.25", default-features = false, features = ["png"] }
 
+[dev-dependencies.windows]
+workspace = true
+features = ["Win32_System_StationsAndDesktops", "Win32_System_Threading", "Win32_Security"]
+
 [dependencies.windows]
 workspace = true
 features = [

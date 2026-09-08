@@ -32,6 +32,7 @@ pub enum HostMsg {
     QuitRequested,
     /// 前台焦点离开 Launcher 窗口。
     FocusLost,
+    FocusGained,
     /// 锁键状态变化(§140,lockkeys worker 的状态 diff 上报)。
     /// 不进 Core:编排层直接路由给 OSD。
     LockKeyChanged {
@@ -48,6 +49,7 @@ pub const HOST_WINDOW_CLASS: PCWSTR = w!("sakana.HostWindow");
 
 pub const WM_SAKANA_SHOW: u32 = WM_APP + 1;
 pub const WM_SAKANA_FOCUS_LOST: u32 = WM_APP + 2;
+pub const WM_SAKANA_FOCUS_GAINED: u32 = WM_APP + 6;
 /// 托盘图标回调消息,lparam 为鼠标消息。
 pub const WM_SAKANA_TRAY: u32 = WM_APP + 3;
 /// 托盘菜单命令的延迟分发消息(见 tray::show_menu):wParam 为命令 id。
@@ -188,6 +190,7 @@ unsafe extern "system" fn host_wnd_proc(
                 WM_HOTKEY => handler(HostMsg::HotkeyPressed),
                 m if m == WM_SAKANA_SHOW => handler(HostMsg::ShowRequested),
                 m if m == WM_SAKANA_FOCUS_LOST => handler(HostMsg::FocusLost),
+                m if m == WM_SAKANA_FOCUS_GAINED => handler(HostMsg::FocusGained),
                 m if m == WM_WTSSESSION => {
                     // 锁屏 / 快速用户切换离开控制台:安全桌面接管输入,
                     // 焦点必然丢失。前台事件钩子在此刻是否投递是未文档
@@ -295,7 +298,21 @@ unsafe extern "system" fn foreground_win_event_proc(
     // 探测"的热键门控互补,这里是图标状态,必须随状态连续。
     refresh_dnd_icon();
     let launcher = LAUNCHER_HWND.load(Ordering::SeqCst);
-    if launcher == 0 || hwnd.0 as isize == launcher {
+    if launcher == 0 {
+        return;
+    }
+    if hwnd.0 as isize == launcher {
+        let host = HOST_HWND.load(Ordering::SeqCst);
+        if host != 0 {
+            unsafe {
+                let _ = PostMessageW(
+                    Some(HWND(host as *mut core::ffi::c_void)),
+                    WM_SAKANA_FOCUS_GAINED,
+                    WPARAM(0),
+                    LPARAM(0),
+                );
+            }
+        }
         return;
     }
     // 诊断:只在 Launcher 可见时(即焦点真的从我们手里离开)记录

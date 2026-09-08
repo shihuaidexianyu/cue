@@ -349,11 +349,7 @@ impl LauncherView {
                 "escape" => self.editing_string = None,
                 "enter" => {
                     let (key, buffer) = self.editing_string.take().expect("checked above");
-                    if self
-                        .core
-                        .apply_setting(&key, SettingValue::String(buffer.clone()))
-                        .is_err()
-                    {
+                    if self.core.apply_setting_text(&key, &buffer).is_err() {
                         self.editing_string = Some((key, buffer));
                     }
                 }
@@ -407,6 +403,8 @@ impl LauncherView {
             "escape" => self.core.dismiss_settings(),
             "up" => self.core.settings_select_prev(),
             "down" => self.core.settings_select_next(),
+            "left" => self.settings_cycle_enum(true),
+            "right" => self.settings_cycle_enum(false),
             "enter" | "space" => self.settings_activate_selected(),
             _ => {}
         }
@@ -436,9 +434,37 @@ impl LauncherView {
                 // 进入行内编辑态(§128 触发词;buffer 预填当前值)。
                 self.editing_string = Some((row.key.to_string(), s.clone()));
             }
-            // V1 没有 Integer/Enum 类设置;出现后再加编辑 UI。
+            (SettingKind::Integer { .. }, SettingValue::Integer(n)) => {
+                self.editing_string = Some((row.key.to_string(), n.to_string()));
+            }
+            (SettingKind::Enum(_), _) => self.settings_cycle_enum(false),
             _ => {}
         }
+    }
+
+    fn settings_cycle_enum(&mut self, reverse: bool) {
+        let Some(model) = self.core.settings_model() else {
+            return;
+        };
+        let Some(row) = model.rows.get(model.selected) else {
+            return;
+        };
+        let (SettingKind::Enum(options), SettingValue::Enum(current)) = (row.kind, &row.value)
+        else {
+            return;
+        };
+        if options.is_empty() {
+            return;
+        }
+        let i = options.iter().position(|o| o.value == current).unwrap_or(0);
+        let next = if reverse {
+            (i + options.len() - 1) % options.len()
+        } else {
+            (i + 1) % options.len()
+        };
+        let _ = self
+            .core
+            .apply_setting(&row.key, SettingValue::Enum(options[next].value.into()));
     }
 
     // ------------------------------------------------------------------
@@ -524,7 +550,10 @@ impl LauncherView {
         } else if self.editing_string.is_some() {
             ("编辑中 · Enter 保存 · Esc 取消", rgb(0x6a6a75))
         } else {
-            ("↑↓ 选择 · Enter 修改 · Esc 返回", rgb(0x6a6a75))
+            (
+                "↑↓ 选择 · Enter 修改 · ←→ 切换选项 · Esc 返回",
+                rgb(0x6a6a75),
+            )
         };
 
         div()
@@ -585,8 +614,24 @@ impl LauncherView {
                         .child(h.to_string())
                 }
             }
-            SettingValue::Integer(i) => value_text_div(i.to_string()),
-            SettingValue::String(s) | SettingValue::Enum(s) => match &self.editing_string {
+            SettingValue::Integer(i) => match &self.editing_string {
+                Some((k, buf)) if k.as_str() == row.key.as_ref() => {
+                    value_text_div(format!("{buf}▏"))
+                }
+                _ => value_text_div(i.to_string()),
+            },
+            SettingValue::Enum(s) => {
+                let label = match row.kind {
+                    SettingKind::Enum(options) => options
+                        .iter()
+                        .find(|o| o.value == s)
+                        .map(|o| o.label)
+                        .unwrap_or(s),
+                    _ => s,
+                };
+                value_text_div(format!("‹ {label} ›"))
+            }
+            SettingValue::String(s) => match &self.editing_string {
                 // 行内编辑态:渲染 buffer + 光标,不渲染已提交值。
                 Some((k, buf)) if k.as_str() == row.key.as_ref() => {
                     value_text_div(format!("{buf}▏"))

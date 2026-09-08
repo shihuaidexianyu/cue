@@ -401,6 +401,28 @@ impl Core {
         result
     }
 
+    /// 文本编辑器只负责采集文本,数值解析和错误展示仍由设置宿主负责。
+    pub fn apply_setting_text(&mut self, key: &str, text: &str) -> Result<(), String> {
+        let candidate = match self.settings.spec(key).map(|s| s.kind) {
+            Some(SettingKind::Integer { .. }) => text
+                .trim()
+                .parse::<i64>()
+                .map(SettingValue::Integer)
+                .map_err(|_| "请输入有效整数".to_string()),
+            Some(SettingKind::String) => Ok(SettingValue::String(text.to_string())),
+            _ => Err("该设置不支持文本编辑".to_string()),
+        };
+        match candidate {
+            Ok(value) => self.apply_setting(key, value),
+            Err(error) => {
+                if let Some(view) = &mut self.settings_view {
+                    view.error = Some(error.as_str().into());
+                }
+                Err(error)
+            }
+        }
+    }
+
     /// Path 类设置行的激活:用系统默认程序打开该路径(不是值变更,
     /// 不走事务)。失败信息进模型,与 apply 错误同位置回显。
     pub fn open_setting_path(&mut self, key: &str) -> Result<(), String> {
@@ -419,9 +441,7 @@ impl Core {
         let Some(spec) = self.settings.spec(key) else {
             return Err(format!("unknown setting: {key}"));
         };
-        if !kind_matches(spec.kind, &candidate) {
-            return Err(format!("type mismatch for {key}: expected {:?}", spec.kind));
-        }
+        spec.kind.validate(&candidate)?;
         if let SettingValue::Hotkey(h) = &candidate
             && h.modifiers.is_empty()
         {
@@ -692,12 +712,18 @@ impl Core {
     /// trigger 之后的剩余输入原样交给 Module(如 `ext:pdf` 语义不属于 Core)。
     /// 触发词取生效值(设置覆盖 ?? 模块声明,§128)。
     fn route(&self, input: &str) -> (ModuleId, String) {
-        for (id, descriptor) in self.registry.launcher_descriptors() {
-            if let Some(trigger) = self.effective_trigger_of(id, descriptor.trigger.as_deref())
-                && let Some(query) = match_trigger(input, &trigger)
-            {
-                return (id.clone(), query);
-            }
+        // 最长的有效匹配优先:自定义 // 不会被先注册的 / 遮蔽。
+        if let Some((_, id, query)) = self
+            .registry
+            .launcher_descriptors()
+            .filter_map(|(id, descriptor)| {
+                let trigger = self.effective_trigger_of(id, descriptor.trigger.as_deref())?;
+                let query = match_trigger(input, &trigger)?;
+                Some((trigger.len(), id.clone(), query))
+            })
+            .max_by_key(|(len, _, _)| *len)
+        {
+            return (id, query);
         }
         // 不变量:session 存在 ⇒ 默认模块存在——open_session 在无默认
         // 模块时根本不开 session,§65 又保证 AppModule 不可禁用。
@@ -966,7 +992,18 @@ impl Core {
             HostEvent::HotkeyPressed => self.hotkey_pressed(),
             HostEvent::ShowRequested => self.show_requested(),
             HostEvent::FocusLost => self.focus_lost(),
+            HostEvent::FocusGained => self.focus_gained(),
             HostEvent::OpenSettings => self.open_settings(),
+            HostEvent::QuitRequested => {
+                self.session = None;
+                for id in self.registry.ids() {
+                    if let Some(module) = self.registry.module_mut(&id) {
+                        module.unload();
+                    }
+                }
+                self.usage.flush();
+                self.effects.push(CoreEffect::QuitApplication);
+            }
         }
     }
 
@@ -1052,19 +1089,6 @@ pub struct ActionMenuRow {
     pub label: Arc<str>,
     /// 预格式化的快捷键提示(如 "Ctrl+Enter");模块未给则为 None。
     pub shortcut: Option<String>,
-}
-
-/// 校验:kind 与值类型必须匹配。
-fn kind_matches(kind: SettingKind, v: &SettingValue) -> bool {
-    matches!(
-        (kind, v),
-        (SettingKind::Bool, SettingValue::Bool(_))
-            | (SettingKind::Integer, SettingValue::Integer(_))
-            | (SettingKind::String, SettingValue::String(_))
-            | (SettingKind::Enum, SettingValue::Enum(_))
-            | (SettingKind::Path, SettingValue::Path(_))
-            | (SettingKind::Hotkey, SettingValue::Hotkey(_))
-    )
 }
 
 /// `module.<id>.<rest>` → ModuleId。

@@ -220,15 +220,12 @@ pub(crate) struct ExcludeState {
 }
 
 /// 后台线程侧:mtime 变了才重读文件;stat/读失败或 TOML 语法错误
-/// 保留旧名单(编辑器里的半保存状态不该打烂搜索)。两阶段:先快照
-/// 路径与已知 mtime,IO 在锁外做,提交时再锁——并发查询重复读同
-/// 一版本无害(同内容幂等,后到覆盖)。返回 (片段, 本次是否变更)——
+/// 保留旧名单(编辑器里的半保存状态不该打烂搜索)。后台读取串行化,
+/// 防止旧读取覆盖新版本;UI 不读取本锁。返回 (片段, 本次是否变更)——
 /// 变更时调用方应触发索引全量重爬(§138:名单的爬取剪枝口径变了)。
 pub(crate) fn refreshed_fragments(state: &Mutex<ExcludeState>) -> (Vec<String>, bool) {
-    let (path, known_mtime) = {
-        let g = state.lock().unwrap();
-        (g.path.clone(), g.mtime)
-    };
+    let mut g = state.lock().unwrap();
+    let (path, known_mtime) = (g.path.clone(), g.mtime);
     let mut changed = false;
     if let Some(p) = path {
         let mtime = std::fs::metadata(&p).and_then(|m| m.modified()).ok();
@@ -236,9 +233,11 @@ pub(crate) fn refreshed_fragments(state: &Mutex<ExcludeState>) -> (Vec<String>, 
             && mtime != known_mtime
             && let Ok(content) = std::fs::read_to_string(&p)
         {
-            let mut g = state.lock().unwrap();
             match build_fragments(&content) {
-                Ok(fragments) => g.fragments = fragments,
+                Ok(fragments) => {
+                    changed = g.fragments != fragments;
+                    g.fragments = fragments;
+                }
                 Err(e) => {
                     if let Some(logger) = &g.logger {
                         logger.log(
@@ -249,10 +248,9 @@ pub(crate) fn refreshed_fragments(state: &Mutex<ExcludeState>) -> (Vec<String>, 
                 }
             }
             g.mtime = mtime;
-            changed = true;
         }
     }
-    (state.lock().unwrap().fragments.clone(), changed)
+    (g.fragments.clone(), changed)
 }
 
 /// FileModule,trigger `/`。
@@ -302,6 +300,12 @@ impl FileModule {
 impl Default for FileModule {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl Drop for FileModule {
+    fn drop(&mut self) {
+        self.unload();
     }
 }
 
@@ -418,8 +422,10 @@ impl Module for FileModule {
     }
 
     fn unload(&mut self) {
-        // 索引/watcher 线程随进程生命(同 AppModule catalog 线程);
-        // icons OnceLock 不重建:幂等无害。
+        if let Some(index) = self.index.take() {
+            index.shutdown();
+        }
+        self.icon_worker = None;
     }
 
     fn settings_schema(&self) -> SettingsSchema {

@@ -14,7 +14,7 @@ pub struct AppEntry {
     /// 首字母键:"yjwj"。
     pub pinyin_initials: Arc<str>,
     pub target: LaunchTarget,
-    /// Packaged = AUMID;Win32 = canonical exe + normalized args。
+    /// Packaged = AUMID;Win32 = exe + 原始参数 + 工作目录。
     pub item_key: Arc<str>,
 }
 
@@ -36,12 +36,19 @@ impl AppEntry {
         let (full, initials) = pinyin_index::keys(name);
         let item_key: Arc<str> = match &target {
             LaunchTarget::Packaged { aumid } => aumid.clone(),
-            LaunchTarget::Win32 { exe, args, .. } => format!(
-                "{}\u{1f}{}",
-                exe.to_string_lossy().to_lowercase(),
-                normalize_args(args)
-            )
-            .into(),
+            LaunchTarget::Win32 {
+                exe,
+                args,
+                working_dir,
+            } => {
+                let mut key = format!("{}\u{1f}{}", exe.to_string_lossy().to_lowercase(), args);
+                // 无工作目录且参数未被旧规则改变的入口保留原 usage key。
+                if let Some(dir) = working_dir {
+                    key.push('\u{1f}');
+                    key.push_str(&dir.to_string_lossy().to_lowercase());
+                }
+                key.into()
+            }
         };
         Self {
             name: name.into(),
@@ -68,14 +75,6 @@ impl AppEntry {
     }
 }
 
-/// "normalized arguments":折叠空白 + 小写。
-fn normalize_args(args: &str) -> String {
-    args.split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-        .to_lowercase()
-}
-
 /// FNV-1a 64。不需要加密强度,需要稳定(同输入同输出)。
 /// item_id 与图标缓存文件名(§137)共用。
 pub(crate) fn fnv1a(s: &str) -> u64 {
@@ -91,4 +90,33 @@ pub(crate) fn fnv1a(s: &str) -> u64 {
 pub fn dedup(entries: &mut Vec<AppEntry>) {
     let mut seen = std::collections::HashSet::new();
     entries.retain(|e| seen.insert(e.item_key.clone()));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dedup_preserves_argument_and_working_directory_semantics() {
+        let make = |args: &str, dir: &str| {
+            AppEntry::new(
+                "app",
+                LaunchTarget::Win32 {
+                    exe: r"C:\Apps\app.exe".into(),
+                    args: args.into(),
+                    working_dir: Some(dir.into()),
+                },
+            )
+        };
+        let mut entries = vec![
+            make("https://example.com/A", "C:\\one"),
+            make("https://example.com/a", "C:\\one"),
+            make("\"a  b\"", "C:\\one"),
+            make("\"a b\"", "C:\\one"),
+            make("\"a b\"", "C:\\two"),
+            make("\"a b\"", "C:\\two"),
+        ];
+        dedup(&mut entries);
+        assert_eq!(entries.len(), 5);
+    }
 }

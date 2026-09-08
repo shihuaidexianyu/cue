@@ -64,16 +64,16 @@ fn parse_hotkey_env() -> Option<Hotkey> {
     std::env::var("SAKANA_HOTKEY").ok()?.parse().ok()
 }
 
-/// HostMsg → CoreEvent 的翻译(QuitRequested / LockKeyChanged /
-/// SessionReset 在 handler 内拦截,不进 Core 队列——退出不需要
-/// Core 参与;OSD 与会话复位是 host 侧事务)。
+/// HostMsg → CoreEvent 的翻译。退出先经 Core 停止模块并 flush usage;
+/// LockKeyChanged / SessionReset 由 handler 处理(OSD 与会话复位)。
 fn to_core_event(msg: win::host::HostMsg) -> CoreEvent {
     let event = match msg {
         win::host::HostMsg::HotkeyPressed => HostEvent::HotkeyPressed,
         win::host::HostMsg::ShowRequested => HostEvent::ShowRequested,
         win::host::HostMsg::OpenSettings => HostEvent::OpenSettings,
         win::host::HostMsg::FocusLost => HostEvent::FocusLost,
-        win::host::HostMsg::QuitRequested => unreachable!("quit 在 handler 内拦截"),
+        win::host::HostMsg::FocusGained => HostEvent::FocusGained,
+        win::host::HostMsg::QuitRequested => HostEvent::QuitRequested,
         win::host::HostMsg::LockKeyChanged { .. } => unreachable!("OSD 事件在 handler 内拦截"),
         win::host::HostMsg::SessionReset => unreachable!("会话复位在 handler 内拦截"),
     };
@@ -142,16 +142,6 @@ fn main() {
         win::host::HostWindow::create(Box::new(move |msg| {
             logln!("[host] {msg:?}");
             match msg {
-                // 托盘"退出"是唯一正常退出路径——先删托盘图标
-                // (不留幽灵图标),再结束消息循环;热键随进程释放。
-                win::host::HostMsg::QuitRequested => {
-                    win::tray::remove();
-                    // §107 配对义务同样覆盖退出路径:可见状态下退出时
-                    // hide 不会跑,这里恢复用户布局,否则全局输入法模式
-                    // 下其他应用被留在英文。
-                    win::ime::restore_saved_layout();
-                    win::host::request_quit();
-                }
                 // §140:OSD 事件不进 Core;launcher 可见时不弹。通道
                 // 未就位(GPUI 起来前的瞬态)直接丢弃——那时的状态
                 // 提示没有价值。
@@ -491,6 +481,12 @@ fn main() {
                         }
                         CoreEffect::FocusInput => {
                             let _ = win::window::focus(hwnd);
+                        }
+                        CoreEffect::QuitApplication => {
+                            // Core 已停止模块并刷完 usage,再退出消息循环。
+                            win::tray::remove();
+                            win::ime::restore_saved_layout();
+                            win::host::request_quit();
                         }
                     }
                 }));

@@ -10,11 +10,48 @@ pub struct SettingKey(pub Arc<str>);
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SettingKind {
     Bool,
-    Integer,
+    Integer { min: i64, max: i64 },
     String,
-    Enum,
+    Enum(&'static [SettingOption]),
     Path,
     Hotkey,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SettingOption {
+    pub value: &'static str,
+    pub label: &'static str,
+}
+
+impl SettingKind {
+    pub fn validate(self, value: &SettingValue) -> Result<(), String> {
+        match (self, value) {
+            (Self::Integer { min, max }, SettingValue::Integer(n)) if (min..=max).contains(n) => {
+                Ok(())
+            }
+            (Self::Integer { min, max }, SettingValue::Integer(_)) => {
+                Err(format!("请输入 {min}–{max} 之间的整数"))
+            }
+            (Self::Enum(options), SettingValue::Enum(v))
+                if options.iter().any(|o| o.value == v) =>
+            {
+                Ok(())
+            }
+            (Self::Enum(options), SettingValue::Enum(_)) => Err(format!(
+                "可选值:{}",
+                options
+                    .iter()
+                    .map(|o| o.label)
+                    .collect::<Vec<_>>()
+                    .join(" / ")
+            )),
+            (Self::Bool, SettingValue::Bool(_))
+            | (Self::String, SettingValue::String(_))
+            | (Self::Path, SettingValue::Path(_))
+            | (Self::Hotkey, SettingValue::Hotkey(_)) => Ok(()),
+            _ => Err(format!("type mismatch: expected {self:?}")),
+        }
+    }
 }
 
 /// 设置值。注意 `core.*` 的设置值必须是 OS-neutral 数据描述。
