@@ -45,11 +45,36 @@
 零迁移:本功能无设置行、无持久化状态(SAVED_LAYOUT 是进程内
 静态量)。删除即消失。
 
+## 增补(v0.6.3,2026-09-19):止血——保留 IME 挂靠解除
+
+v0.6.2 发布后实测:中文 IME 激活时唤起,键入字母全部进入组合串、
+无法上屏(上面"行为影响"的 b 项以最坏形式落地),且候选窗固定弹在
+屏幕右下角(GPUI 0.2 的 Windows 后端不投递组合、也不响应 IME 的
+定位查询)。触发词与拼音在中文布局下完全不可用,比 v0.6.1 更差。
+
+止血:`ImmAssociateContext(hwnd, NULL)` 恢复——但只此一个调用,
+窗口创建后执行一次(窗口属性,调用即常驻),不切键盘布局、
+无配对恢复、无 [ime] 探针。效果:
+
+```text
+保留    输入法主权仍在用户(全局布局不动,唤起/隐藏零切换)
+恢复    中文布局下按键直接以字母上屏:拼音全拼/首字母、触发词
+        b / / > g 照常工作
+消除    候选框右下角弹出(IME 不挂靠本窗口,组合窗不再出现)
+已知    中文直输仍不可用(组合串无人投递),粘贴是可靠路径
+        (§115);完整直输需补 WM_IME_COMPOSITION 处理,属后续项
+```
+
+落点:`window.rs` 的 `detach_ime`(不重建 `ime.rs`——只剩一个
+调用,不配独立模块),接线在 `main.rs` 窗口 HWND 发现后一次性执行。
+
 ## 验证
 
 ```text
 回归 = fmt / clippy -D warnings / cargo test --workspace /
-     check-arch 四门禁全绿;全仓 grep 无 ime::/ImmAssociateContext
-     /ActivateKeyboardLayout 残留(hotkey.rs 的 VK_/MOD_ 常量除外,
-     属 Win32_UI_Input_KeyboardAndMouse,热键仍用)
+     check-arch 四门禁全绿;全仓 grep 无 ActivateKeyboardLayout
+     残留(hotkey.rs 的 VK_/MOD_ 常量除外,属
+     Win32_UI_Input_KeyboardAndMouse,热键仍用);
+     ImmAssociateContext 自 v0.6.3 起以 detach_ime 形式保留
+     (见上方增补),不再是裁撤目标
 ```
