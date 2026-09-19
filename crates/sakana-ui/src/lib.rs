@@ -4,10 +4,6 @@
 //! sakana-ui 不认识 Module,不认识 Win32;CoreEffect 的执行经由注入的
 //! effect handler 交给编排层(sakana binary)。
 
-mod osd;
-
-pub use osd::OsdView;
-
 use futures::StreamExt;
 use gpui::prelude::FluentBuilder;
 use gpui::*;

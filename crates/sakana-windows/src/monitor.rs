@@ -138,20 +138,3 @@ pub fn place_on_active_monitor(hwnd: HWND, logical_w: i32, logical_h: i32) {
     let y = (work.top + area_h / 4).min(work.bottom - h).max(work.top);
     place_two_step(hwnd, x, y, w, h);
 }
-
-/// 把窗口放置到活跃显示器正中央(§140 锁键 OSD:用户明确要"屏幕
-/// 中间",与 Launcher 的 1/4 高度不同)。其余纪律与
-/// `place_on_active_monitor` 完全相同:物理像素换算、两步
-/// SetWindowPos 防跨 DPI 双重缩放、客户区精确尺寸、SWP_NOACTIVATE
-/// 恒不抢焦(OSD 永远不拿焦点)。
-pub fn place_centered_on_active_monitor(hwnd: HWND, logical_w: i32, logical_h: i32) {
-    let (monitor, work) = active_monitor();
-    let dpi = monitor_dpi(monitor, hwnd);
-    let w = logical_to_physical(logical_w, dpi);
-    let h = logical_to_physical(logical_h, dpi);
-    let area_w = work.right - work.left;
-    let area_h = work.bottom - work.top;
-    let x = work.left + (area_w - w).max(0) / 2;
-    let y = work.top + (area_h - h).max(0) / 2;
-    place_two_step(hwnd, x, y, w, h);
-}

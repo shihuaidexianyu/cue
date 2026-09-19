@@ -19,9 +19,8 @@ pub use event::{ActivationTicket, CoreEvent, HostEvent, QueryTicket};
 pub use registry::{ModuleRegistry, RegistryError};
 pub use session::{ActionMenuState, SessionId, SessionState};
 pub use settings::{
-    ApplyHotkey, ApplyStartOnBoot, KEY_DND_MODE, KEY_HOTKEY, KEY_START_ON_BOOT, LOCKKEYS_PREFIX,
-    NotifyDndMode, NotifyLockKeys, OpenPath, SettingsHost, SettingsModel, SettingsRow,
-    SettingsViewState,
+    ApplyHotkey, ApplyStartOnBoot, KEY_DND_MODE, KEY_HOTKEY, KEY_START_ON_BOOT, NotifyDndMode,
+    OpenPath, SettingsHost, SettingsModel, SettingsRow, SettingsViewState,
 };
 pub use spawner::TaskSpawner;
 pub use usage::UsageStore;
@@ -62,10 +61,6 @@ pub struct CoreConfig {
     /// Core::new 以初始值调一次,之后每次成功 commit 调一次。
     /// None(测试)时不通知。
     pub notify_dnd_mode: Option<NotifyDndMode>,
-    /// core.lockkeys.* 的 commit 后通知(§140,锁键 worker 配置下发;
-    /// 同 notify_dnd_mode 模式)。Core::new 以初始全量配置调一次,
-    /// 之后每次锁键行成功 commit 调一次。None(测试)时不通知。
-    pub notify_lockkeys: Option<NotifyLockKeys>,
 }
 
 impl Default for CoreConfig {
@@ -80,7 +75,6 @@ impl Default for CoreConfig {
             open_path: None,
             fullscreen_probe: None,
             notify_dnd_mode: None,
-            notify_lockkeys: None,
         }
     }
 }
@@ -145,11 +139,6 @@ impl Core {
         // 此后每次成功 commit 在 apply_setting_inner 里通知。
         if let Some(notify) = core.config.notify_dnd_mode.as_mut() {
             notify(core.settings.dnd_mode());
-        }
-        // 锁键服务的初始全量配置下发(§140,同款模式):此后任一
-        // 锁键行 commit 在 apply_setting_inner 里通知。
-        if let Some(notify) = core.config.notify_lockkeys.as_mut() {
-            notify(core.settings.lockkeys_config());
         }
         Ok(core)
     }
@@ -496,12 +485,6 @@ impl Core {
                     && let Some(notify) = self.config.notify_dnd_mode.as_mut()
                 {
                     notify(self.settings.dnd_mode());
-                }
-                // 锁键行 commit 后通知 host(全量配置下发 worker,§140)。
-                if key.starts_with(LOCKKEYS_PREFIX)
-                    && let Some(notify) = self.config.notify_lockkeys.as_mut()
-                {
-                    notify(self.settings.lockkeys_config());
                 }
             }
             ApplyPolicy::RestartApplication => {

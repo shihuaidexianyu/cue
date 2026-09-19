@@ -11,21 +11,16 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::{BOOL, Error};
 
 /// 枚举本进程的顶层窗口,返回 GPUI 窗口(`Zed::Window` 类)的 HWND。
-/// exclude 用于多窗口场景(§140 OSD):发现 OSD 窗口时排除已知的
-/// Launcher HWND。host window 也是本进程的顶层(隐藏)窗口,类名
-/// 过滤把它挡在门外;也不过滤可见性——Launcher/OSD 创建时都是隐藏的。
-fn find_zed_window(exclude: Option<HWND>) -> Option<HWND> {
+/// host window 也是本进程的顶层(隐藏)窗口,类名过滤把它挡在门外;
+/// 不过滤可见性——Launcher 创建时是隐藏的。
+fn find_zed_window() -> Option<HWND> {
     struct Search {
         pid: u32,
-        exclude: isize,
         result: HWND,
     }
     unsafe extern "system" fn enum_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
         unsafe {
             let search = &mut *(lparam.0 as *mut Search);
-            if hwnd.0 as isize == search.exclude {
-                return BOOL(1);
-            }
             let mut pid = 0u32;
             GetWindowThreadProcessId(hwnd, Some(&mut pid));
             if pid != search.pid {
@@ -43,7 +38,6 @@ fn find_zed_window(exclude: Option<HWND>) -> Option<HWND> {
     unsafe {
         let mut search = Search {
             pid: std::process::id(),
-            exclude: exclude.map(|h| h.0 as isize).unwrap_or(0),
             result: HWND::default(),
         };
         let _ = EnumWindows(Some(enum_proc), LPARAM(&mut search as *mut Search as isize));
@@ -51,17 +45,10 @@ fn find_zed_window(exclude: Option<HWND>) -> Option<HWND> {
     }
 }
 
-/// 唯一的 GPUI 窗口场景:取第一个 `Zed::Window`(Launcher)。
-/// **多窗口下必须先发现 Launcher 再创建 OSD**——本函数取枚举序
-/// 第一个,两个 GPUI 窗口都在时结果不保证是 Launcher。
+/// 取第一个 `Zed::Window`(唯一的 GPUI 窗口 = Launcher,§148 起
+/// 不再有第二个)。
 pub fn find_main_window_hwnd() -> Option<HWND> {
-    find_zed_window(None)
-}
-
-/// 发现 OSD(第二个 GPUI)窗口:排除已知的 Launcher HWND(§140)。
-/// 窗口创建顺序见 main.rs:launcher → 发现 → OSD → 本函数。
-pub fn find_window_hwnd_excluding(exclude: HWND) -> Option<HWND> {
-    find_zed_window(Some(exclude))
+    find_zed_window()
 }
 
 /// Hotkey 路径的显示 + 前台聚焦。WM_HOTKEY 处理是系统认可的

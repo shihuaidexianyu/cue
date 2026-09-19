@@ -37,12 +37,6 @@ pub type OpenPath = Box<dyn FnMut(&std::path::Path) -> Result<(), String>>;
 /// 重复同值 commit 也会通知(host 侧换图标幂等,无需 Core 去重)。
 pub type NotifyDndMode = Box<dyn FnMut(bool)>;
 
-/// core.lockkeys.* 的 commit 后通知(§140,锁键 worker 配置下发):
-/// 与 NotifyDndMode 同一模式——Host 注入、UI 线程调用、无返回值,
-/// 不参与事务。Core::new 以初始值调一次,此后任一锁键行成功
-/// commit 后以全量配置再调一次。
-pub type NotifyLockKeys = Box<dyn FnMut(LockKeysConfig)>;
-
 const HEADER: &str = "cue-settings-v1";
 
 pub const KEY_HOTKEY: &str = "core.hotkey";
@@ -54,14 +48,6 @@ pub const KEY_LOG_FILE: &str = "core.log_file";
 /// 旧 key(§127,2026-08-24 更名免打扰模式前):read_persisted 读入时
 /// 映射到新 key,下次整体重写时旧 key 自愈消失。
 const KEY_GAME_MODE_LEGACY: &str = "core.game_mode";
-
-/// 锁键状态提示(§140;§144 起裁为纯观察)的 Core 合成行。
-/// 两个布尔行,无校验面;任一行的 commit 都触发全量配置通知
-/// (NotifyLockKeys)。
-pub const KEY_LOCKKEYS_ENABLED: &str = "core.lockkeys.enabled";
-pub const KEY_LOCKKEYS_OSD: &str = "core.lockkeys.osd";
-/// 锁键行命名空间前缀(apply 流程按它识别锁键行)。
-pub const LOCKKEYS_PREFIX: &str = "core.lockkeys.";
 
 /// 给 UI 的渲染模型:Core 出模型,sakana-ui 只渲染——
 /// Module 永远不画 GPUI(禁止 `render_settings_gpui`)。
@@ -230,19 +216,6 @@ impl SettingsHost {
         match self.values.get(KEY_DND_MODE) {
             Some(SettingValue::Bool(b)) => *b,
             _ => true,
-        }
-    }
-
-    /// 锁键提示服务当前全量配置。两个布尔行,缺行按默认 true
-    /// (register_specs 保证已注册行有值,兜底仅防御)。
-    pub fn lockkeys_config(&self) -> LockKeysConfig {
-        let bool_of = |k: &str| match self.values.get(k) {
-            Some(SettingValue::Bool(b)) => *b,
-            _ => true,
-        };
-        LockKeysConfig {
-            enabled: bool_of(KEY_LOCKKEYS_ENABLED),
-            osd: bool_of(KEY_LOCKKEYS_OSD),
         }
     }
 
@@ -444,27 +417,6 @@ fn core_specs(log_path: PathBuf) -> Vec<SettingSpec> {
             default: SettingValue::Bool(true),
             apply_policy: ApplyPolicy::Immediate,
         },
-        // 锁键状态提示(§144 起纯观察,不干预按键)。
-        SettingSpec {
-            key: SettingKey(Arc::from(KEY_LOCKKEYS_ENABLED)),
-            label: "锁键状态提示服务".into(),
-            description: Some(
-                "大小写 / 数字键盘锁定状态提示的总开关(§140/§144);纯观察,不拦截不注入".into(),
-            ),
-            kind: SettingKind::Bool,
-            default: SettingValue::Bool(true),
-            apply_policy: ApplyPolicy::Immediate,
-        },
-        SettingSpec {
-            key: SettingKey(Arc::from(KEY_LOCKKEYS_OSD)),
-            label: "锁键状态提示".into(),
-            description: Some(
-                "大小写 / 数字键盘锁定状态变化时在屏幕中央弹出提示卡片,片刻自动消失".into(),
-            ),
-            kind: SettingKind::Bool,
-            default: SettingValue::Bool(true),
-            apply_policy: ApplyPolicy::Immediate,
-        },
     ]
 }
 
@@ -545,25 +497,21 @@ mod tests {
     }
 
     #[test]
-    fn stale_lockkeys_keys_are_ignored_and_bools_still_load() {
+    fn stale_lockkeys_keys_are_ignored_and_core_rows_still_load() {
         let dir = std::env::temp_dir().join(format!("sakana-lockkeys-test-{}", std::process::id()));
         let file = dir.join("settings.tsv");
         std::fs::create_dir_all(&dir).unwrap();
-        // §144 裁掉的手势/模式行留在文件里:无对应 spec,加载时忽略;
-        // 仍存在的布尔行照常生效。
+        // §148 裁撤:锁键行(§144 遗留 + enabled/osd)留在文件里——
+        // 无对应 spec 的行加载时忽略,下次整体重写自愈消失;
+        // 仍在册的行照常生效。
         std::fs::write(
             &file,
-            "cue-settings-v1\ncore.lockkeys.hold_ms\tabc\ncore.lockkeys.numlock_mode\talways_on\ncore.lockkeys.enabled\tfalse\n",
+            "cue-settings-v1\ncore.lockkeys.enabled\tfalse\ncore.lockkeys.osd\tfalse\ncore.lockkeys.hold_ms\tabc\ncore.hotkey\tctrl+alt+k\ncore.hide_on_focus_loss\tfalse\n",
         )
         .unwrap();
         let host = SettingsHost::new(Some(file.clone()), None, None, None);
-        assert_eq!(
-            host.lockkeys_config(),
-            LockKeysConfig {
-                enabled: false,
-                ..LockKeysConfig::default()
-            }
-        );
+        assert_eq!(host.hotkey(), Hotkey::from_str("ctrl+alt+k").unwrap());
+        assert!(!host.hide_on_focus_loss());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

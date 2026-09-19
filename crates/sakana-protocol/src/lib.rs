@@ -10,7 +10,6 @@ mod error;
 mod hotkey;
 mod item;
 mod launcher_module;
-mod lockkeys;
 pub mod log;
 mod module;
 mod outcome;
@@ -29,7 +28,6 @@ pub use launcher_module::{
     ActivationFuture, LauncherDescriptor, LauncherModule, QueryContext, QueryFuture, QueryResponse,
     QueryResult,
 };
-pub use lockkeys::{LockKey, LockKeysConfig};
 pub use module::{Module, ModuleDescriptor, ModuleId};
 pub use outcome::{ModuleOutcome, OutcomeStatus, SessionDisposition, UsageRecordRequest};
 pub use presentation::{IconImage, ResultAccessory, ResultBadge, ResultIcon, ResultPresentation};

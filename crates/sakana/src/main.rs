@@ -7,8 +7,6 @@
 //! 编排:HostEvent → Core → CoreEffect → sakana-ui / sakana-windows。
 //! 只有本 crate 同时认识 Core、GPUI 和 Win32。
 
-use futures::StreamExt;
-use futures::channel::mpsc;
 use futures::future::BoxFuture;
 use gpui::*;
 use sakana_core::{
@@ -20,11 +18,11 @@ use sakana_module_bookmark::BookmarkModule;
 use sakana_module_file::FileModule;
 use sakana_module_system::SystemModule;
 use sakana_module_web::WebModule;
+use sakana_protocol::Hotkey;
 use sakana_protocol::logln;
-use sakana_protocol::{Hotkey, LockKey, LockKeysConfig};
-use sakana_ui::{LauncherView, OsdView};
+use sakana_ui::LauncherView;
 use sakana_windows as win;
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -44,19 +42,6 @@ impl TaskSpawner for GpuiSpawner {
 
 const WINDOW_WIDTH: i32 = 640;
 const WINDOW_HEIGHT: i32 = 450;
-/// 锁键状态 OSD(§140):活动显示器正中的提示卡片尺寸(逻辑像素)。
-const OSD_WIDTH: i32 = 220;
-const OSD_HEIGHT: i32 = 64;
-/// OSD 自动收起时延;新事件/会话复位重置计时(generation 去抖)。
-const OSD_HIDE_AFTER: std::time::Duration = std::time::Duration::from_millis(900);
-
-/// host handler → OSD 泵的消息(§140)。不进 Core——OSD 是 host
-/// 侧呈现,与搜索会话无关。
-#[derive(Clone, Copy, Debug)]
-enum OsdMsg {
-    State(LockKey, bool),
-    Reset,
-}
 
 /// 开发期热键覆盖:`SAKANA_HOTKEY="ctrl+alt+k"`(格式同设置值)。
 /// 只影响本次进程的初始注册,不写入 settings.tsv——调试覆盖不应
@@ -65,8 +50,7 @@ fn parse_hotkey_env() -> Option<Hotkey> {
     std::env::var("SAKANA_HOTKEY").ok()?.parse().ok()
 }
 
-/// HostMsg → CoreEvent 的翻译。退出先经 Core 停止模块并 flush usage;
-/// LockKeyChanged / SessionReset 由 handler 处理(OSD 与会话复位)。
+/// HostMsg → CoreEvent 的翻译。退出先经 Core 停止模块并 flush usage。
 fn to_core_event(msg: win::host::HostMsg) -> CoreEvent {
     let event = match msg {
         win::host::HostMsg::HotkeyPressed => HostEvent::HotkeyPressed,
@@ -75,8 +59,6 @@ fn to_core_event(msg: win::host::HostMsg) -> CoreEvent {
         win::host::HostMsg::FocusLost => HostEvent::FocusLost,
         win::host::HostMsg::FocusGained => HostEvent::FocusGained,
         win::host::HostMsg::QuitRequested => HostEvent::QuitRequested,
-        win::host::HostMsg::LockKeyChanged { .. } => unreachable!("OSD 事件在 handler 内拦截"),
-        win::host::HostMsg::SessionReset => unreachable!("会话复位在 handler 内拦截"),
     };
     CoreEvent::Host(event)
 }
@@ -127,74 +109,29 @@ fn main() {
     // Core::new 后原序补发。开机/安装后立刻按键不再被吞。
     let core_tx_slot: Rc<RefCell<Option<CoreEventSender>>> = Rc::new(RefCell::new(None));
     let backlog: Rc<RefCell<Vec<win::host::HostMsg>>> = Rc::new(RefCell::new(Vec::new()));
-    // 锁键服务(§140)的接线点:worker 槽(host 创建后起步)、OSD
-    // 事件通道(GPUI 起来后装发送端)、launcher 可见性(OSD 抑制:
-    // 用户正看着 launcher 时锁键卡片纯属打扰)。都在 UI 线程访问。
-    let lockkeys_slot: Rc<RefCell<Option<win::lockkeys::Worker>>> = Rc::new(RefCell::new(None));
-    let osd_tx_slot: Rc<RefCell<Option<mpsc::UnboundedSender<OsdMsg>>>> =
-        Rc::new(RefCell::new(None));
-    let launcher_visible = Rc::new(Cell::new(false));
     let host = {
         let slot = Rc::clone(&core_tx_slot);
         let backlog = Rc::clone(&backlog);
-        let lockkeys = Rc::clone(&lockkeys_slot);
-        let osd_tx = Rc::clone(&osd_tx_slot);
-        let visible = Rc::clone(&launcher_visible);
         win::host::HostWindow::create(Box::new(move |msg| {
             logln!("[host] {msg:?}");
-            match msg {
-                // §140:OSD 事件不进 Core;launcher 可见时不弹。通道
-                // 未就位(GPUI 起来前的瞬态)直接丢弃——那时的状态
-                // 提示没有价值。
-                win::host::HostMsg::LockKeyChanged { key, on } => {
-                    if !visible.get()
-                        && let Some(tx) = osd_tx.borrow().as_ref()
-                    {
-                        let _ = tx.unbounded_send(OsdMsg::State(key, on));
+            match slot.borrow().as_ref() {
+                Some(tx) => {
+                    // §142:Core 随 LauncherView 一起销毁时接收端已
+                    // 消失,退出请求会静默丢失。托盘"退出"是唯一
+                    // 退出路径,这里必须兜底,否则进程无 UI 且退不掉。
+                    let quit = matches!(msg, win::host::HostMsg::QuitRequested);
+                    if tx.unbounded_send(to_core_event(msg)).is_err() && quit {
+                        logln!("[warn] core queue gone: quitting without Core");
+                        win::tray::remove();
+                        win::ime::restore_saved_layout();
+                        win::host::request_quit();
                     }
                 }
-                // 锁屏/休眠唤醒(§140):worker 重同步账本(锁屏期间
-                // 按键的释放事件不会送达),OSD 收起。
-                win::host::HostMsg::SessionReset => {
-                    if let Some(worker) = lockkeys.borrow().as_ref() {
-                        worker.reset();
-                    }
-                    if let Some(tx) = osd_tx.borrow().as_ref() {
-                        let _ = tx.unbounded_send(OsdMsg::Reset);
-                    }
-                }
-                msg => match slot.borrow().as_ref() {
-                    Some(tx) => {
-                        // §142:Core 随 LauncherView 一起销毁时接收端已
-                        // 消失,退出请求会静默丢失。托盘"退出"是唯一
-                        // 退出路径,这里必须兜底,否则进程无 UI 且退不掉。
-                        let quit = matches!(msg, win::host::HostMsg::QuitRequested);
-                        if tx.unbounded_send(to_core_event(msg)).is_err() && quit {
-                            logln!("[warn] core queue gone: quitting without Core");
-                            win::tray::remove();
-                            win::ime::restore_saved_layout();
-                            win::host::request_quit();
-                        }
-                    }
-                    None => backlog.borrow_mut().push(msg),
-                },
+                None => backlog.borrow_mut().push(msg),
             }
         }))
         .expect("host window")
     };
-
-    // 锁键 worker 与热键同批起步,先于 GPUI——状态提示从登录起
-    // 即生效。持久化配置由 Core 就位后的初始 notify 校准(此前按
-    // protocol 默认运行,与热键初始注册同款瞬态)。启动失败降级为
-    // 警告:锁键提示缺席不影响 Launcher 本体。
-    *lockkeys_slot.borrow_mut() =
-        match win::lockkeys::Worker::start(host.hwnd(), LockKeysConfig::default()) {
-            Ok(worker) => Some(worker),
-            Err(e) => {
-                logln!("[warn] lockkeys worker start failed: {e}");
-                None
-            }
-        };
 
     // 初始注册用 env 覆盖(仅本次进程)或默认 Alt+Space;设置里的
     // 自定义值要等 Core 读了 settings.tsv 才知道,Core 就位后再次
@@ -292,19 +229,6 @@ fn main() {
                 .map_err(|e| format!("打开失败:{e}"))
         };
 
-        // core.lockkeys.* 的 commit 后通知(§140):全量配置下发
-        // worker(初始一次 + 每次锁键行 commit)。worker 缺席(启动
-        // 失败)时丢弃——设置照常持久化,下次启动生效。
-        let notify_lockkeys = {
-            let slot = Rc::clone(&lockkeys_slot);
-            move |config: LockKeysConfig| {
-                logln!("[lockkeys] config -> {config:?}");
-                if let Some(worker) = slot.borrow().as_ref() {
-                    worker.set_config(config);
-                }
-            }
-        };
-
         let core = Core::new(
             CoreConfig {
                 usage_file: Some(storage_root.join("usage.tsv")),
@@ -321,7 +245,6 @@ fn main() {
                     logln!("[dnd] enabled={on}");
                     win::host::set_dnd_enabled(on);
                 })),
-                notify_lockkeys: Some(Box::new(notify_lockkeys)),
                 storage_root,
                 ..CoreConfig::default()
             },
@@ -391,86 +314,11 @@ fn main() {
         win::window::install_display_change_guard(hwnd);
         let focus_hook = win::host::install_focus_hook().expect("focus hook");
 
-        // 锁键状态 OSD 窗口(§140):第二个 GPUI 窗口。**顺序敏感**:
-        // find_main_window_hwnd 按类名取枚举序第一个 Zed::Window——
-        // 必须先完成上面的 launcher hwnd 发现再创建 OSD,OSD 自己的
-        // hwnd 用排除法发现。PopUp = WS_EX_TOOLWINDOW(不进任务栏/
-        // alt-tab);Transparent 让圆角卡片外缘透明。
-        let osd_handle = cx
-            .open_window(
-                WindowOptions {
-                    window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
-                        None,
-                        size(px(OSD_WIDTH as f32), px(OSD_HEIGHT as f32)),
-                        cx,
-                    ))),
-                    titlebar: None,
-                    show: false,
-                    focus: false,
-                    is_movable: false,
-                    is_resizable: false,
-                    kind: WindowKind::PopUp,
-                    window_background: WindowBackgroundAppearance::Transparent,
-                    ..Default::default()
-                },
-                |_, cx| cx.new(|_cx| OsdView::new()),
-            )
-            .expect("open osd window");
-        let osd_hwnd = win::window::find_window_hwnd_excluding(hwnd).expect("osd hwnd");
-        // GPUI 的 WM_DISPLAYCHANGE 无条件 ShowWindow bug 对 OSD 同样
-        // 成立(隐藏时被误唤醒就是一张常驻卡片),装同款护栏。
-        win::window::install_display_change_guard(osd_hwnd);
-
-        // OSD 泵:show/place/hide 全走 Win32(place_centered 恒
-        // SWP_NOACTIVATE,永不抢焦),视图只渲染当前状态;自动收起用
-        // generation 计数去抖——新事件/会话复位 bump 代次,旧计时
-        // 到点发现代次已变即作废。
-        {
-            let (osd_tx, mut osd_rx) = mpsc::unbounded::<OsdMsg>();
-            *osd_tx_slot.borrow_mut() = Some(osd_tx);
-            let osd_gen = Rc::new(Cell::new(0u64));
-            cx.spawn(async move |cx: &mut AsyncApp| {
-                while let Some(msg) = osd_rx.next().await {
-                    match msg {
-                        OsdMsg::Reset => {
-                            osd_gen.set(osd_gen.get() + 1);
-                            win::window::hide(osd_hwnd);
-                        }
-                        OsdMsg::State(key, on) => {
-                            osd_gen.set(osd_gen.get() + 1);
-                            let my_gen = osd_gen.get();
-                            // 先换内容再显示:用户永远看不到上一张卡片。
-                            let _ = osd_handle.update(&mut *cx, |view, _window, cx| {
-                                view.set_state(key, on, cx);
-                            });
-                            win::monitor::place_centered_on_active_monitor(
-                                osd_hwnd, OSD_WIDTH, OSD_HEIGHT,
-                            );
-                            let timer = cx.background_executor().timer(OSD_HIDE_AFTER);
-                            let gen_cell = Rc::clone(&osd_gen);
-                            cx.spawn(async move |_cx: &mut AsyncApp| {
-                                timer.await;
-                                if gen_cell.get() == my_gen {
-                                    win::window::hide(osd_hwnd);
-                                }
-                            })
-                            .detach();
-                        }
-                    }
-                }
-            })
-            .detach();
-        }
-
         // CoreEffect → Win32 执行。FocusInput 的视图侧焦点
         // 由 LauncherView 自己在 render 时消费(见 sakana-ui)。
         // ever_shown 同时是渲染预热的护栏:会话开过就不必预热。
-        // visible_fx 是 §140 OSD 抑制的可见性镜像(Show/Hide 是
-        // 仅有的两个可见性迁移,都在这条效果通道上)。
         let ever_shown = Rc::new(std::cell::Cell::new(false));
         let ever_shown_fx = ever_shown.clone();
-        let visible_fx = Rc::clone(&launcher_visible);
-        let osd_tx_fx = Rc::clone(&osd_tx_slot);
         window_handle
             .update(cx, |view, _window, _cx| {
                 view.set_effect_handler(Box::new(move |effect| {
@@ -478,13 +326,6 @@ fn main() {
                     match effect {
                         CoreEffect::ShowLauncher => {
                             ever_shown_fx.set(true);
-                            visible_fx.set(true);
-                            // §142:OSD 抑制只在发送时判定(见 host 回调),
-                            // 已经显示的锁键卡片不会自己消失——唤起时
-                            // 主动收起,避免它在 Launcher 隐藏后闪出。
-                            if let Some(tx) = osd_tx_fx.borrow().as_ref() {
-                                let _ = tx.unbounded_send(OsdMsg::Reset);
-                            }
                             win::monitor::place_on_active_monitor(
                                 hwnd,
                                 WINDOW_WIDTH,
@@ -495,7 +336,6 @@ fn main() {
                             win::window::show_and_focus(hwnd);
                         }
                         CoreEffect::HideLauncher => {
-                            visible_fx.set(false);
                             // 窗口仍在前台时恢复用户布局;
                             // 失焦隐藏路径是尽力而为(已知边界)。
                             win::ime::restore_saved_layout();
@@ -531,9 +371,8 @@ fn main() {
         .detach();
 
         // 进程生命周期资源:guard 随进程退出释放,无回收点。
-        // hotkey_slot / lockkeys_slot 被 run 闭包环境与 Core 内回调
-        // 共同持有;OSD 泵任务持有 osd_handle——均无需 forget 进元组
-        // 以外的额外处置。
-        std::mem::forget((host, focus_hook, window_handle, osd_handle, single_instance));
+        // hotkey_slot 被 run 闭包环境与 Core 内回调共同持有,
+        // 无需 forget 进元组以外的额外处置。
+        std::mem::forget((host, focus_hook, window_handle, single_instance));
     });
 }

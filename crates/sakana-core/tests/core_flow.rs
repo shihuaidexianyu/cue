@@ -458,9 +458,9 @@ fn trigger_spec_is_synthesized_for_non_default_modules() {
 
     core.open_settings();
     let model = core.settings_model().unwrap();
-    // 8 行 = 7 行 core.*(5 基础 + 2 锁键 §140/§144)+ bm 的触发词行;
+    // 6 行 = 5 行 core.*(锁键行已随 §148 裁撤)+ bm 的触发词行;
     // 默认模块(无触发词)没有该行。
-    assert_eq!(model.rows.len(), 8);
+    assert_eq!(model.rows.len(), 6);
     let keys: Vec<&str> = model.rows.iter().map(|r| r.key.as_ref()).collect();
     assert!(keys.contains(&"module.bm.trigger"));
     assert!(!keys.contains(&"module.default.trigger"));
@@ -1321,85 +1321,6 @@ fn dnd_mode_notify_skips_other_keys_and_failed_transactions() {
 }
 
 // ---------------------------------------------------------------------
-// 锁键状态提示设置(§140;§144 起两个布尔行):commit 后全量配置
-// 通知(NotifyLockKeys,dnd_mode 同款模式)。
-// ---------------------------------------------------------------------
-
-/// 带 notify_lockkeys 的 setup;通知序列录进 log。
-fn setup_with_lockkeys_notify(log: Arc<Mutex<Vec<LockKeysConfig>>>) -> Core {
-    let spawner = ManualSpawner::new();
-    let mut registry = ModuleRegistry::new();
-    registry
-        .register(Box::new(FakeModule::new("fake")))
-        .unwrap();
-    let config = CoreConfig {
-        notify_lockkeys: Some(Box::new(move |c| log.lock().unwrap().push(c))),
-        ..test_config()
-    };
-    Core::new(config, registry, spawner).unwrap()
-}
-
-#[test]
-fn lockkeys_notify_fires_initial_with_defaults_and_on_commit() {
-    let log = Arc::new(Mutex::new(Vec::new()));
-    let mut core = setup_with_lockkeys_notify(log.clone());
-    // 初始通知:持久化为空 → protocol 默认配置。
-    assert_eq!(*log.lock().unwrap(), vec![LockKeysConfig::default()]);
-
-    core.apply_setting("core.lockkeys.osd", SettingValue::Bool(false))
-        .unwrap();
-    // commit 后下发全量配置,改过的行已生效。
-    let last = log.lock().unwrap().last().copied().unwrap();
-    assert!(!last.osd);
-    assert_eq!(
-        last,
-        LockKeysConfig {
-            osd: false,
-            ..LockKeysConfig::default()
-        }
-    );
-    assert_eq!(log.lock().unwrap().len(), 2);
-}
-
-#[test]
-fn lockkeys_invalid_candidate_fails_without_commit_or_notify() {
-    let log = Arc::new(Mutex::new(Vec::new()));
-    let mut core = setup_with_lockkeys_notify(log.clone());
-
-    // 布尔行收到非布尔候选:SettingKind 类型校验拒绝,不 commit 不通知。
-    core.apply_setting("core.lockkeys.osd", SettingValue::String("abc".into()))
-        .unwrap_err();
-    core.apply_setting("core.lockkeys.enabled", SettingValue::Integer(1))
-        .unwrap_err();
-    assert_eq!(log.lock().unwrap().len(), 1); // 只有初始那次
-    // 生效值仍是默认(通知载荷即全量生效配置,最后一次 = 初始默认)。
-    assert_eq!(
-        log.lock().unwrap().last().unwrap(),
-        &LockKeysConfig::default()
-    );
-}
-
-#[test]
-fn lockkeys_notify_covers_both_rows_and_skips_unrelated() {
-    let log = Arc::new(Mutex::new(Vec::new()));
-    let mut core = setup_with_lockkeys_notify(log.clone());
-
-    // 非锁键行不通知。
-    core.apply_setting(KEY_START_ON_BOOT, SettingValue::Bool(true))
-        .unwrap();
-    assert_eq!(log.lock().unwrap().len(), 1);
-
-    core.apply_setting("core.lockkeys.enabled", SettingValue::Bool(false))
-        .unwrap();
-    assert!(!log.lock().unwrap().last().unwrap().enabled);
-    core.apply_setting("core.lockkeys.osd", SettingValue::Bool(false))
-        .unwrap();
-    assert!(!log.lock().unwrap().last().unwrap().osd);
-    // 初始 + 2 次锁键行 commit。
-    assert_eq!(log.lock().unwrap().len(), 3);
-}
-
-// ---------------------------------------------------------------------
 // present 路由
 // ---------------------------------------------------------------------
 
@@ -1667,8 +1588,9 @@ fn settings_view_lifecycle_and_effects() {
     assert!(core.in_settings());
     assert!(core.session().is_none());
     let model = core.settings_model().unwrap();
-    // log_file + hotkey + hide_on_focus_loss + start_on_boot + dnd_mode + 2 锁键行(§140/§144)
-    assert_eq!(model.rows.len(), 7);
+    // log_file + hotkey + hide_on_focus_loss + start_on_boot + dnd_mode
+    // (锁键行已随 §148 裁撤)
+    assert_eq!(model.rows.len(), 5);
     assert!(model.rows.iter().any(|r| r.key.as_ref() == "core.log_file"));
     assert_eq!(model.selected, 0);
 

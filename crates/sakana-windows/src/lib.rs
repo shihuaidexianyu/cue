@@ -10,7 +10,6 @@ pub mod host;
 pub mod hotkey;
 pub mod icon;
 pub mod ime;
-pub mod lockkeys;
 pub mod monitor;
 pub mod single_instance;
 pub mod tray;
