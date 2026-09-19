@@ -9,12 +9,11 @@
 
 mod catalog;
 mod chromium;
-mod icon;
 mod matcher;
 mod pinyin_index;
 
-use chromium::Browser;
 use sakana_protocol::*;
+use sakana_util_win::browser::Browser;
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 
@@ -153,7 +152,7 @@ impl Module for BookmarkModule {
             let n = catalog.entries().len();
             let t_catalog = started.elapsed();
             let _com = sakana_util_win::com::ComGuard::new();
-            let loaded = icon::load_browser_icons();
+            let loaded = sakana_util_win::browser::load_icons();
             logger.log(
                 LogLevel::Info,
                 &format!(
@@ -271,7 +270,7 @@ impl LauncherModule for BookmarkModule {
                 ));
             };
             let result = match action {
-                ActionId::PRIMARY => open_in_browser(entry.browser, &entry.url),
+                ActionId::PRIMARY => sakana_util_win::browser::open_url(entry.browser, &entry.url),
                 ACTION_COPY_URL => sakana_util_win::clipboard::set_text(&entry.url),
                 _ => Err(ModuleError::ActivationFailed(format!(
                     "unknown action {action:?}"
@@ -292,14 +291,9 @@ impl LauncherModule for BookmarkModule {
     }
 }
 
-/// 从哪来回哪开:来源浏览器 exe + URL 参数;exe 找不到退回
-/// 默认浏览器打开 URL——宁可降级,不让激活失败。
-fn open_in_browser(browser: Browser, url: &str) -> Result<(), ModuleError> {
-    match browser.exe_path() {
-        Some(exe) => sakana_util_win::shell::shell_execute(&exe.to_string_lossy(), Some(url), None),
-        None => sakana_util_win::shell::shell_execute(url, None, None),
-    }
-}
+// 从哪来回哪开:打开动作交给 sakana-util-win::browser::open_url
+// (§143 下沉)——来源浏览器 exe + URL 参数;exe 找不到退回
+// 默认浏览器打开 URL——宁可降级,不让激活失败。
 
 #[cfg(test)]
 mod tests {

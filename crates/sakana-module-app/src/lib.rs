@@ -3,6 +3,8 @@
 //! V1 唯一必装模块:User/Common Start Menu + UWP/MSIX 发现,
 //! 拼音(全拼 + 首字母)+ fuzzy 搜索,usage ranking,异步图标。
 //! Core 不知道什么是 .lnk、拼音、AUMID——全部语义在本 crate。
+//! 另有 §143 的默认路径「打开链接」伪结果:输入可判定为 URL
+//! 时钉顶一行(粘贴直达,零按键流程)。
 
 mod app_paths;
 mod catalog;
@@ -26,6 +28,10 @@ use std::sync::Arc;
 /// 次级动作 ID(顺序即菜单顺序;PRIMARY = 打开)。
 const ACTION_RUN_AS_ADMIN: ActionId = ActionId(1);
 const ACTION_OPEN_LOCATION: ActionId = ActionId(2);
+/// 「打开链接」行的次级动作(§143;3/4/5 接在应用动作的 1/2 后)。
+const ACTION_OPEN_EDGE: ActionId = ActionId(3);
+const ACTION_OPEN_CHROME: ActionId = ActionId(4);
+const ACTION_COPY_URL: ActionId = ActionId(5);
 
 /// 便携应用目录设置(§133):分号分隔,改动重启后生效
 /// (catalog 只在进程启动时构建,§56)。
@@ -33,6 +39,99 @@ const KEY_EXTRA_DIRS: &str = "module.app.extra_dirs";
 
 /// packaged 应用 logo 未就绪时的兜底字形:Segoe AppIconDefault(§135)。
 const GLYPH_APP: u32 = 0xECAA;
+/// 「打开链接」行的字形:Segoe Link(§135)。
+const GLYPH_LINK: u32 = 0xE71B;
+
+/// 「打开链接」伪结果的 ItemId 哨兵(§143):catalog 条目序号从 1
+/// 起,u64::MAX 永不相撞;行只随查询存在,无需稳定跨查询。
+const OPEN_URL_ITEM_ID: ItemId = ItemId(u64::MAX);
+
+/// 「打开链接」伪结果的 payload(§143):默认路径粘贴/输入 URL 时
+/// 钉顶一行,AppModule 自持——模态隔离不破(§83),§82 不改。
+struct OpenUrl {
+    url: String,
+}
+
+/// 粘贴收尾噪声:引号/中文句号逗号/成对括号(markdown `(url)`、
+/// 中文「url」;trim 已去空白)。URL 不会以这些字符开头,
+/// trim_matches 双端安全。
+const PASTE_NOISE: [char; 16] = [
+    '"', '\'', '。', '，', '、', ';', '；', ',', '(', ')', '[', ']', '{', '}', '「', '」',
+];
+
+/// URL 判定(§143,纯函数可测):通过则返回可直接交给 ShellExecute
+/// 的 URL。scheme 白名单 http/https(大小写不敏感);无 scheme 时
+/// 裸域名(含 '.')、IPv4 字面量、localhost(:port)补 https://;
+/// 含空格或其余 scheme 一律拒绝——绝不让任意 scheme 到达
+/// ShellExecute。字符检查从宽(拒引号/尖括号/反斜杠),打不开的
+/// 主机交给浏览器自行降级为搜索。
+fn url_normalize(raw: &str) -> Option<String> {
+    let trimmed = raw.trim().trim_matches(|c| PASTE_NOISE.contains(&c));
+    if trimmed.is_empty() || trimmed.chars().any(char::is_whitespace) {
+        return None;
+    }
+    if let Some((scheme, rest)) = trimmed.split_once("://") {
+        if !rest.is_empty() && matches!(scheme.to_ascii_lowercase().as_str(), "http" | "https") {
+            return Some(trimmed.to_string());
+        }
+        return None;
+    }
+    if trimmed.starts_with('.') || !trimmed.chars().all(url_char) {
+        return None;
+    }
+    let host = trimmed.split(['/', ':', '?', '#']).next().unwrap_or("");
+    if host == "localhost" || is_ipv4(host) || host.contains('.') {
+        return Some(format!("https://{trimmed}"));
+    }
+    None
+}
+
+/// 无 scheme 分支的字符白名单:unicode 字母数字(IDN 中文域名可
+/// 过)+ URL 标点;反引号、尖括号、反斜杠、花括号等被拒。
+fn url_char(c: char) -> bool {
+    c.is_alphanumeric()
+        || matches!(
+            c,
+            '-' | '.'
+                | '_'
+                | ':'
+                | '/'
+                | '?'
+                | '#'
+                | '['
+                | ']'
+                | '@'
+                | '!'
+                | '$'
+                | '&'
+                | '('
+                | ')'
+                | '*'
+                | '+'
+                | ','
+                | ';'
+                | '='
+                | '%'
+                | '~'
+        )
+}
+
+/// 宽松 IPv4:四段、每段 1–3 位数字 ≤ 255。
+fn is_ipv4(host: &str) -> bool {
+    let mut parts = host.split('.');
+    let mut n = 0;
+    for part in parts.by_ref() {
+        if part.is_empty()
+            || part.len() > 3
+            || !part.bytes().all(|b| b.is_ascii_digit())
+            || part.parse::<u16>().unwrap_or(1000) > 255
+        {
+            return false;
+        }
+        n += 1;
+    }
+    n == 4
+}
 
 /// AppModule 是 V1 的 required default module。
 pub struct AppModule {
@@ -108,11 +207,19 @@ fn search(
         b.0.cmp(&a.0)
             .then_with(|| a.1.name_lower.cmp(&b.1.name_lower))
     });
-    scored.truncate(limit);
-    scored
+    // §143:输入可判定为 URL 时钉顶「打开链接」伪结果(粘贴直达);
+    // 为它预留名额,总数不破 result_limit 预算(§94)。空查询在上
+    // 面的早退分支里,不会走到判定。
+    let open_url = url_normalize(query);
+    scored.truncate(limit.saturating_sub(usize::from(open_url.is_some())));
+    let mut items: Vec<ModuleItem> = scored
         .into_iter()
         .map(|(_, e)| ModuleItem::new(ItemId(e.item_id()), e.clone()))
-        .collect()
+        .collect();
+    if let Some(url) = open_url {
+        items.insert(0, ModuleItem::new(OPEN_URL_ITEM_ID, OpenUrl { url }));
+    }
+    items
 }
 
 /// 空查询:按 (count, last_used) 排的 Top Apps。
@@ -135,6 +242,37 @@ fn top_used(entries: &[AppEntry], usage: Option<&UsageReader>, limit: usize) -> 
         .into_iter()
         .map(|(e, _)| ModuleItem::new(ItemId(e.item_id()), e.clone()))
         .collect()
+}
+
+/// 「打开链接」行的动作表(§143,纯函数可测):打开 = 系统默认
+/// 浏览器(永远可用);用 Edge/Chrome 打开 = 配对浏览器,探测到
+/// 才出现;复制链接收尾。usage key 固定 open-url。
+fn open_url_actions(edge: bool, chrome: bool) -> Vec<ActionDescriptor> {
+    let mut actions = vec![ActionDescriptor {
+        id: ActionId::PRIMARY,
+        label: "打开".into(),
+        shortcut: None,
+    }];
+    if edge {
+        actions.push(ActionDescriptor {
+            id: ACTION_OPEN_EDGE,
+            label: "用 Edge 打开".into(),
+            shortcut: None,
+        });
+    }
+    if chrome {
+        actions.push(ActionDescriptor {
+            id: ACTION_OPEN_CHROME,
+            label: "用 Chrome 打开".into(),
+            shortcut: None,
+        });
+    }
+    actions.push(ActionDescriptor {
+        id: ACTION_COPY_URL,
+        label: "复制链接".into(),
+        shortcut: None,
+    });
+    actions
 }
 
 impl Module for AppModule {
@@ -248,6 +386,17 @@ impl LauncherModule for AppModule {
     }
 
     fn present(&self, item: &ModuleItem) -> ResultPresentation {
+        // §143「打开链接」伪结果:URL 即标题,Link 字形图标。
+        if let Some(open) = item.downcast_ref::<OpenUrl>() {
+            let mut p = ResultPresentation::new(open.url.clone());
+            p.subtitle = Some("在默认浏览器中打开".into());
+            p.icon = sakana_util_win::glyph::cached_glyph(
+                GLYPH_LINK,
+                sakana_util_win::glyph::DEFAULT_RGB,
+            )
+            .map(ResultIcon::Raster);
+            return p;
+        }
         let Some(entry) = item.downcast_ref::<AppEntry>() else {
             return ResultPresentation::new("<unknown item>");
         };
@@ -289,9 +438,19 @@ impl LauncherModule for AppModule {
         p
     }
 
-    /// 打开 / 以管理员身份运行 / 打开所在位置。后两个仅 Win32
-    /// 目标——packaged 应用由系统代理激活,没有可提权/可定位的 exe。
+    /// 应用行:打开 / 以管理员身份运行 / 打开所在位置(后两个仅
+    /// Win32 目标——packaged 应用由系统代理激活,没有可提权/可
+    /// 定位的 exe)。「打开链接」行:打开(默认浏览器)/ 用 Edge/
+    /// Chrome 打开(探测到才出现,§143)/ 复制链接。
     fn actions(&self, item: &ModuleItem) -> Vec<ActionDescriptor> {
+        if item.downcast_ref::<OpenUrl>().is_some() {
+            return open_url_actions(
+                sakana_util_win::browser::Browser::Edge.exe_path().is_some(),
+                sakana_util_win::browser::Browser::Chrome
+                    .exe_path()
+                    .is_some(),
+            );
+        }
         let mut actions = vec![ActionDescriptor {
             id: ActionId::PRIMARY,
             label: "打开".into(),
@@ -316,8 +475,38 @@ impl LauncherModule for AppModule {
     }
 
     fn activate(&mut self, item: &ModuleItem, action: ActionId) -> ActivationFuture {
+        // §143「打开链接」伪结果:默认浏览器/配对浏览器/复制链接;
+        // usage 固定 key open-url(§50 存储不按需增长)。
+        let open_url = item.downcast_ref::<OpenUrl>().map(|o| o.url.clone());
         let entry = item.downcast_ref::<AppEntry>().cloned();
         Box::pin(async move {
+            if let Some(url) = open_url {
+                let result = match action {
+                    ActionId::PRIMARY => sakana_util_win::shell::shell_execute(&url, None, None),
+                    ACTION_OPEN_EDGE => sakana_util_win::browser::open_url(
+                        sakana_util_win::browser::Browser::Edge,
+                        &url,
+                    ),
+                    ACTION_OPEN_CHROME => sakana_util_win::browser::open_url(
+                        sakana_util_win::browser::Browser::Chrome,
+                        &url,
+                    ),
+                    ACTION_COPY_URL => sakana_util_win::clipboard::set_text(&url),
+                    _ => Err(ModuleError::ActivationFailed(format!(
+                        "unknown action {action:?}"
+                    ))),
+                };
+                return match result {
+                    Ok(()) => ModuleOutcome::success(
+                        SessionDisposition::Close,
+                        Some(UsageRecordRequest {
+                            item_key: "open-url".to_string(),
+                            action_id: action,
+                        }),
+                    ),
+                    Err(e) => ModuleOutcome::failed(e),
+                };
+            }
             let Some(entry) = entry else {
                 return ModuleOutcome::failed(ModuleError::InvalidState(
                     "item payload is not an AppEntry".into(),
@@ -387,5 +576,131 @@ mod tests {
         };
         assert!(launch::launch_elevated(&target).is_err());
         assert!(launch::reveal_location(&target).is_err());
+    }
+
+    /// url_normalize 全案(§143):scheme 白名单、裸域名补 https、
+    /// IP/localhost、尾部粘贴噪声、含空格与其余 scheme 拒绝。
+    #[test]
+    fn url_normalize_cases() {
+        // 显式 scheme(http/https 任意大小写)原样通过
+        assert_eq!(
+            url_normalize("https://example.com/path?q=1"),
+            Some("https://example.com/path?q=1".to_string())
+        );
+        assert_eq!(
+            url_normalize("HTTP://Example.COM"),
+            Some("HTTP://Example.COM".to_string())
+        );
+        assert_eq!(
+            url_normalize("http://localhost:3000"),
+            Some("http://localhost:3000".to_string())
+        );
+        // 无 scheme:裸域名 / IPv4 / localhost 补 https://
+        assert_eq!(
+            url_normalize("github.com/xx"),
+            Some("https://github.com/xx".to_string())
+        );
+        assert_eq!(
+            url_normalize("127.0.0.1:8080/a"),
+            Some("https://127.0.0.1:8080/a".to_string())
+        );
+        assert_eq!(
+            url_normalize("localhost"),
+            Some("https://localhost".to_string())
+        );
+        // 尾部粘贴噪声修剪(中文句号 / 引号 / markdown 括号)
+        assert_eq!(
+            url_normalize("example.com。"),
+            Some("https://example.com".to_string())
+        );
+        assert_eq!(
+            url_normalize("\"https://example.com\""),
+            Some("https://example.com".to_string())
+        );
+        assert_eq!(
+            url_normalize("(https://example.com)"),
+            Some("https://example.com".to_string())
+        );
+        // 拒绝:含空格、非白名单 scheme、空串
+        assert_eq!(url_normalize("rust tutorial"), None);
+        assert_eq!(url_normalize("javascript:alert(1)"), None);
+        assert_eq!(url_normalize("file:///etc/passwd"), None);
+        assert_eq!(url_normalize("ftp://example.com"), None);
+        assert_eq!(url_normalize(""), None);
+        assert_eq!(url_normalize("。。。"), None);
+        // 灰色地带(§143 记录在案):带点输入放行,浏览器自行降级
+        assert_eq!(
+            url_normalize("config.yaml"),
+            Some("https://config.yaml".to_string())
+        );
+    }
+
+    /// 输入可判定为 URL 时钉顶「打开链接」行(§143):哨兵 ItemId、
+    /// 应用结果退后、result_limit 预算不破;非 URL 输入不出现。
+    #[test]
+    fn open_url_row_pins_top_within_limit() {
+        let no_usage: Option<&UsageReader> = None;
+        // 空 catalog:URL 行独占
+        let r = search(&[], no_usage, "https://example.com", 10);
+        assert_eq!(r.len(), 1);
+        assert_eq!(r[0].id(), OPEN_URL_ITEM_ID);
+        let open = r[0].downcast_ref::<OpenUrl>().unwrap();
+        assert_eq!(open.url, "https://example.com");
+
+        // limit = 1:预算全给钉顶行,应用结果一个不超
+        let r = search(&[], no_usage, "https://example.com", 1);
+        assert_eq!(r.len(), 1);
+        assert_eq!(r[0].id(), OPEN_URL_ITEM_ID);
+
+        // 非 URL 输入:无伪结果
+        let r = search(&[], no_usage, "chrome", 10);
+        assert!(r.is_empty());
+        // 空查询:Top Apps 分支,无伪结果
+        let r = search(&[], no_usage, "", 10);
+        assert!(r.is_empty());
+    }
+
+    /// 「打开链接」行的 present 与动作表(§143):标题 = URL、
+    /// 副标题说明;动作 = 打开 + [用 Edge 打开] + [用 Chrome 打开]
+    /// + 复制链接,探测开关控制中间两项。
+    #[test]
+    fn open_url_present_and_actions() {
+        let module = AppModule::new();
+        let item = ModuleItem::new(
+            OPEN_URL_ITEM_ID,
+            OpenUrl {
+                url: "https://example.com".into(),
+            },
+        );
+        let p = module.present(&item);
+        assert_eq!(&*p.title, "https://example.com");
+        assert_eq!(p.subtitle.as_deref(), Some("在默认浏览器中打开"));
+
+        let both = open_url_actions(true, true);
+        assert_eq!(
+            both.iter().map(|a| a.id).collect::<Vec<_>>(),
+            [
+                ActionId::PRIMARY,
+                ACTION_OPEN_EDGE,
+                ACTION_OPEN_CHROME,
+                ACTION_COPY_URL
+            ]
+        );
+        assert_eq!(
+            both.iter().map(|a| &*a.label).collect::<Vec<_>>(),
+            ["打开", "用 Edge 打开", "用 Chrome 打开", "复制链接"]
+        );
+        // 只装 Edge:Chrome 动作缺席,复制链接收尾
+        let edge_only = open_url_actions(true, false);
+        assert_eq!(
+            edge_only.iter().map(|a| a.id).collect::<Vec<_>>(),
+            [ActionId::PRIMARY, ACTION_OPEN_EDGE, ACTION_COPY_URL]
+        );
+        // 都没有:打开 + 复制链接
+        let none = open_url_actions(false, false);
+        assert_eq!(
+            none.iter().map(|a| a.id).collect::<Vec<_>>(),
+            [ActionId::PRIMARY, ACTION_COPY_URL]
+        );
     }
 }

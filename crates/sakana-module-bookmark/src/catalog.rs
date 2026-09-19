@@ -4,8 +4,9 @@
 //! 重跑发现 + stat,指纹(路径, mtime, 长度)变了才重解析。46 KB
 //! 量级 JSON 解析亚毫秒,热路径(UI/唤醒)零 IO。
 
-use crate::chromium::{self, Browser};
+use crate::chromium;
 use crate::pinyin_index;
+use sakana_util_win::browser::Browser;
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};

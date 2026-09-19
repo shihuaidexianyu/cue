@@ -19,6 +19,7 @@ use sakana_module_app::AppModule;
 use sakana_module_bookmark::BookmarkModule;
 use sakana_module_file::FileModule;
 use sakana_module_system::SystemModule;
+use sakana_module_web::WebModule;
 use sakana_protocol::logln;
 use sakana_protocol::{Hotkey, LockKey, LockKeysConfig};
 use sakana_ui::{LauncherView, OsdView};
@@ -152,7 +153,7 @@ fn main() {
                         let _ = tx.unbounded_send(OsdMsg::State(key, on));
                     }
                 }
-                // 锁屏/休眠唤醒(§140):worker 丢弃挂起手势(锁屏期间
+                // 锁屏/休眠唤醒(§140):worker 重同步账本(锁屏期间
                 // 按键的释放事件不会送达),OSD 收起。
                 win::host::HostMsg::SessionReset => {
                     if let Some(worker) = lockkeys.borrow().as_ref() {
@@ -164,7 +165,16 @@ fn main() {
                 }
                 msg => match slot.borrow().as_ref() {
                     Some(tx) => {
-                        let _ = tx.unbounded_send(to_core_event(msg));
+                        // §142:Core 随 LauncherView 一起销毁时接收端已
+                        // 消失,退出请求会静默丢失。托盘"退出"是唯一
+                        // 退出路径,这里必须兜底,否则进程无 UI 且退不掉。
+                        let quit = matches!(msg, win::host::HostMsg::QuitRequested);
+                        if tx.unbounded_send(to_core_event(msg)).is_err() && quit {
+                            logln!("[warn] core queue gone: quitting without Core");
+                            win::tray::remove();
+                            win::ime::restore_saved_layout();
+                            win::host::request_quit();
+                        }
                     }
                     None => backlog.borrow_mut().push(msg),
                 },
@@ -173,10 +183,10 @@ fn main() {
         .expect("host window")
     };
 
-    // 锁键 worker 与热键同批起步,先于 GPUI——手势与守护从登录起
+    // 锁键 worker 与热键同批起步,先于 GPUI——状态提示从登录起
     // 即生效。持久化配置由 Core 就位后的初始 notify 校准(此前按
     // protocol 默认运行,与热键初始注册同款瞬态)。启动失败降级为
-    // 警告:锁键服务缺席不影响 Launcher 本体。
+    // 警告:锁键提示缺席不影响 Launcher 本体。
     *lockkeys_slot.borrow_mut() =
         match win::lockkeys::Worker::start(host.hwnd(), LockKeysConfig::default()) {
             Ok(worker) => Some(worker),
@@ -228,6 +238,11 @@ fn main() {
         registry
             .register(Box::new(SystemModule::new()))
             .expect("register system module");
+        // WebModule,触发词 `g`(必应+Edge / Google+Chrome 固定
+        // 搜索组合,§143)。
+        registry
+            .register(Box::new(WebModule::new()))
+            .expect("register web module");
 
         let storage_root = storage_root.clone();
 
@@ -455,6 +470,7 @@ fn main() {
         let ever_shown = Rc::new(std::cell::Cell::new(false));
         let ever_shown_fx = ever_shown.clone();
         let visible_fx = Rc::clone(&launcher_visible);
+        let osd_tx_fx = Rc::clone(&osd_tx_slot);
         window_handle
             .update(cx, |view, _window, _cx| {
                 view.set_effect_handler(Box::new(move |effect| {
@@ -463,6 +479,12 @@ fn main() {
                         CoreEffect::ShowLauncher => {
                             ever_shown_fx.set(true);
                             visible_fx.set(true);
+                            // §142:OSD 抑制只在发送时判定(见 host 回调),
+                            // 已经显示的锁键卡片不会自己消失——唤起时
+                            // 主动收起,避免它在 Launcher 隐藏后闪出。
+                            if let Some(tx) = osd_tx_fx.borrow().as_ref() {
+                                let _ = tx.unbounded_send(OsdMsg::Reset);
+                            }
                             win::monitor::place_on_active_monitor(
                                 hwnd,
                                 WINDOW_WIDTH,

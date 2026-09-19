@@ -1,6 +1,6 @@
 [package]
 name = "sakana"
-version = "0.5.2"
+version = "0.6.0"
 edition.workspace = true
 
 [[bin]]
@@ -16,6 +16,7 @@ sakana-module-app.workspace = true
 sakana-module-bookmark.workspace = true
 sakana-module-file.workspace = true
 sakana-module-system.workspace = true
+sakana-module-web.workspace = true
 futures.workspace = true
 gpui.workspace = true
 

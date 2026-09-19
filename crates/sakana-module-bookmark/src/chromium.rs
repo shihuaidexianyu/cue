@@ -8,69 +8,22 @@
 //! 遍历 `roots`(`folder`/`workspace` 容器、Opera `custom_root`)。
 //! JSON 无锁,浏览器运行中可直接读;Firefox(places.sqlite)不在
 //! V1.x 范围。
+//!
+//! Browser 枚举本体已随 §143 下沉 sakana-util-win::browser
+//! (web/app/bookmark 三处共用);本文件只留书签数据源的发现与解析。
 
+use sakana_util_win::browser::{ALL, Browser};
 use std::path::PathBuf;
 
-/// V1.x 支持的 Chromium 系浏览器。display 进 accessory;exe 用于行图标。
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub enum Browser {
-    Edge,
-    Chrome,
+/// User Data 目录(%LOCALAPPDATA% 下)。
+fn user_data(browser: Browser) -> Option<PathBuf> {
+    let local = std::env::var_os("LOCALAPPDATA").map(PathBuf::from)?;
+    let rel = match browser {
+        Browser::Edge => r"Microsoft\Edge\User Data",
+        Browser::Chrome => r"Google\Chrome\User Data",
+    };
+    Some(local.join(rel))
 }
-
-impl Browser {
-    pub fn display(self) -> &'static str {
-        match self {
-            Browser::Edge => "Edge",
-            Browser::Chrome => "Chrome",
-        }
-    }
-
-    /// usage 身份前缀:打开动作按来源浏览器区分(从哪来回哪开),
-    /// item_key = `{key}:{url}`。
-    pub fn key(self) -> &'static str {
-        match self {
-            Browser::Edge => "edge",
-            Browser::Chrome => "chrome",
-        }
-    }
-
-    /// User Data 目录(%LOCALAPPDATA% 下)。
-    fn user_data(self) -> Option<PathBuf> {
-        let local = std::env::var_os("LOCALAPPDATA").map(PathBuf::from)?;
-        let rel = match self {
-            Browser::Edge => r"Microsoft\Edge\User Data",
-            Browser::Chrome => r"Google\Chrome\User Data",
-        };
-        Some(local.join(rel))
-    }
-
-    /// 浏览器 exe 候选路径(行图标提取用)。
-    pub fn exe_path(self) -> Option<PathBuf> {
-        let mut candidates: Vec<PathBuf> = Vec::new();
-        let push_env = |candidates: &mut Vec<PathBuf>, var: &str, rel: &str| {
-            if let Some(base) = std::env::var_os(var) {
-                candidates.push(PathBuf::from(base).join(rel));
-            }
-        };
-        match self {
-            Browser::Edge => {
-                let rel = r"Microsoft\Edge\Application\msedge.exe";
-                push_env(&mut candidates, "ProgramFiles(x86)", rel);
-                push_env(&mut candidates, "ProgramFiles", rel);
-            }
-            Browser::Chrome => {
-                let rel = r"Google\Chrome\Application\chrome.exe";
-                push_env(&mut candidates, "ProgramFiles", rel);
-                push_env(&mut candidates, "ProgramFiles(x86)", rel);
-                push_env(&mut candidates, "LOCALAPPDATA", rel);
-            }
-        }
-        candidates.into_iter().find(|p| p.is_file())
-    }
-}
-
-const BROWSERS: [Browser; 2] = [Browser::Edge, Browser::Chrome];
 
 /// 一个 profile 的一个书签文件。(browser, profile 显示名, 文件路径);
 /// "Default" profile 的显示名为空(Flow 同款:默认 profile 不标注)。
@@ -90,8 +43,8 @@ const BOOKMARK_FILE_NAMES: [&str; 2] = ["Bookmarks", "AccountBookmarks"];
 /// 纯 readdir/stat,亚毫秒级;每次查询都可安全重跑(刷新策略)。
 pub fn discover_files() -> Vec<BookmarkFile> {
     let mut out = Vec::new();
-    for browser in BROWSERS {
-        if let Some(user_data) = browser.user_data() {
+    for browser in ALL {
+        if let Some(user_data) = user_data(browser) {
             scan_user_data(browser, &user_data, &mut out);
         }
     }
