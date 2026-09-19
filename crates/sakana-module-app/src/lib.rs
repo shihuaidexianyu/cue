@@ -165,9 +165,9 @@ impl Default for AppModule {
     }
 }
 
-/// Score = StringMatch + UsageBonus + RecencyBonus(+ AliasBonus,
-/// V1 无 aliases UI,恒 0)。UsageBonus 公式已随第三次复制下沉
-/// sakana-util-common(§145),本模块只保留调用。
+// Score = StringMatch + UsageBonus + RecencyBonus(+ AliasBonus,
+// V1 无 aliases UI,恒 0)。UsageBonus 公式已随第三次复制下沉
+// sakana-util-common(§145),本模块只保留调用。
 
 fn search(
     entries: &[AppEntry],

@@ -55,8 +55,8 @@ impl Default for BookmarkModule {
     }
 }
 
-/// UsageBonus = min(count,20)*2;24h 内 +10,7d 内 +5(公式随第三次
-/// 复制下沉 sakana-util-common,§145)。
+// UsageBonus = min(count,20)*2;24h 内 +10,7d 内 +5(公式随第三次
+// 复制下沉 sakana-util-common,§145)。
 
 fn search(
     entries: &[Arc<catalog::BookmarkEntry>],
