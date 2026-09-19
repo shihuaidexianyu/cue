@@ -1,4 +1,4 @@
-﻿# sakana 打包:release 构建 → Inno Setup 编译 dist\sakana-setup-<ver>.exe。
+# sakana 打包:release 构建 → Inno Setup 编译 dist\sakana-setup-<ver>.exe。
 # 用法: powershell -ExecutionPolicy Bypass -File scripts\package.ps1 [-Sign]
 #   -Sign  用 scripts\sign.ps1 给 sakana.exe 与 setup.exe 签名(自签名 dev 证书见 sign.ps1)
 param(
@@ -8,9 +8,14 @@ $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
 Set-Location $root
 
-# 版本号取 crates/sakana/Cargo.toml
-$ver = (Select-String -Path "crates\sakana\Cargo.toml" -Pattern '^version = "([^"]+)"').Matches.Groups[1].Value
-if (-not $ver) { throw "cannot read version from crates/sakana/Cargo.toml" }
+# 版本号取 cargo metadata(binary crate `sakana`):版本已统一为
+# [workspace.package] 的 version.workspace 继承,crate 的 Cargo.toml
+# 里不再有字面 version 行,旧正则会失配。
+$ver = (cargo metadata --format-version 1 --no-deps |
+    ConvertFrom-Json).packages |
+    Where-Object { $_.name -eq 'sakana' } |
+    Select-Object -ExpandProperty version -First 1
+if (-not $ver) { throw "cannot read version from cargo metadata" }
 
 # 运行中的 sakana.exe 会锁死二进制。
 Get-Process sakana -ErrorAction SilentlyContinue | Stop-Process -Force -Confirm:$false
