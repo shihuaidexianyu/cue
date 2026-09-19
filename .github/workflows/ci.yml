@@ -1,0 +1,38 @@
+# CI 门禁(§147):四步全绿才放行。架构不变量(依赖方向 /
+# 平台纯净度 / composition root)此前只有 pre-push 自觉,现在进门禁。
+# windows-latest:workspace 依赖 Win32,测试要在真 Windows 上跑。
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: fmt
+        run: cargo fmt --all -- --check
+
+      - name: clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: test
+        run: cargo test --workspace
+
+      # rg 缺席时脚本退回 git grep(§142);runner 两者皆有。
+      - name: arch guard
+        run: ./scripts/check-arch.ps1
