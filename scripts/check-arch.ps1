@@ -1,4 +1,4 @@
-# 架构护栏(§70–73、§110–111):Cargo 依赖图 + 源码平台纯净度。
+﻿# 架构护栏(§70–73、§110–111):Cargo 依赖图 + 源码平台纯净度。
 # §141:依赖方向改用 Cargo 图,源码继续扫描;任何违规退出码非零。
 # 用法:powershell -File scripts/check-arch.ps1(建议 pre-push 跑一次;仓库尚无 CI)
 $ErrorActionPreference = "Stop"

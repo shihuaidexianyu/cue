@@ -1,4 +1,4 @@
-# sakana 打包:release 构建 → Inno Setup 编译 dist\sakana-setup-<ver>.exe。
+﻿# sakana 打包:release 构建 → Inno Setup 编译 dist\sakana-setup-<ver>.exe。
 # 用法: powershell -ExecutionPolicy Bypass -File scripts\package.ps1 [-Sign]
 #   -Sign  用 scripts\sign.ps1 给 sakana.exe 与 setup.exe 签名(自签名 dev 证书见 sign.ps1)
 param(

@@ -27,7 +27,10 @@ if (-not $signtool) { throw "signtool.exe not found (install Windows SDK)" }
 
 $ExePath = Resolve-Path $ExePath
 
-if ($SelfSignedDev) {
+if ($SelfSignedDev -and -not $PfxPath) {
+    # 无证书存储权限/不落存储的环境(CI、沙箱)可用:
+    #   -SelfSignedDev -PfxPath <file> -PfxPassword <pwd>
+    # 走文件证书 + 下方宽松校验,不查不写 CurrentUser\My。
     $subject = "CN=sakana Dev (self-signed)"
     $cert = Get-ChildItem Cert:\CurrentUser\My -CodeSigningCert |
         Where-Object { $_.Subject -eq $subject } |
