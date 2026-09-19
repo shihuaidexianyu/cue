@@ -69,11 +69,13 @@ crates/
 ├── sakana-protocol           模块协议(ModuleItem / 结果展示 / 激活结果)
 ├── sakana-ui                 GPUI 界面
 ├── sakana-windows            Win32 宿主(热键 / 托盘 / 单实例 / 窗口)
-├── sakana-util-win           模块共享 Win32 助手(COM / 图标 / ShellExecute / 剪贴板)
+├── sakana-util-win            模块共享 Win32 助手(COM / 图标 / ShellExecute / 剪贴板)
+├── sakana-util-common         模块共享平台中立助手(usage 排序公式,§145)
 ├── sakana-module-app         应用搜索(默认模块,无触发词)
 ├── sakana-module-bookmark    书签搜索(触发词 b)
 ├── sakana-module-file        文件搜索(触发词 /,内置索引 §138)
-└── sakana-module-system      系统动作(触发词 >,固定枚举)
+├── sakana-module-system      系统动作(触发词 >,固定枚举)
+└── sakana-module-web         网页搜索(触发词 g,§143)
 ```
 
 完整产品 & 架构规格见 [architecture.md](architecture.md)(中文,正文 § 编号为权威引用)。

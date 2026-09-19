@@ -13,6 +13,7 @@ mod matcher;
 mod pinyin_index;
 
 use sakana_protocol::*;
+use sakana_util_common::usage_bonus;
 use sakana_util_win::browser::Browser;
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
@@ -54,23 +55,8 @@ impl Default for BookmarkModule {
     }
 }
 
-/// 公式复制自 sakana-module-app(Rule of Three 第二次使用):
-/// UsageBonus = min(count,20)*2;24h 内 +10,7d 内 +5。
-fn usage_bonus(usage: Option<&UsageReader>, entry: &catalog::BookmarkEntry) -> i32 {
-    let Some(stat) = usage.and_then(|u| u.stat(&entry.item_key, ActionId::PRIMARY)) else {
-        return 0;
-    };
-    let mut bonus = (stat.count as i32).min(20) * 2;
-    if let Ok(elapsed) = stat.last_used.elapsed() {
-        let hours = elapsed.as_secs() / 3600;
-        if hours < 24 {
-            bonus += 10;
-        } else if hours < 24 * 7 {
-            bonus += 5;
-        }
-    }
-    bonus
-}
+/// UsageBonus = min(count,20)*2;24h 内 +10,7d 内 +5(公式随第三次
+/// 复制下沉 sakana-util-common,§145)。
 
 fn search(
     entries: &[Arc<catalog::BookmarkEntry>],
@@ -89,7 +75,7 @@ fn search(
             // title 传原始大小写(驼峰词首加分);domain 是第四个键——
             // "b github.com" 直接按域名命中。
             let keys: [&str; 4] = [&e.title, &e.pinyin_full, &e.pinyin_initials, &e.domain];
-            matcher::best_score(&q, &keys).map(|s| (s + usage_bonus(usage, e), e))
+            matcher::best_score(&q, &keys).map(|s| (s + usage_bonus(usage, &e.item_key), e))
         })
         .collect();
     scored.sort_by(|a, b| {

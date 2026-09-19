@@ -1,4 +1,4 @@
-﻿# 架构护栏(§70–73、§110–111):Cargo 依赖图 + 源码平台纯净度。
+# 架构护栏(§70–73、§110–111):Cargo 依赖图 + 源码平台纯净度。
 # §141:依赖方向改用 Cargo 图,源码继续扫描;任何违规退出码非零。
 # 用法:powershell -File scripts/check-arch.ps1(建议 pre-push 跑一次;仓库尚无 CI)
 $ErrorActionPreference = "Stop"
@@ -38,8 +38,9 @@ function Allowed([string]$owner, [string]$dependency) {
         'sakana-core' { return $dependency -eq 'sakana-protocol' }
         'sakana-ui' { return $dependency -in @('sakana-core', 'sakana-protocol') }
         'sakana-windows' { return $dependency -eq 'sakana-protocol' }
+        'sakana-util-common' { return $dependency -eq 'sakana-protocol' }
         'sakana-util-win' { return $dependency -eq 'sakana-protocol' }
-        'sakana-module-*' { return $dependency -in @('sakana-protocol', 'sakana-util-win') }
+        'sakana-module-*' { return $dependency -in @('sakana-protocol', 'sakana-util-common', 'sakana-util-win') }
         default { return $false }
     }
 }
@@ -48,7 +49,10 @@ foreach ($owner in @('sakana-core', 'sakana-ui', 'sakana-util-win', 'sakana-modu
     if (Allowed $owner 'sakana-module-app') { throw "guard regression: $owner -> module-app" }
 }
 if (!(Allowed 'sakana-module-file' 'sakana-util-win')) { throw 'guard regression: util dependency' }
-if (Allowed 'sakana-core' 'windows') { throw 'guard regression: platform dependency' }
+if (!(Allowed 'sakana-util-common' 'sakana-protocol')) { throw 'guard regression: util-common protocol' }
+if (Allowed 'sakana-util-common' 'sakana-core') { throw 'guard regression: util-common direction' }
+if (!(Allowed 'sakana-module-app' 'sakana-util-common')) { throw 'guard regression: module -> util-common' }
+if (Allowed 'sakana-core' 'windows') { throw "guard regression: platform dependency" }
 $metadataText = cargo metadata --format-version 1 --no-deps --locked
 if ($LASTEXITCODE -ne 0) { throw 'cargo metadata failed' }
 $metadata = ($metadataText -join "`n") | ConvertFrom-Json

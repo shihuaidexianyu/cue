@@ -10,6 +10,7 @@
 //! 的 module.web.trigger 外零设置。
 
 use sakana_protocol::*;
+use sakana_util_common::usage_bonus;
 use sakana_util_win::browser::Browser;
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
@@ -81,23 +82,8 @@ struct WebSearchItem {
     url: String,
 }
 
-/// usage 加分(公式复制自 sakana-module-app,第三次使用;
+/// usage 加分(公式第三次使用,随 §145 下沉 util-common;
 /// 两行之间只比 usage,无需 §126 的封顶设计——重排即全部排序)。
-fn usage_bonus(usage: Option<&UsageReader>, item_key: &str) -> i32 {
-    let Some(stat) = usage.and_then(|u| u.stat(item_key, ActionId::PRIMARY)) else {
-        return 0;
-    };
-    let mut bonus = (stat.count as i32).min(20) * 2;
-    if let Ok(elapsed) = stat.last_used.elapsed() {
-        let hours = elapsed.as_secs() / 3600;
-        if hours < 24 {
-            bonus += 10;
-        } else if hours < 24 * 7 {
-            bonus += 5;
-        }
-    }
-    bonus
-}
 
 /// 纯查询逻辑(可测):`edge`/`chrome` 是浏览器 exe 探测结果。
 /// 空查询/零预算无结果;组合全缺失给提示行;否则每对可用组合

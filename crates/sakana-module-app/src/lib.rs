@@ -23,6 +23,7 @@ pub use catalog::{AppEntry, LaunchTarget};
 use icon::IconPipeline;
 use ready::CatalogCell;
 use sakana_protocol::*;
+use sakana_util_common::usage_bonus;
 use std::sync::Arc;
 
 /// 次级动作 ID(顺序即菜单顺序;PRIMARY = 打开)。
@@ -165,22 +166,8 @@ impl Default for AppModule {
 }
 
 /// Score = StringMatch + UsageBonus + RecencyBonus(+ AliasBonus,
-/// V1 无 aliases UI,恒 0)。具体公式属于本模块。
-fn usage_bonus(usage: Option<&UsageReader>, entry: &AppEntry) -> i32 {
-    let Some(stat) = usage.and_then(|u| u.stat(&entry.item_key, ActionId::PRIMARY)) else {
-        return 0;
-    };
-    let mut bonus = (stat.count as i32).min(20) * 2;
-    if let Ok(elapsed) = stat.last_used.elapsed() {
-        let hours = elapsed.as_secs() / 3600;
-        if hours < 24 {
-            bonus += 10;
-        } else if hours < 24 * 7 {
-            bonus += 5;
-        }
-    }
-    bonus
-}
+/// V1 无 aliases UI,恒 0)。UsageBonus 公式已随第三次复制下沉
+/// sakana-util-common(§145),本模块只保留调用。
 
 fn search(
     entries: &[AppEntry],
@@ -200,7 +187,7 @@ fn search(
             // name 传原始大小写:驼峰边界(VSCode 的 S/C)是词首加分
             // 信号;字符比较在 matcher 内做 ascii 小写归一。
             let keys: [&str; 3] = [&e.name, &e.pinyin_full, &e.pinyin_initials];
-            matcher::best_score(&q, &keys).map(|s| (s + usage_bonus(usage, e), e))
+            matcher::best_score(&q, &keys).map(|s| (s + usage_bonus(usage, &e.item_key), e))
         })
         .collect();
     scored.sort_by(|a, b| {

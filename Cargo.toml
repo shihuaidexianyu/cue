@@ -10,6 +10,7 @@ members = [
     "crates/sakana-module-web",
     "crates/sakana-protocol",
     "crates/sakana-ui",
+    "crates/sakana-util-common",
     "crates/sakana-util-win",
     "crates/sakana-windows",
 ]
@@ -30,6 +31,7 @@ sakana-module-bookmark = { path = "crates/sakana-module-bookmark" }
 sakana-module-file = { path = "crates/sakana-module-file" }
 sakana-module-system = { path = "crates/sakana-module-system" }
 sakana-module-web = { path = "crates/sakana-module-web" }
+sakana-util-common = { path = "crates/sakana-util-common" }
 sakana-util-win = { path = "crates/sakana-util-win" }
 
 futures = "0.3"

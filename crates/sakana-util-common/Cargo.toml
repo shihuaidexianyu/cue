@@ -1,9 +1,7 @@
 [package]
-name = "sakana-module-web"
+name = "sakana-util-common"
 version.workspace = true
 edition.workspace = true
 
 [dependencies]
 sakana-protocol.workspace = true
-sakana-util-common.workspace = true
-sakana-util-win.workspace = true
