@@ -151,6 +151,15 @@ unsafe extern "system" fn display_guard_proc(
             );
             return LRESULT(0);
         }
+        // §142:Launcher 窗口没有"关闭"语义——托盘"退出"是唯一退出
+        // 路径(§116)。不吞 WM_CLOSE 的话,Alt+F4 / 任务栏关闭会销毁
+        // 窗口,连带 drop LauncherView 与它持有的 Core:事件泵随之
+        // 消失,热键、托盘、单实例互斥量全部失灵,进程变成既无 UI
+        // 也退不掉的僵尸(§142 记录)。
+        if msg == WM_CLOSE {
+            logln!("[host] WM_CLOSE on launcher window: swallowed (tray Quit is the only exit)");
+            return LRESULT(0);
+        }
         let orig = ORIG_WNDPROCS
             .lock()
             .unwrap()

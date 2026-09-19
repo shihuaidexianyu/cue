@@ -107,8 +107,10 @@ mod tests {
 
     /// 子进程切到私有非交互 window station(有独立剪贴板),
     /// 验证真实 Win32 写入与 owner 销毁后的读回,不触碰用户剪贴板。
+    /// 注意:受限环境(沙箱 / 非交互会话)里整个会话都拿不到剪贴板,
+    /// OpenClipboard 会直接 ACCESS_DENIED——那不是本测试的缺陷。
     #[test]
-    #[ignore = "requires permission to create a private Windows window station"]
+    #[ignore = "spawns a child process on a private anonymous window station"]
     fn set_text_round_trips_unicode() {
         const CHILD: &str = "SAKANA_CLIPBOARD_TEST_CHILD";
         if std::env::var_os(CHILD).is_none() {
@@ -136,11 +138,16 @@ mod tests {
             use windows::Win32::Foundation::GENERIC_ALL;
             use windows::Win32::System::StationsAndDesktops::*;
             use windows::core::PCWSTR;
-            let name =
-                crate::shell::to_wide(&format!("sakana.clipboard.test.{}", std::process::id()));
-            let station =
-                CreateWindowStationW(PCWSTR(name.as_ptr()), 0, GENERIC_ALL.0, None).unwrap();
+            // 匿名 window station:剪贴板按 window station 隔离,私有
+            // station 就够。**不能传名字**——只有提权到 Administrators
+            // 的令牌才允许命名 window station,普通 shell 会直接
+            // ACCESS_DENIED(§142)。
+            let station = CreateWindowStationW(PCWSTR::null(), 0, GENERIC_ALL.0, None).unwrap();
             SetProcessWindowStation(station).unwrap();
+            // 线程的 desktop 必须属于进程的 window station,否则线程
+            // 上的窗口与进程的剪贴板不在同一 station。desktop 不是隔离
+            // 手段,是连通性前提;desktop 名字没有管理员限制(只有
+            // window station 的名字有)。
             let desktop = CreateDesktopW(
                 w!("test"),
                 PCWSTR::null(),

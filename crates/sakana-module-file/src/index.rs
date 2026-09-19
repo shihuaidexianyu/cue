@@ -25,7 +25,9 @@ use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::os::windows::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, TrySendError, sync_channel};
+use std::sync::mpsc::{
+    Receiver, RecvTimeoutError, SyncSender, TrySendError, channel, sync_channel,
+};
 use std::sync::{Arc, Mutex};
 use std::task::{Poll, Waker};
 use std::time::{Duration, SystemTime};
@@ -54,6 +56,15 @@ const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
 const BATCH_QUIET_MS: u64 = 200;
 /// 单批事件上限:风暴再长也先落地一批(内存有界)。
 const BATCH_CAP: usize = 4096;
+/// 首爬期间排水的事件上限(§142)。超过即放弃逐条补齐,退回全量
+/// 重扫——正确性优先于省一次爬取,内存有界。
+const INITIAL_DRAIN_CAP: usize = 64 * 1024;
+/// 单根 watcher 就绪握手的等待上限(§142):坏根(无响应 UNC /
+/// 休眠 NAS)不得让首爬和退出无限期卡住。
+const WATCH_READY_TIMEOUT: Duration = Duration::from_secs(5);
+/// 退出时等待 watcher 线程收尾的上限(§142)。超时即 detach:
+/// 进程正在退出,泄漏一个卡在取消 IO 上的线程好过 UI 永久假死。
+const WATCH_JOIN_TIMEOUT: Duration = Duration::from_secs(2);
 const WATCH_BUF_BYTES: usize = 64 * 1024;
 
 // ---- 业务对象(原 everything.rs 的形状;Core 只见 ItemId)----
@@ -381,12 +392,14 @@ fn walk_into(
     out: &mut Vec<Arc<IndexEntry>>,
     stats: &mut CrawlStats,
     stop: &AtomicBool,
+    drain: &mut dyn FnMut(),
 ) {
     let mut stack = vec![dir.to_path_buf()];
     while let Some(d) = stack.pop() {
         if stop.load(Ordering::Acquire) {
             return;
         }
+        drain();
         let rd = match std::fs::read_dir(&d) {
             Ok(rd) => rd,
             Err(_) => {
@@ -423,12 +436,15 @@ fn walk_into(
     }
 }
 
+/// 全量爬取。`drain` 在每个目录访问时回调一次:首爬与 watcher 并发,
+/// 调用方借此排空事件队列(§142)。
 fn crawl(
     roots: &[PathBuf],
     fragments_lower: &[String],
     exclude_noise: bool,
     logger: &ModuleLogger,
     stop: &AtomicBool,
+    drain: &mut dyn FnMut(),
 ) -> Vec<Arc<IndexEntry>> {
     let started = std::time::Instant::now();
     let mut out = Vec::new();
@@ -447,6 +463,7 @@ fn crawl(
                     &mut out,
                     &mut stats,
                     stop,
+                    drain,
                 );
             }
             Err(_) => stats.errors += 1,
@@ -473,21 +490,39 @@ fn spawn_watchers(
     tx: &EventSender,
     logger: &ModuleLogger,
     stop: &Arc<AtomicBool>,
-) -> Vec<std::thread::JoinHandle<()>> {
+) -> (Vec<std::thread::JoinHandle<()>>, Receiver<()>) {
     let mut workers = Vec::new();
+    let (done_tx, done_rx) = channel();
     for root in roots {
+        if stop.load(Ordering::Acquire) {
+            break;
+        }
         let tx = tx.clone();
         let root = root.clone();
         let logger = logger.clone();
         let stop = Arc::clone(stop);
+        let done = done_tx.clone();
+        // 超时日志用副本:root / logger 都要移进 watcher 线程。
+        let log_root = root.clone();
+        let log = logger.clone();
         let (ready_tx, ready_rx) = sync_channel(1);
         workers.push(std::thread::spawn(move || {
-            watch_root(root, tx, logger, stop, ready_tx)
+            watch_root(root, tx, logger, stop, ready_tx);
+            let _ = done.send(());
         }));
         // 首个异步读取已投递或打开失败后才首爬,关闭启动竞态窗口。
-        let _ = ready_rx.recv();
+        // §142:坏根(无响应 UNC / 休眠 NAS)可能让 CreateFileW 长时间
+        // 不返回——等待必须有上限,否则首爬与退出都会无限期卡住。
+        // 打开失败是断开连接(线程退出即 drop ready_tx),不占超时。
+        if ready_rx.recv_timeout(WATCH_READY_TIMEOUT).is_err() {
+            log.log(
+                LogLevel::Warn,
+                &format!("file watcher: 就绪超时,跳过等待 {}", log_root.display()),
+            );
+        }
     }
-    workers
+    drop(done_tx);
+    (workers, done_rx)
 }
 
 /// 单根异步 watcher:句柄打不开/读失败 → WatcherDied 后退出。
@@ -654,22 +689,46 @@ fn index_thread_main(
     stop: Arc<AtomicBool>,
 ) {
     // watcher 先开:首爬期间的变更积进队列,爬完后合批补上。
-    let watchers = spawn_watchers(&roots, &tx, &logger, &stop);
+    let (watchers, watcher_done) = spawn_watchers(&roots, &tx, &logger, &stop);
     let mut policy = (
         refreshed_fragments(&exclude).0,
         exclude_noise.load(Ordering::Acquire),
     );
-    publish(&inner, crawl(&roots, &policy.0, policy.1, &logger, &stop));
+    // §142:首爬是同步遍历,期间没有别的消费者,4096 队列很容易在
+    // 长首爬(实测 20 s)里溢出——溢出标记会让首爬刚结束就再来一次
+    // 全量重爬。这里每访问一个目录排空一次队列,事件照常在首爬后
+    // 合批应用。
     let mut batch: Vec<WatchEvent> = Vec::new();
-    while !stop.load(Ordering::Acquire) {
-        match rx.recv_timeout(Duration::from_millis(BATCH_QUIET_MS)) {
-            Ok(first) => batch.push(first),
-            Err(RecvTimeoutError::Timeout) => {
-                if !tx.overflow.load(Ordering::Acquire) {
-                    continue;
+    {
+        let overflow = &tx.overflow;
+        let mut drain = || {
+            while batch.len() < INITIAL_DRAIN_CAP {
+                match rx.try_recv() {
+                    Ok(ev) => batch.push(ev),
+                    Err(_) => break,
                 }
             }
-            Err(RecvTimeoutError::Disconnected) => break,
+            if batch.len() >= INITIAL_DRAIN_CAP {
+                overflow.store(true, Ordering::Release);
+            }
+        };
+        publish(
+            &inner,
+            crawl(&roots, &policy.0, policy.1, &logger, &stop, &mut drain),
+        );
+    }
+    while !stop.load(Ordering::Acquire) {
+        // 首爬排水可能已经填了 batch:跳过这次接收,直接进合批。
+        if batch.is_empty() {
+            match rx.recv_timeout(Duration::from_millis(BATCH_QUIET_MS)) {
+                Ok(first) => batch.push(first),
+                Err(RecvTimeoutError::Timeout) => {
+                    if !tx.overflow.load(Ordering::Acquire) {
+                        continue;
+                    }
+                }
+                Err(RecvTimeoutError::Disconnected) => break,
+            }
         }
         // 合批:静默窗结束或攒够上限,取先者。
         let started = std::time::Instant::now();
@@ -717,7 +776,14 @@ fn index_thread_main(
             }
             publish(
                 &inner,
-                crawl(&roots, &next_policy.0, next_policy.1, &logger, &stop),
+                crawl(
+                    &roots,
+                    &next_policy.0,
+                    next_policy.1,
+                    &logger,
+                    &stop,
+                    &mut || {},
+                ),
             );
             policy = next_policy;
         } else {
@@ -726,9 +792,20 @@ fn index_thread_main(
         batch.clear();
     }
     stop.store(true, Ordering::Release);
-    for watcher in watchers {
-        let _ = watcher.join();
+    // §142:有界等待收尾。卡在取消 IO 上的 watcher 直接 detach——
+    // 这里在退出路径上,泄漏一个线程好过 UI 永久假死。
+    let deadline = std::time::Instant::now() + WATCH_JOIN_TIMEOUT;
+    for _ in 0..watchers.len() {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if watcher_done.recv_timeout(remaining).is_err() {
+            logger.log(
+                LogLevel::Warn,
+                "file watcher: 退出超时,放弃等待(线程随进程回收)",
+            );
+            break;
+        }
     }
+    drop(watchers);
     // 首爬取消也唤醒等待者,不遗留永远 Pending 的查询。
     publish(&inner, Vec::new());
 }
@@ -840,7 +917,15 @@ fn apply_batch(
                             // 搬入/新建的目录可能自带内容:RDCW 不报
                             // 子项,就地补爬子树。
                             let mut children = Vec::new();
-                            walk_into(path, fragments, noise, &mut children, &mut stats, stop);
+                            walk_into(
+                                path,
+                                fragments,
+                                noise,
+                                &mut children,
+                                &mut stats,
+                                stop,
+                                &mut || {},
+                            );
                             for c in children {
                                 upserts.insert(c.path_lower.clone(), c);
                             }
@@ -916,18 +1001,22 @@ pub fn search_entries(
     let filter = exclude_noise && !query.contains('\\') && !fragments_lower.is_empty();
     let mut scored: Vec<(bool, &Arc<IndexEntry>)> = entries
         .iter()
-        .filter(|e| {
-            !(filter
-                && fragments_lower
-                    .iter()
-                    .any(|f| e.path_lower.contains(f.as_str())))
-        })
         .filter_map(|e| {
             let hit = tokens.iter().all(|t| match t {
                 Token::Text(s) => e.path_lower.contains(s.as_str()),
                 Token::ExtSuffix(suffix) => e.name_lower.ends_with(suffix.as_str()),
             });
             if !hit {
+                return None;
+            }
+            // §142:排除名单只在命中项上判定——两个谓词是合取,顺序
+            // 不影响结果集,但把 O(条目 × 片段) 降成 O(条目 × token
+            // + 命中 × 片段)。34 万条目 × 20 片段曾是每键 ~170 ms。
+            if filter
+                && fragments_lower
+                    .iter()
+                    .any(|f| e.path_lower.contains(f.as_str()))
+            {
                 return None;
             }
             let name_hit = tokens.iter().all(|t| match t {
@@ -1048,6 +1137,7 @@ mod tests {
             true,
             &logger,
             &AtomicBool::new(false),
+            &mut || {},
         );
         let names: Vec<String> = entries.iter().map(|e| e.entry.path.to_string()).collect();
         let root_s = root.to_string_lossy().to_string();
@@ -1073,6 +1163,7 @@ mod tests {
             false,
             &logger,
             &AtomicBool::new(false),
+            &mut || {},
         );
         assert!(
             entries
@@ -1149,6 +1240,7 @@ mod tests {
             true,
             &logger,
             &stop,
+            &mut || {},
         ));
         let inner = Arc::new(Mutex::new(Inner {
             snapshot: Some(old.clone()),
