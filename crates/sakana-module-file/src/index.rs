@@ -65,6 +65,16 @@ const WATCH_READY_TIMEOUT: Duration = Duration::from_secs(5);
 /// 退出时等待 watcher 线程收尾的上限(§142)。超时即 detach:
 /// 进程正在退出,泄漏一个卡在取消 IO 上的线程好过 UI 永久假死。
 const WATCH_JOIN_TIMEOUT: Duration = Duration::from_secs(2);
+/// watcher 死亡后的重生退避表(§146):同根连续死亡按表递增等待,
+/// 表尽(连续第 4 次)则永久放弃、留待下次进程启动;任何一次成功
+/// 的读取周期把连续计数清零——瞬时抖动(睡眠唤醒/网络盘闪断)总能
+/// 恢复,永久坏根不无限重扫。死亡上报照发,索引线程的全量重爬
+/// 补齐缺口(§138 的语义不变)。
+const WATCHER_RESPAWN_DELAYS: [Duration; 3] = [
+    Duration::from_secs(10),
+    Duration::from_secs(60),
+    Duration::from_secs(300),
+];
 const WATCH_BUF_BYTES: usize = 64 * 1024;
 
 // ---- 业务对象(原 everything.rs 的形状;Core 只见 ItemId)----
@@ -217,8 +227,8 @@ enum WatchEvent {
     Change { path: PathBuf, action: FILE_ACTION },
     /// watcher 缓冲区溢出,或模块手动请求:全量重爬。
     Overflow,
-    /// watcher 线程致命错误退出(根消失/句柄失效):内容重爬
-    /// 一次;该根的实时更新丢失到下次进程启动(记录在案的限制)。
+    /// watcher 线程致命错误退出(根消失/句柄失效):内容重爬补齐
+    /// 缺口;watcher 侧按 §146 有界退避重开,表尽才永久放弃。
     WatcherDied(PathBuf),
 }
 
@@ -525,9 +535,29 @@ fn spawn_watchers(
     (workers, done_rx)
 }
 
-/// 单根异步 watcher:句柄打不开/读失败 → WatcherDied 后退出。
-/// 缓冲区溢出(returned == 0)→ Overflow(内容全量重爬,watch
-/// 本身继续——溢出不会杀死句柄)。
+/// §146:第 `deaths` 次连续死亡后的重生等待;None = 放弃重生。
+fn respawn_delay(deaths: usize) -> Option<Duration> {
+    WATCHER_RESPAWN_DELAYS.get(deaths).copied()
+}
+
+/// 可中断睡眠:退避期间 stop 置位要在亚秒内醒来(退出 join 只等
+/// 2 s,睡死的线程由 detach 兜底,但能醒则醒)。
+fn sleep_stoppable(dur: Duration, stop: &AtomicBool) {
+    let deadline = std::time::Instant::now() + dur;
+    while !stop.load(Ordering::Acquire) {
+        let now = std::time::Instant::now();
+        if now >= deadline {
+            return;
+        }
+        std::thread::sleep((deadline - now).min(Duration::from_millis(200)));
+    }
+}
+
+/// 单根异步 watcher:句柄打不开/读失败 → 上报 WatcherDied,按
+/// §146 的有界退避在同线程内重开(连续死亡表尽才永久放弃);索引
+/// 线程收到 WatcherDied 仍走全量重爬补齐缺口。缓冲区溢出
+/// (returned == 0)→ Overflow(内容全量重爬,watch 本身继续——
+/// 溢出不会杀死句柄)。
 fn watch_root(
     root: PathBuf,
     tx: EventSender,
@@ -540,138 +570,216 @@ fn watch_root(
         .encode_wide()
         .chain(std::iter::once(0))
         .collect();
-    let handle = unsafe {
-        CreateFileW(
-            PCWSTR::from_raw(wide.as_ptr()),
-            FILE_LIST_DIRECTORY.0,
-            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-            None,
-            OPEN_EXISTING,
-            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OVERLAPPED,
-            None,
-        )
-    };
-    let handle: HANDLE = match handle {
-        Ok(h) => h,
-        Err(e) => {
-            logger.log(
-                LogLevel::Warn,
-                &format!("file watcher: 打开失败 {}: {e}", root.display()),
-            );
-            let _ = tx.send(WatchEvent::WatcherDied(root));
-            return;
-        }
-    };
-    let event = match unsafe { CreateEventW(None, true, false, None) } {
-        Ok(event) => event,
-        Err(_) => {
-            let _ = tx.send(WatchEvent::WatcherDied(root));
-            unsafe {
-                let _ = CloseHandle(handle);
-            }
-            return;
-        }
-    };
+    // §146:连续死亡计数,成功的读取周期清零;ready 握手只在
+    // 首次成功投递后发出(spawn 侧的就绪等待不重复参与)。
     let mut ready = Some(ready);
-    // u64 缓冲保证 FILE_NOTIFY_INFORMATION 的 4 字节对齐。
-    let mut buf = vec![0u64; WATCH_BUF_BYTES / 8];
-    loop {
+    let mut deaths: usize = 0;
+    'rewatch: loop {
         if stop.load(Ordering::Acquire) {
-            break;
+            return;
         }
-        let mut returned = 0u32;
-        let mut overlapped = OVERLAPPED {
-            hEvent: event,
-            ..Default::default()
-        };
-        let mut ok = unsafe {
-            let _ = ResetEvent(event);
-            ReadDirectoryChangesW(
-                handle,
-                buf.as_mut_ptr() as *mut core::ffi::c_void,
-                (buf.len() * 8) as u32,
-                true, // bWatchSubtree:一句柄覆盖整棵子树
-                FILE_NOTIFY_CHANGE_FILE_NAME
-                    | FILE_NOTIFY_CHANGE_DIR_NAME
-                    | FILE_NOTIFY_CHANGE_SIZE
-                    | FILE_NOTIFY_CHANGE_LAST_WRITE,
+        let handle: HANDLE = match unsafe {
+            CreateFileW(
+                PCWSTR::from_raw(wide.as_ptr()),
+                FILE_LIST_DIRECTORY.0,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                 None,
-                Some(&mut overlapped),
+                OPEN_EXISTING,
+                FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OVERLAPPED,
                 None,
             )
-        };
-        if let Some(ready) = ready.take() {
-            let _ = ready.send(());
-        }
-        if ok.is_ok() {
-            unsafe {
-                while WaitForSingleObject(event, 100) == WAIT_TIMEOUT {
-                    if stop.load(Ordering::Acquire) {
-                        break;
-                    }
-                }
-                if stop.load(Ordering::Acquire) {
-                    let _ = CancelIoEx(handle, Some(&overlapped));
-                }
-                // 取消只提交请求;必须等待完成后才能释放缓冲与 OVERLAPPED。
-                ok = GetOverlappedResult(handle, &overlapped, &mut returned, true);
-            }
-        }
-        if stop.load(Ordering::Acquire) {
-            break;
-        }
-        match ok {
+        } {
+            Ok(h) => h,
             Err(e) => {
                 logger.log(
                     LogLevel::Warn,
-                    &format!("file watcher: 读取失败 {}: {e}", root.display()),
+                    &format!("file watcher: 打开失败 {}: {e}", root.display()),
                 );
-                let _ = tx.send(WatchEvent::WatcherDied(root));
+                let _ = tx.send(WatchEvent::WatcherDied(root.clone()));
+                match respawn_delay(deaths) {
+                    Some(delay) => {
+                        logger.log(
+                            LogLevel::Warn,
+                            &format!(
+                                "file watcher: {}s 后第 {} 次重开 {}(§146)",
+                                delay.as_secs(),
+                                deaths + 1,
+                                root.display()
+                            ),
+                        );
+                        sleep_stoppable(delay, &stop);
+                        deaths += 1;
+                        continue 'rewatch;
+                    }
+                    None => {
+                        logger.log(
+                            LogLevel::Warn,
+                            &format!(
+                                "file watcher: 连续死亡 {} 次,放弃重开 {}(留待下次进程启动)",
+                                deaths,
+                                root.display()
+                            ),
+                        );
+                        return;
+                    }
+                }
+            }
+        };
+        let event = match unsafe { CreateEventW(None, true, false, None) } {
+            Ok(event) => event,
+            Err(_) => {
+                let _ = tx.send(WatchEvent::WatcherDied(root.clone()));
+                unsafe {
+                    let _ = CloseHandle(handle);
+                }
+                match respawn_delay(deaths) {
+                    Some(delay) => {
+                        sleep_stoppable(delay, &stop);
+                        deaths += 1;
+                        continue 'rewatch;
+                    }
+                    None => return,
+                }
+            }
+        };
+        // u64 缓冲保证 FILE_NOTIFY_INFORMATION 的 4 字节对齐。
+        let mut buf = vec![0u64; WATCH_BUF_BYTES / 8];
+        // 读循环只可能三种退场:stop(干净)、队列关闭(模块在
+        // 退出,干净)、读失败(死亡 → 上报 + 重开)。
+        let mut died = false;
+        loop {
+            if stop.load(Ordering::Acquire) {
                 break;
             }
-            Ok(()) if returned == 0 => {
-                if tx.send(WatchEvent::Overflow).is_err() {
-                    break;
+            let mut returned = 0u32;
+            let mut overlapped = OVERLAPPED {
+                hEvent: event,
+                ..Default::default()
+            };
+            let mut ok = unsafe {
+                let _ = ResetEvent(event);
+                ReadDirectoryChangesW(
+                    handle,
+                    buf.as_mut_ptr() as *mut core::ffi::c_void,
+                    (buf.len() * 8) as u32,
+                    true, // bWatchSubtree:一句柄覆盖整棵子树
+                    FILE_NOTIFY_CHANGE_FILE_NAME
+                        | FILE_NOTIFY_CHANGE_DIR_NAME
+                        | FILE_NOTIFY_CHANGE_SIZE
+                        | FILE_NOTIFY_CHANGE_LAST_WRITE,
+                    None,
+                    Some(&mut overlapped),
+                    None,
+                )
+            };
+            if let Some(ready) = ready.take() {
+                let _ = ready.send(());
+            }
+            if ok.is_ok() {
+                unsafe {
+                    while WaitForSingleObject(event, 100) == WAIT_TIMEOUT {
+                        if stop.load(Ordering::Acquire) {
+                            break;
+                        }
+                    }
+                    if stop.load(Ordering::Acquire) {
+                        let _ = CancelIoEx(handle, Some(&overlapped));
+                    }
+                    // 取消只提交请求;必须等待完成后才能释放缓冲与 OVERLAPPED。
+                    ok = GetOverlappedResult(handle, &overlapped, &mut returned, true);
                 }
             }
-            Ok(()) => {
-                let base = buf.as_ptr() as *const u8;
-                let name_off = core::mem::offset_of!(FILE_NOTIFY_INFORMATION, FileName);
-                let mut off = 0usize;
-                let mut alive = true;
-                loop {
-                    if off + name_off > returned as usize {
-                        break;
-                    }
-                    let info = unsafe { &*(base.add(off) as *const FILE_NOTIFY_INFORMATION) };
-                    let name_len = info.FileNameLength as usize / 2;
-                    if off + name_off + name_len * 2 > returned as usize {
-                        break; // 截断记录:不越界读,等下一批
-                    }
-                    let name =
-                        unsafe { std::slice::from_raw_parts(info.FileName.as_ptr(), name_len) };
-                    let event = WatchEvent::Change {
-                        path: root.join(OsString::from_wide(name)),
-                        action: info.Action,
-                    };
-                    if tx.send(event).is_err() {
-                        alive = false;
-                        break;
-                    }
-                    if info.NextEntryOffset == 0 {
-                        break;
-                    }
-                    off += info.NextEntryOffset as usize;
-                }
-                if !alive {
+            if stop.load(Ordering::Acquire) {
+                break;
+            }
+            match ok {
+                Err(e) => {
+                    logger.log(
+                        LogLevel::Warn,
+                        &format!("file watcher: 读取失败 {}: {e}", root.display()),
+                    );
+                    let _ = tx.send(WatchEvent::WatcherDied(root.clone()));
+                    died = true;
                     break;
+                }
+                Ok(()) if returned == 0 => {
+                    if tx.send(WatchEvent::Overflow).is_err() {
+                        break;
+                    }
+                    deaths = 0;
+                }
+                Ok(()) => {
+                    deaths = 0;
+                    let base = buf.as_ptr() as *const u8;
+                    let name_off = core::mem::offset_of!(FILE_NOTIFY_INFORMATION, FileName);
+                    let mut off = 0usize;
+                    let mut alive = true;
+                    loop {
+                        if off + name_off > returned as usize {
+                            break;
+                        }
+                        let info = unsafe { &*(base.add(off) as *const FILE_NOTIFY_INFORMATION) };
+                        let name_len = info.FileNameLength as usize / 2;
+                        if off + name_off + name_len * 2 > returned as usize {
+                            break; // 截断记录:不越界读,等下一批
+                        }
+                        let name =
+                            unsafe { std::slice::from_raw_parts(info.FileName.as_ptr(), name_len) };
+                        let event = WatchEvent::Change {
+                            path: root.join(OsString::from_wide(name)),
+                            action: info.Action,
+                        };
+                        if tx.send(event).is_err() {
+                            alive = false;
+                            break;
+                        }
+                        if info.NextEntryOffset == 0 {
+                            break;
+                        }
+                        off += info.NextEntryOffset as usize;
+                    }
+                    if !alive {
+                        break;
+                    }
                 }
             }
         }
-    }
-    unsafe {
-        let _ = CloseHandle(event);
-        let _ = CloseHandle(handle);
+        unsafe {
+            let _ = CloseHandle(event);
+            let _ = CloseHandle(handle);
+        }
+        if stop.load(Ordering::Acquire) || !died {
+            // 干净退场:stop,或事件队列已关闭(索引线程先走)。
+            return;
+        }
+        // 读失败死亡:退避后重开。
+        match respawn_delay(deaths) {
+            Some(delay) => {
+                logger.log(
+                    LogLevel::Warn,
+                    &format!(
+                        "file watcher: {}s 后第 {} 次重开 {}(§146)",
+                        delay.as_secs(),
+                        deaths + 1,
+                        root.display()
+                    ),
+                );
+                sleep_stoppable(delay, &stop);
+                deaths += 1;
+                continue 'rewatch;
+            }
+            None => {
+                logger.log(
+                    LogLevel::Warn,
+                    &format!(
+                        "file watcher: 连续死亡 {} 次,放弃重开 {}(留待下次进程启动)",
+                        deaths,
+                        root.display()
+                    ),
+                );
+                return;
+            }
+        }
     }
 }
 
@@ -745,14 +853,13 @@ fn index_thread_main(
         let mut rescan = tx.overflow.swap(false, Ordering::AcqRel);
         for ev in &batch {
             match ev {
-                // WatcherDied 不重生该根的 watcher(记录在案的限制:
-                // 根级致命错误极少见,留给下次进程启动;内容本身已由
-                // 全量重爬修正)。
+                // §146:watcher 侧已按有界退避自行重开(表尽才放弃),
+                // 这里只负责全量重爬补齐死亡窗口期的缺口。
                 WatchEvent::WatcherDied(root) => {
                     logger.log(
                         LogLevel::Warn,
                         &format!(
-                            "file watcher 已退出:{};该根实时更新丢失到下次启动",
+                            "file watcher 死亡上报:{};全量重爬补齐缺口(重开在 watcher 侧)",
                             root.display()
                         ),
                     );
@@ -1341,5 +1448,58 @@ mod tests {
     struct TestLog;
     impl sakana_protocol::ModuleLog for TestLog {
         fn log(&self, _level: LogLevel, _message: &str) {}
+    }
+
+    /// §146:重生退避表——前三次延迟递增,表尽放弃。
+    #[test]
+    fn respawn_delay_schedule() {
+        assert_eq!(respawn_delay(0), Some(Duration::from_secs(10)));
+        assert_eq!(respawn_delay(1), Some(Duration::from_secs(60)));
+        assert_eq!(respawn_delay(2), Some(Duration::from_secs(300)));
+        assert_eq!(respawn_delay(3), None);
+        assert_eq!(respawn_delay(9), None);
+    }
+
+    /// §146:退避睡眠被 stop 立即打断(第一次循环就返回),
+    /// 不真睡满 300 s。
+    #[test]
+    fn sleep_stoppable_wakes_on_stop() {
+        let stop = AtomicBool::new(true);
+        let started = std::time::Instant::now();
+        sleep_stoppable(Duration::from_secs(300), &stop);
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    /// §146:坏根(打不开)立即上报 WatcherDied,不等退避;
+    /// 退避睡眠可被 stop 打断,线程随后干净退出(无第二次上报)。
+    #[test]
+    fn dead_root_reports_and_backoff_is_stoppable() {
+        let (tx, rx) = sync_channel(4);
+        let sender = EventSender {
+            tx,
+            overflow: Arc::new(AtomicBool::new(false)),
+        };
+        let stop = Arc::new(AtomicBool::new(false));
+        let (ready_tx, _ready_guard) = sync_channel::<()>(1);
+        let stop_for_thread = Arc::clone(&stop);
+        let handle = std::thread::spawn(move || {
+            watch_root(
+                PathBuf::from(r"C:\sakana-test-no-such-root-9f3a"),
+                sender,
+                Arc::new(TestLog),
+                stop_for_thread,
+                ready_tx,
+            );
+        });
+        match rx.recv_timeout(Duration::from_secs(2)) {
+            Ok(WatchEvent::WatcherDied(_)) => {}
+            _ => panic!("expected WatcherDied for bad root"),
+        }
+        stop.store(true, Ordering::Release);
+        let started = std::time::Instant::now();
+        handle.join().unwrap();
+        // 退避 10 s 被打断:join 应在亚秒级回来(5 s 留裕量)。
+        assert!(started.elapsed() < Duration::from_secs(5));
+        assert!(rx.try_recv().is_err());
     }
 }
