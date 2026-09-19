@@ -46,7 +46,7 @@
 | §74–§88 | [architecture/08-scope-contract.md](architecture/08-scope-contract.md) | V1 范围、非功能需求、最终边界、**§86 最终 Contract**、判断规则、实现顺序 |
 | §89–§106 | [architecture/09-async.md](architecture/09-async.md) | V1 成功标准、设计哲学、异步任务模型(QueryTicket 北极星) |
 | §107–§116 | [architecture/10-v1-landing.md](architecture/10-v1-landing.md) | V1 落地决策:IME、Row 布局、Module 事件、跨平台、CoreEffect、单实例、性能契约、UX 不变量、托盘 |
-| §117–§148 | [architecture/records/](architecture/records/) | V1.x 实现记录,**每章一文件**,文件名即 § 编号 |
+| §117–§149 | [architecture/records/](architecture/records/) | V1.x 实现记录,**每章一文件**,文件名即 § 编号 |
 
 ### records/ 速查
 
@@ -84,6 +84,7 @@
 | §146 | [146-watcher-respawn.md](architecture/records/146-watcher-respawn.md) | watcher 死亡改为有界退避重生(10s/60s/300s,表尽放弃) |
 | §147 | [147-ci-gate.md](architecture/records/147-ci-gate.md) | CI 门禁:fmt / clippy -D warnings / test / check-arch |
 | §148 | [148-lockkeys-removal.md](architecture/records/148-lockkeys-removal.md) | 锁键服务整体裁撤(含 OSD 窗口、SessionReset 链路) |
+| §149 | [149-ime-removal.md](architecture/records/149-ime-removal.md) | IME 强制英文整体裁撤(§107 决定废止,键盘状态交还用户) |
 
 ## 0.3 阅读顺序
 

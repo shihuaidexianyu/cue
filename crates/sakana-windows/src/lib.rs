@@ -9,7 +9,6 @@ pub mod fullscreen;
 pub mod host;
 pub mod hotkey;
 pub mod icon;
-pub mod ime;
 pub mod monitor;
 pub mod single_instance;
 pub mod tray;

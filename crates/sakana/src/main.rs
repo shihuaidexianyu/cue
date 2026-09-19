@@ -123,7 +123,6 @@ fn main() {
                     if tx.unbounded_send(to_core_event(msg)).is_err() && quit {
                         logln!("[warn] core queue gone: quitting without Core");
                         win::tray::remove();
-                        win::ime::restore_saved_layout();
                         win::host::request_quit();
                     }
                 }
@@ -331,14 +330,9 @@ fn main() {
                                 WINDOW_WIDTH,
                                 WINDOW_HEIGHT,
                             );
-                            // 必须在抢到前台之前记录用户的输入法布局。
-                            let _ = win::ime::enter_english_mode(hwnd);
                             win::window::show_and_focus(hwnd);
                         }
                         CoreEffect::HideLauncher => {
-                            // 窗口仍在前台时恢复用户布局;
-                            // 失焦隐藏路径是尽力而为(已知边界)。
-                            win::ime::restore_saved_layout();
                             win::window::hide(hwnd);
                         }
                         CoreEffect::FocusInput => {
@@ -347,7 +341,6 @@ fn main() {
                         CoreEffect::QuitApplication => {
                             // Core 已停止模块并刷完 usage,再退出消息循环。
                             win::tray::remove();
-                            win::ime::restore_saved_layout();
                             win::host::request_quit();
                         }
                     }
