@@ -12,6 +12,7 @@
 //! 操作同一 HWND 的 IMM 上下文可能与 GPUI 内部状态不同步。若证实冲突,
 //! 候选替代是在 GPUI 层禁用该窗口的 text input 处理。
 
+use sakana_protocol::logln;
 use std::sync::atomic::{AtomicIsize, Ordering};
 use windows::Win32::Foundation::HWND;
 use windows::Win32::UI::Input::Ime::ImmAssociateContext;
@@ -52,15 +53,23 @@ pub fn enter_english_mode(hwnd: HWND) -> Result<(), Error> {
 
 /// HideLauncher 流程,**在窗口仍处前台时**调用才有效:
 /// 全局输入法模式下,布局切换沿前台线程传播,藏窗之后再恢复就晚了。
-/// 失焦隐藏路径调用时窗口已不在前台,恢复不保证生效(已知边界)。
+/// 失焦隐藏路径调用时窗口已不在前台,恢复不保证生效(已知边界,
+/// §107)——成败写一行 `[ime]` 探针日志:边界的发生率让数据说话,
+/// 再决定是否值得为它引入 WM_ACTIVATE 波段的二次尝试。
 pub fn restore_saved_layout() {
     let saved = SAVED_LAYOUT.swap(0, Ordering::SeqCst);
     if saved != 0 {
-        unsafe {
-            let _ = ActivateKeyboardLayout(
+        // ActivateKeyboardLayout 成功返回旧布局、失败(NULL)为 Err。
+        let restored = unsafe {
+            ActivateKeyboardLayout(
                 HKL(saved as *mut core::ffi::c_void),
                 ACTIVATE_KEYBOARD_LAYOUT_FLAGS(0),
-            );
-        }
+            )
+        };
+        logln!(
+            "[ime] restore hkl={:#x} {}",
+            saved,
+            if restored.is_ok() { "ok" } else { "FAILED" }
+        );
     }
 }
