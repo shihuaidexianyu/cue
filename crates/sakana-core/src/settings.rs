@@ -55,14 +55,10 @@ pub const KEY_LOG_FILE: &str = "core.log_file";
 /// 映射到新 key,下次整体重写时旧 key 自愈消失。
 const KEY_GAME_MODE_LEGACY: &str = "core.game_mode";
 
-/// 锁键服务(§140)的 Core 合成行。校验唯一入口是 protocol 的
-/// `LockKeysConfig::from_settings`;任一行的 commit 都触发全量
-/// 配置通知(NotifyLockKeys)。
+/// 锁键状态提示(§140;§144 起裁为纯观察)的 Core 合成行。
+/// 两个布尔行,无校验面;任一行的 commit 都触发全量配置通知
+/// (NotifyLockKeys)。
 pub const KEY_LOCKKEYS_ENABLED: &str = "core.lockkeys.enabled";
-pub const KEY_LOCKKEYS_REMAP_KEY: &str = "core.lockkeys.remap_key";
-pub const KEY_LOCKKEYS_TAP_ACTION: &str = "core.lockkeys.tap_action";
-pub const KEY_LOCKKEYS_HOLD_MS: &str = "core.lockkeys.hold_ms";
-pub const KEY_LOCKKEYS_NUMLOCK_MODE: &str = "core.lockkeys.numlock_mode";
 pub const KEY_LOCKKEYS_OSD: &str = "core.lockkeys.osd";
 /// 锁键行命名空间前缀(apply 流程按它识别锁键行)。
 pub const LOCKKEYS_PREFIX: &str = "core.lockkeys.";
@@ -237,73 +233,17 @@ impl SettingsHost {
         }
     }
 
-    /// 锁键服务当前全量配置。注册时逐项修复非法持久化值;
-    /// 此处的整体默认仅作内部不变量失效时的最后兜底。
+    /// 锁键提示服务当前全量配置。两个布尔行,缺行按默认 true
+    /// (register_specs 保证已注册行有值,兜底仅防御)。
     pub fn lockkeys_config(&self) -> LockKeysConfig {
-        match self.assemble_lockkeys(None) {
-            Ok(c) => c,
-            Err(e) => {
-                logln!("[warn] invalid persisted lockkeys settings, using defaults: {e}");
-                LockKeysConfig::default()
-            }
+        let bool_of = |k: &str| match self.values.get(k) {
+            Some(SettingValue::Bool(b)) => *b,
+            _ => true,
+        };
+        LockKeysConfig {
+            enabled: bool_of(KEY_LOCKKEYS_ENABLED),
+            osd: bool_of(KEY_LOCKKEYS_OSD),
         }
-    }
-
-    /// core.lockkeys.* 行的事务前校验:把候选值合并进当前已 commit
-    /// 值,跑 protocol 的 from_settings(唯一校验点)。失败不 commit。
-    pub fn validate_lockkeys_change(
-        &self,
-        key: &str,
-        candidate: &SettingValue,
-    ) -> Result<(), String> {
-        self.assemble_lockkeys(Some((key, candidate)))
-            .map(|_| ())
-            .map_err(|e| e.to_string())
-    }
-
-    /// 组装全量配置:override_kv 给出"某行将变成候选值",其余行取
-    /// 当前已 commit 值。缺行的兜底默认值仅防御用——register_specs
-    /// 保证每个已注册行都有值;值类型由 apply 流程的 SettingKind::validate
-    /// 保证,不匹配按缺行处理。
-    fn assemble_lockkeys(
-        &self,
-        override_kv: Option<(&str, &SettingValue)>,
-    ) -> Result<LockKeysConfig, LockKeysConfigError> {
-        let bool_of = |k: &str, def: bool| -> bool {
-            if let Some((ok, ov)) = override_kv
-                && ok == k
-            {
-                return matches!(ov, SettingValue::Bool(true));
-            }
-            match self.values.get(k) {
-                Some(SettingValue::Bool(b)) => *b,
-                _ => def,
-            }
-        };
-        let str_of = |k: &str, def: &str| -> String {
-            if let Some((ok, ov)) = override_kv
-                && ok == k
-            {
-                return match ov {
-                    SettingValue::String(s) | SettingValue::Enum(s) => s.clone(),
-                    SettingValue::Integer(n) => n.to_string(),
-                    _ => String::new(),
-                };
-            }
-            match self.values.get(k) {
-                Some(SettingValue::String(s) | SettingValue::Enum(s)) => s.clone(),
-                Some(SettingValue::Integer(n)) => n.to_string(),
-                _ => def.to_string(),
-            }
-        };
-        LockKeysConfig::from_settings(
-            bool_of(KEY_LOCKKEYS_ENABLED, true),
-            &str_of(KEY_LOCKKEYS_REMAP_KEY, "caps_lock"),
-            &str_of(KEY_LOCKKEYS_TAP_ACTION, "ctrl_space"),
-            &str_of(KEY_LOCKKEYS_HOLD_MS, "350"),
-            &str_of(KEY_LOCKKEYS_NUMLOCK_MODE, "hold"),
-            bool_of(KEY_LOCKKEYS_OSD, true),
-        )
     }
 
     /// 模块设置快照(ModuleContext.settings):短 key(去掉
@@ -504,70 +444,23 @@ fn core_specs(log_path: PathBuf) -> Vec<SettingSpec> {
             default: SettingValue::Bool(true),
             apply_policy: ApplyPolicy::Immediate,
         },
-        // 锁键服务(§141):范围与候选项进入规格,UI 与持久化共用校验。
+        // 锁键状态提示(§144 起纯观察,不干预按键)。
         SettingSpec {
             key: SettingKey(Arc::from(KEY_LOCKKEYS_ENABLED)),
-            label: "锁键手势".into(),
+            label: "锁键状态提示服务".into(),
             description: Some(
-                "锁键服务总开关(§140):触发键手势、NumLock 守护与状态提示;关闭后按键全部恢复系统原生行为"
-                    .into(),
+                "大小写 / 数字键盘锁定状态提示的总开关(§140/§144);纯观察,不拦截不注入".into(),
             ),
             kind: SettingKind::Bool,
             default: SettingValue::Bool(true),
             apply_policy: ApplyPolicy::Immediate,
         },
         SettingSpec {
-            key: SettingKey(Arc::from(KEY_LOCKKEYS_REMAP_KEY)),
-            label: "手势触发键".into(),
-            description: Some(
-                "中文输入法前台:轻点切输入法、长按切换锁定状态;左右键切换触发键".into(),
-            ),
-            kind: SettingKind::Enum(&[
-                SettingOption { value: "caps_lock", label: "大小写锁定键" },
-                SettingOption { value: "scroll_lock", label: "滚动锁定键" },
-            ]),
-            default: SettingValue::Enum("caps_lock".into()),
-            apply_policy: ApplyPolicy::Immediate,
-        },
-        SettingSpec {
-            key: SettingKey(Arc::from(KEY_LOCKKEYS_TAP_ACTION)),
-            label: "轻点动作".into(),
-            description: Some(
-                "轻点时发送的输入法切换快捷键;左右键选择 Ctrl + 空格或 Shift".into(),
-            ),
-            kind: SettingKind::Enum(&[
-                SettingOption { value: "ctrl_space", label: "Ctrl + 空格" },
-                SettingOption { value: "shift", label: "Shift" },
-            ]),
-            default: SettingValue::Enum("ctrl_space".into()),
-            apply_policy: ApplyPolicy::Immediate,
-        },
-        SettingSpec {
-            key: SettingKey(Arc::from(KEY_LOCKKEYS_HOLD_MS)),
-            label: "长按阈值(毫秒)".into(),
-            description: Some("轻点与长按的分界,150–1000;触发键手势与 NumLock 防误触共用".into()),
-            kind: SettingKind::Integer { min: *LockKeysConfig::HOLD_MS_RANGE.start() as i64, max: *LockKeysConfig::HOLD_MS_RANGE.end() as i64 },
-            default: SettingValue::Integer(350),
-            apply_policy: ApplyPolicy::Immediate,
-        },
-        SettingSpec {
-            key: SettingKey(Arc::from(KEY_LOCKKEYS_NUMLOCK_MODE)),
-            label: "NumLock 模式".into(),
-            description: Some(
-                "左右键切换:系统原生不干预、长按切换防误触、始终开启自动恢复数字键盘".into(),
-            ),
-            kind: SettingKind::Enum(&[
-                SettingOption { value: "native", label: "系统原生" },
-                SettingOption { value: "hold", label: "长按切换" },
-                SettingOption { value: "always_on", label: "始终开启" },
-            ]),
-            default: SettingValue::Enum("hold".into()),
-            apply_policy: ApplyPolicy::Immediate,
-        },
-        SettingSpec {
             key: SettingKey(Arc::from(KEY_LOCKKEYS_OSD)),
             label: "锁键状态提示".into(),
-            description: Some("大小写 / 数字键盘锁定状态变化时在屏幕中央弹出提示卡片,片刻自动消失".into()),
+            description: Some(
+                "大小写 / 数字键盘锁定状态变化时在屏幕中央弹出提示卡片,片刻自动消失".into(),
+            ),
             kind: SettingKind::Bool,
             default: SettingValue::Bool(true),
             apply_policy: ApplyPolicy::Immediate,
@@ -585,9 +478,15 @@ fn encode_value(v: &SettingValue) -> String {
     }
 }
 
+/// 严格解析:失败返回 None,由调用方回落到规格默认值(§141/§142)。
+/// Bool 只认 "true"/"false"——手工改坏的值不能静默变成 false。
 fn decode_value(kind: SettingKind, raw: &str) -> Option<SettingValue> {
     Some(match kind {
-        SettingKind::Bool => SettingValue::Bool(raw == "true"),
+        SettingKind::Bool => match raw {
+            "true" => SettingValue::Bool(true),
+            "false" => SettingValue::Bool(false),
+            _ => return None,
+        },
         SettingKind::Integer { .. } => SettingValue::Integer(raw.parse().ok()?),
         SettingKind::Hotkey => SettingValue::Hotkey(raw.parse().ok()?),
         SettingKind::String => SettingValue::String(unescape(raw)?),
@@ -596,7 +495,7 @@ fn decode_value(kind: SettingKind, raw: &str) -> Option<SettingValue> {
     })
 }
 
-/// Bool 的非 "true" 一律解析为 false(宽松);其余类型严格解析失败 → None。
+/// TSV 转义:反斜杠 + 制表符 + 换行 + 回车。
 fn escape(s: &str) -> String {
     s.replace('\\', "\\\\")
         .replace('\t', "\\t")
@@ -646,15 +545,15 @@ mod tests {
     }
 
     #[test]
-    fn invalid_persisted_field_preserves_other_lockkeys_settings() {
+    fn stale_lockkeys_keys_are_ignored_and_bools_still_load() {
         let dir = std::env::temp_dir().join(format!("sakana-lockkeys-test-{}", std::process::id()));
         let file = dir.join("settings.tsv");
         std::fs::create_dir_all(&dir).unwrap();
-        // 手工改坏的持久化值:hold_ms 非数字。lockkeys_config() 不 panic,
-        // 只修复阈值,保留用户关闭服务的选择(§141)。
+        // §144 裁掉的手势/模式行留在文件里:无对应 spec,加载时忽略;
+        // 仍存在的布尔行照常生效。
         std::fs::write(
             &file,
-            "cue-settings-v1\ncore.lockkeys.hold_ms\tabc\ncore.lockkeys.enabled\tfalse\n",
+            "cue-settings-v1\ncore.lockkeys.hold_ms\tabc\ncore.lockkeys.numlock_mode\talways_on\ncore.lockkeys.enabled\tfalse\n",
         )
         .unwrap();
         let host = SettingsHost::new(Some(file.clone()), None, None, None);
@@ -665,19 +564,6 @@ mod tests {
                 ..LockKeysConfig::default()
             }
         );
-        let _ = std::fs::remove_dir_all(&dir);
-
-        // 合法持久化照常生效。
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(
-            &file,
-            "cue-settings-v1\ncore.lockkeys.hold_ms\t500\ncore.lockkeys.numlock_mode\talways_on\n",
-        )
-        .unwrap();
-        let host = SettingsHost::new(Some(file.clone()), None, None, None);
-        let c = host.lockkeys_config();
-        assert_eq!(c.hold_ms, 500);
-        assert_eq!(c.numlock_mode, NumLockMode::AlwaysOn);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

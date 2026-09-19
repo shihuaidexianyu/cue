@@ -461,12 +461,8 @@ impl Core {
                 } else {
                     candidate
                 };
-                // 锁键行(§140):校验归 Core,唯一校验点是 protocol 的
-                // LockKeysConfig::from_settings(§128 触发词同款——
-                // 归属 Core 的设置,永远不进模块 try_apply)。
-                if key.starts_with(LOCKKEYS_PREFIX) {
-                    self.settings.validate_lockkeys_change(key, &candidate)?;
-                }
+                // 锁键行(§140/§144,两个布尔):SettingKind 的类型校验
+                // 已足够,无 Core 侧校验面;commit 后统一通知。
                 // 第二步:try-apply(core.* 由所有者执行;module.* 经 registry)。
                 if key == KEY_HOTKEY {
                     let SettingValue::Hotkey(h) = &candidate else {
@@ -721,7 +717,10 @@ impl Core {
                 let query = match_trigger(input, &trigger)?;
                 Some((trigger.len(), id.clone(), query))
             })
-            .max_by_key(|(len, _, _)| *len)
+            // 最长优先;同长(只有手工/历史持久化冲突能造出,提交时
+            // 全等会被拒)按注册序先到先赢——与 §128 容错条款一致(§142)。
+            // max_by_key 在并列时取最后一个,方向相反,故用 reduce。
+            .reduce(|best, cur| if cur.0 > best.0 { cur } else { best })
         {
             return (id, query);
         }

@@ -33,14 +33,14 @@ pub enum HostMsg {
     /// 前台焦点离开 Launcher 窗口。
     FocusLost,
     FocusGained,
-    /// 锁键状态变化(§140,lockkeys worker 的状态 diff 上报)。
+    /// 锁键状态变化(§140/§144,lockkeys worker 的按下沿账本上报)。
     /// 不进 Core:编排层直接路由给 OSD。
     LockKeyChanged {
         key: crate::lockkeys::LockKey,
         on: bool,
     },
-    /// 会话级复位信号(锁屏/挂起/唤醒):lockkeys worker 丢弃挂起
-    /// 手势,OSD 收起。不进 Core(锁屏的 FocusLost 另行上报)。
+    /// 会话级复位信号(锁屏/挂起/唤醒):lockkeys worker 重同步账本,
+    /// OSD 收起。不进 Core(锁屏的 FocusLost 另行上报)。
     SessionReset,
 }
 
@@ -201,8 +201,8 @@ unsafe extern "system" fn host_wnd_proc(
                     // 残留可见是误唤醒,主动 show 更是。
                     if wparam.0 == WTS_SESSION_LOCK || wparam.0 == WTS_CONSOLE_DISCONNECT {
                         logln!("[host] session lock/disconnect -> FocusLost");
-                        // 锁屏后按键的释放事件不会送达(安全桌面),
-                        // 手势可能挂着等不到结算——一并复位(§140)。
+                        // 锁屏期间按键事件(含释放)不会送达,锁键账本
+                        // 需要重同步——一并复位(§140/§144)。
                         handler(HostMsg::SessionReset);
                         handler(HostMsg::FocusLost);
                     }

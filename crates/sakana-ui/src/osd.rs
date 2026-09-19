@@ -11,6 +11,7 @@
 
 use gpui::*;
 use sakana_protocol::LockKey;
+use sakana_protocol::logln;
 
 pub struct OsdView {
     /// None = 没有要显示的内容(窗口此时也是隐藏的)。
@@ -25,6 +26,9 @@ impl OsdView {
     /// 编排层在窗口显示前更新状态(先换内容再 SetWindowPos 显示,
     /// 用户永远看不到上一张卡片)。
     pub fn set_state(&mut self, key: LockKey, on: bool, cx: &mut Context<Self>) {
+        // 每次内容更新都进日志:卡片显示什么 = 这里最后一次 set 的
+        // 参数。盖卡/闪卡类问题不用猜,日志里时序一目了然。
+        logln!("[osd] view <- {key:?} on={on}");
         self.state = Some((key, on));
         cx.notify();
     }

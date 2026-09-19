@@ -368,18 +368,29 @@ fn quit_flushes_usage_before_requesting_platform_exit() {
 
 #[test]
 fn integer_editor_reports_errors_and_commits_typed_values() {
-    let (mut core, _) = setup(FakeModule::new("app"));
+    // Integer 编辑器(§141)挂在模块 Integer 行上演练:解析失败与
+    // 越界报行内错误,合法值带空白也能 commit。
+    let mut module = FakeModule::new("fake");
+    module.schema = vec![SettingSpec {
+        key: SettingKey("module.fake.volume".into()),
+        label: "fake int".into(),
+        description: None,
+        kind: SettingKind::Integer { min: 0, max: 100 },
+        default: SettingValue::Integer(50),
+        apply_policy: ApplyPolicy::Immediate,
+    }];
+    let (mut core, _) = setup(module);
     core.open_settings();
     assert!(
-        core.apply_setting_text("core.lockkeys.hold_ms", "abc")
+        core.apply_setting_text("module.fake.volume", "abc")
             .is_err()
     );
     assert!(core.settings_model().unwrap().error.is_some());
     assert!(
-        core.apply_setting_text("core.lockkeys.hold_ms", "149")
+        core.apply_setting_text("module.fake.volume", "149")
             .is_err()
     );
-    core.apply_setting_text("core.lockkeys.hold_ms", " 500 ")
+    core.apply_setting_text("module.fake.volume", " 60 ")
         .unwrap();
     let model = core.settings_model().unwrap();
     assert!(model.error.is_none());
@@ -387,10 +398,10 @@ fn integer_editor_reports_errors_and_commits_typed_values() {
         model
             .rows
             .iter()
-            .find(|r| r.key.as_ref() == "core.lockkeys.hold_ms")
+            .find(|r| r.key.as_ref() == "module.fake.volume")
             .unwrap()
             .value,
-        SettingValue::Integer(500)
+        SettingValue::Integer(60)
     );
 }
 
@@ -447,9 +458,9 @@ fn trigger_spec_is_synthesized_for_non_default_modules() {
 
     core.open_settings();
     let model = core.settings_model().unwrap();
-    // 11 行 core.*(5 基础 + 6 锁键 §140)+ bm 的触发词行;
+    // 8 行 = 7 行 core.*(5 基础 + 2 锁键 §140/§144)+ bm 的触发词行;
     // 默认模块(无触发词)没有该行。
-    assert_eq!(model.rows.len(), 12);
+    assert_eq!(model.rows.len(), 8);
     let keys: Vec<&str> = model.rows.iter().map(|r| r.key.as_ref()).collect();
     assert!(keys.contains(&"module.bm.trigger"));
     assert!(!keys.contains(&"module.default.trigger"));
@@ -1310,8 +1321,8 @@ fn dnd_mode_notify_skips_other_keys_and_failed_transactions() {
 }
 
 // ---------------------------------------------------------------------
-// 锁键服务设置(§140):Core 合成 6 行,校验 = protocol from_settings,
-// commit 后全量配置通知(NotifyLockKeys,dnd_mode 同款模式)。
+// 锁键状态提示设置(§140;§144 起两个布尔行):commit 后全量配置
+// 通知(NotifyLockKeys,dnd_mode 同款模式)。
 // ---------------------------------------------------------------------
 
 /// 带 notify_lockkeys 的 setup;通知序列录进 log。
@@ -1335,15 +1346,15 @@ fn lockkeys_notify_fires_initial_with_defaults_and_on_commit() {
     // 初始通知:持久化为空 → protocol 默认配置。
     assert_eq!(*log.lock().unwrap(), vec![LockKeysConfig::default()]);
 
-    core.apply_setting("core.lockkeys.hold_ms", SettingValue::Integer(500))
+    core.apply_setting("core.lockkeys.osd", SettingValue::Bool(false))
         .unwrap();
     // commit 后下发全量配置,改过的行已生效。
     let last = log.lock().unwrap().last().copied().unwrap();
-    assert_eq!(last.hold_ms, 500);
+    assert!(!last.osd);
     assert_eq!(
         last,
         LockKeysConfig {
-            hold_ms: 500,
+            osd: false,
             ..LockKeysConfig::default()
         }
     );
@@ -1355,21 +1366,11 @@ fn lockkeys_invalid_candidate_fails_without_commit_or_notify() {
     let log = Arc::new(Mutex::new(Vec::new()));
     let mut core = setup_with_lockkeys_notify(log.clone());
 
-    // allowlist 之外 / 越界 / 非数字:都不 commit、不通知。
-    core.apply_setting(
-        "core.lockkeys.remap_key",
-        SettingValue::Enum("num_lock".into()),
-    )
-    .unwrap_err();
-    core.apply_setting("core.lockkeys.hold_ms", SettingValue::Integer(99))
+    // 布尔行收到非布尔候选:SettingKind 类型校验拒绝,不 commit 不通知。
+    core.apply_setting("core.lockkeys.osd", SettingValue::String("abc".into()))
         .unwrap_err();
-    core.apply_setting("core.lockkeys.hold_ms", SettingValue::String("abc".into()))
+    core.apply_setting("core.lockkeys.enabled", SettingValue::Integer(1))
         .unwrap_err();
-    core.apply_setting(
-        "core.lockkeys.numlock_mode",
-        SettingValue::Enum("locked".into()),
-    )
-    .unwrap_err();
     assert_eq!(log.lock().unwrap().len(), 1); // 只有初始那次
     // 生效值仍是默认(通知载荷即全量生效配置,最后一次 = 初始默认)。
     assert_eq!(
@@ -1379,7 +1380,7 @@ fn lockkeys_invalid_candidate_fails_without_commit_or_notify() {
 }
 
 #[test]
-fn lockkeys_notify_covers_all_six_rows_and_skips_unrelated() {
+fn lockkeys_notify_covers_both_rows_and_skips_unrelated() {
     let log = Arc::new(Mutex::new(Vec::new()));
     let mut core = setup_with_lockkeys_notify(log.clone());
 
@@ -1394,17 +1395,8 @@ fn lockkeys_notify_covers_all_six_rows_and_skips_unrelated() {
     core.apply_setting("core.lockkeys.osd", SettingValue::Bool(false))
         .unwrap();
     assert!(!log.lock().unwrap().last().unwrap().osd);
-    core.apply_setting(
-        "core.lockkeys.numlock_mode",
-        SettingValue::Enum("always_on".into()),
-    )
-    .unwrap();
-    assert_eq!(
-        log.lock().unwrap().last().unwrap().numlock_mode,
-        NumLockMode::AlwaysOn
-    );
-    // 初始 + 3 次锁键行 commit。
-    assert_eq!(log.lock().unwrap().len(), 4);
+    // 初始 + 2 次锁键行 commit。
+    assert_eq!(log.lock().unwrap().len(), 3);
 }
 
 // ---------------------------------------------------------------------
@@ -1675,8 +1667,8 @@ fn settings_view_lifecycle_and_effects() {
     assert!(core.in_settings());
     assert!(core.session().is_none());
     let model = core.settings_model().unwrap();
-    // log_file + hotkey + hide_on_focus_loss + start_on_boot + dnd_mode + 6 锁键行(§140)
-    assert_eq!(model.rows.len(), 11);
+    // log_file + hotkey + hide_on_focus_loss + start_on_boot + dnd_mode + 2 锁键行(§140/§144)
+    assert_eq!(model.rows.len(), 7);
     assert!(model.rows.iter().any(|r| r.key.as_ref() == "core.log_file"));
     assert_eq!(model.selected, 0);
 
