@@ -1,6 +1,6 @@
 [package]
 name = "sakana-module-file"
-version = "0.1.0"
+version.workspace = true
 edition.workspace = true
 
 [dependencies]
