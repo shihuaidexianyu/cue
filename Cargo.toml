@@ -18,7 +18,7 @@ members = [
 [workspace.package]
 edition = "2024"
 # 版本单点递进：发布时只改这一行（binary 与 lib 同步走）。
-version = "0.6.1"
+version = "0.6.2"
 
 # crate 统一 sakana- 前缀。`sakana` 为 binary(composition root)。
 [workspace.dependencies]
