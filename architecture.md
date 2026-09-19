@@ -84,7 +84,7 @@
 | §146 | [146-watcher-respawn.md](architecture/records/146-watcher-respawn.md) | watcher 死亡改为有界退避重生(10s/60s/300s,表尽放弃) |
 | §147 | [147-ci-gate.md](architecture/records/147-ci-gate.md) | CI 门禁:fmt / clippy -D warnings / test / check-arch |
 | §148 | [148-lockkeys-removal.md](architecture/records/148-lockkeys-removal.md) | 锁键服务整体裁撤(含 OSD 窗口、SessionReset 链路) |
-| §149 | [149-ime-removal.md](architecture/records/149-ime-removal.md) | IME 强制英文整体裁撤(§107 决定废止,键盘状态交还用户) |
+| §149 | [149-ime-removal.md](architecture/records/149-ime-removal.md) | IME 强制英文整体裁撤(§107 决定废止;v0.6.3 止血保留 ImmAssociateContext(NULL) 挂靠解除) |
 
 ## 0.3 阅读顺序
 

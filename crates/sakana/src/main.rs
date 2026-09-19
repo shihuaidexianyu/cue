@@ -311,6 +311,9 @@ fn main() {
         // GPUI 在"记录的显示器断开"时会无条件 ShowWindow 隐藏窗口
         // (多屏变单屏即误唤醒);隐藏状态下吞掉 WM_DISPLAYCHANGE。
         win::window::install_display_change_guard(hwnd);
+        // §149 止血:IME 不挂靠 Launcher 窗口(一次性窗口属性,
+        // 创建后调用一次即常驻;GPUI 0.2 不投递 IME 组合字符)。
+        win::window::detach_ime(hwnd);
         let focus_hook = win::host::install_focus_hook().expect("focus hook");
 
         // CoreEffect → Win32 执行。FocusInput 的视图侧焦点

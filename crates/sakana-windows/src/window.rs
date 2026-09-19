@@ -7,6 +7,7 @@ use sakana_protocol::logln;
 use std::collections::HashMap;
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::Graphics::Gdi::{InvalidateRect, UpdateWindow};
+use windows::Win32::UI::Input::Ime::{HIMC, ImmAssociateContext};
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::{BOOL, Error};
 
@@ -211,4 +212,23 @@ pub fn set_brand_icon(hwnd: HWND) {
             }
         }
     }
+}
+
+/// §149 止血(v0.6.3):解除 IME 与 Launcher 窗口的关联。
+///
+/// 裁撤强制英文后 IME 重新挂靠本窗口,而 GPUI 0.2 的 Windows 后端
+/// 不处理 IME 组合投递(WM_IME_COMPOSITION):中文布局下键入的
+/// 字母全部进入组合串、无法上屏,触发词与拼音搜索失效;候选窗的
+/// 定位查询(WM_IME_COMPOSITION 的 CPS_* / ImmSetCompositionWindow)
+/// 无人响应,固定弹在屏幕右下角。
+///
+/// `ImmAssociateContext(hwnd, NULL)` 让 IME 不挂靠本窗口——按键
+/// 直接以字符到达(键盘布局不动,仍是用户自己的全局输入法),
+/// 候选窗不再弹出。这是窗口属性、调用一次即常驻,须在创建窗口
+/// 的 UI 线程执行。中文直输(组合串上屏)是已知的后续项,
+/// 粘贴 Unicode 不受影响(§115)。
+pub fn detach_ime(hwnd: HWND) {
+    // 传 NULL 解除关联;返回值是之前的关联,不再使用。
+    unsafe { ImmAssociateContext(hwnd, HIMC(std::ptr::null_mut())) };
+    logln!("[ime] detached (window now has no IMC)");
 }
