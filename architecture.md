@@ -46,7 +46,7 @@
 | §74–§88 | [architecture/08-scope-contract.md](architecture/08-scope-contract.md) | V1 范围、非功能需求、最终边界、**§86 最终 Contract**、判断规则、实现顺序 |
 | §89–§106 | [architecture/09-async.md](architecture/09-async.md) | V1 成功标准、设计哲学、异步任务模型(QueryTicket 北极星) |
 | §107–§116 | [architecture/10-v1-landing.md](architecture/10-v1-landing.md) | V1 落地决策:IME、Row 布局、Module 事件、跨平台、CoreEffect、单实例、性能契约、UX 不变量、托盘 |
-| §117–§151 | [architecture/records/](architecture/records/) | V1.x 实现记录,**每章一文件**,文件名即 § 编号 |
+| §117–§152 | [architecture/records/](architecture/records/) | V1.x 实现记录,**每章一文件**,文件名即 § 编号 |
 
 ### records/ 速查
 
@@ -87,6 +87,7 @@
 | §149 | [149-ime-removal.md](architecture/records/149-ime-removal.md) | IME 强制英文整体裁撤(§107 决定废止;v0.6.3 止血保留 ImmAssociateContext(NULL) 挂靠解除) |
 | §150 | [150-file-ranking.md](architecture/records/150-file-ranking.md) | FileModule 三层评分排序(匹配分 + usage_bonus − 名字噪声;§138 字典序废止) |
 | §151 | [151-build-artifacts-exclusion.md](architecture/records/151-build-artifacts-exclusion.md) | 构建产物排除(target/obj 目录 + 编译中间产物后缀进噪声表) |
+| §152 | [152-tool-cache-exclusion.md](architecture/records/152-tool-cache-exclusion.md) | 工具缓存目录扩充(通用片段 15 → 43,含展开 25 → 52)+ 排除匹配编译为分段查表 |
 
 ## 0.3 阅读顺序
 

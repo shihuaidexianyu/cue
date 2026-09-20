@@ -49,7 +49,7 @@ use windows::Win32::UI::Shell::{
 };
 use windows::core::PCWSTR;
 
-use crate::{ExcludeState, refreshed_fragments};
+use crate::{ExcludeIndex, ExcludeState, refreshed_fragments};
 
 const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
 /// 单批事件合批的静默窗口:用户操作(解压、git checkout)是一阵
@@ -429,11 +429,13 @@ fn entry_for(path: &Path, meta: &std::fs::Metadata) -> Arc<IndexEntry> {
     ))
 }
 
-/// 目录剪枝判定:片段按"目录全路径(补尾 \)小写子串"匹配。
-fn dir_pruned(dir: &Path, fragments_lower: &[String]) -> bool {
+/// 目录剪枝判定:目录全路径(补尾 \)小写后交给编译模式匹配(§152:
+/// 段名查表 + 前缀,替代逐片段子串扫描)。补尾 `\` 让 `c:\windows\`
+/// 这类前缀片段也能命中目录本身。
+fn dir_pruned(dir: &Path, patterns: &ExcludeIndex) -> bool {
     let mut p = dir.to_string_lossy().to_lowercase();
     p.push('\\');
-    fragments_lower.iter().any(|f| p.contains(f.as_str()))
+    patterns.matches(&p)
 }
 
 /// 迭代遍历 dir 的子树(不含 dir 本身):reparse point 目录跳过
@@ -441,7 +443,7 @@ fn dir_pruned(dir: &Path, fragments_lower: &[String]) -> bool {
 /// ——只读属性不触发内容回调);命中排除片段的目录整棵剪枝。
 fn walk_into(
     dir: &Path,
-    fragments_lower: &[String],
+    patterns: &ExcludeIndex,
     exclude_noise: bool,
     out: &mut Vec<Arc<IndexEntry>>,
     stats: &mut CrawlStats,
@@ -477,7 +479,7 @@ fn walk_into(
                     stats.pruned += 1;
                     continue;
                 }
-                if exclude_noise && dir_pruned(&path, fragments_lower) {
+                if exclude_noise && dir_pruned(&path, patterns) {
                     stats.pruned += 1;
                     continue;
                 }
@@ -494,7 +496,7 @@ fn walk_into(
 /// 调用方借此排空事件队列(§142)。
 fn crawl(
     roots: &[PathBuf],
-    fragments_lower: &[String],
+    patterns: &ExcludeIndex,
     exclude_noise: bool,
     logger: &ModuleLogger,
     stop: &AtomicBool,
@@ -512,7 +514,7 @@ fn crawl(
                 out.push(entry_for(root, &meta));
                 walk_into(
                     root,
-                    fragments_lower,
+                    patterns,
                     exclude_noise,
                     &mut out,
                     &mut stats,
@@ -842,10 +844,9 @@ fn index_thread_main(
 ) {
     // watcher 先开:首爬期间的变更积进队列,爬完后合批补上。
     let (watchers, watcher_done) = spawn_watchers(&roots, &tx, &logger, &stop);
-    let mut policy = (
-        refreshed_fragments(&exclude).0,
-        exclude_noise.load(Ordering::Acquire),
-    );
+    // 策略 =(编译模式, 原始片段(供比较), 排除开关)。
+    let (patterns, frags, _) = refreshed_fragments(&exclude);
+    let mut policy = (patterns, frags, exclude_noise.load(Ordering::Acquire));
     // §142:首爬是同步遍历,期间没有别的消费者,4096 队列很容易在
     // 长首爬(实测 20 s)里溢出——溢出标记会让首爬刚结束就再来一次
     // 全量重爬。这里每访问一个目录排空一次队列,事件照常在首爬后
@@ -866,7 +867,7 @@ fn index_thread_main(
         };
         publish(
             &inner,
-            crawl(&roots, &policy.0, policy.1, &logger, &stop, &mut drain),
+            crawl(&roots, &policy.0, policy.2, &logger, &stop, &mut drain),
         );
     }
     while !stop.load(Ordering::Acquire) {
@@ -914,11 +915,13 @@ fn index_thread_main(
             }
         }
         // 和已发布快照的策略比较,不依赖哪个线程先读取配置的 mtime。
+        let (next_patterns, next_frags, _) = refreshed_fragments(&exclude);
         let next_policy = (
-            refreshed_fragments(&exclude).0,
+            next_patterns,
+            next_frags,
             exclude_noise.load(Ordering::Acquire),
         );
-        if rescan || policy != next_policy {
+        if rescan || policy.1 != next_policy.1 || policy.2 != next_policy.2 {
             // 丢弃重扫前积压的旧事件;重扫期间的新事件留在队列里补齐。
             for _ in 0..BATCH_CAP {
                 if rx.try_recv().is_err() {
@@ -930,7 +933,7 @@ fn index_thread_main(
                 crawl(
                     &roots,
                     &next_policy.0,
-                    next_policy.1,
+                    next_policy.2,
                     &logger,
                     &stop,
                     &mut || {},
@@ -938,7 +941,7 @@ fn index_thread_main(
             );
             policy = next_policy;
         } else {
-            apply_batch(&inner, &batch, &policy.0, policy.1, &logger, &stop);
+            apply_batch(&inner, &batch, &policy.0, policy.2, &logger, &stop);
         }
         batch.clear();
     }
@@ -968,7 +971,7 @@ fn index_thread_main(
 fn apply_batch(
     inner: &Arc<Mutex<Inner>>,
     batch: &[WatchEvent],
-    fragments: &[String],
+    patterns: &ExcludeIndex,
     noise: bool,
     logger: &ModuleLogger,
     stop: &AtomicBool,
@@ -979,7 +982,7 @@ fn apply_batch(
         .iter()
         .filter(|ev| match ev {
             WatchEvent::Change { path, .. } => {
-                !(noise && path.parent().is_some_and(|p| dir_pruned(p, fragments)))
+                !(noise && path.parent().is_some_and(|p| dir_pruned(p, patterns)))
             }
             _ => false,
         })
@@ -1054,7 +1057,7 @@ fn apply_batch(
                     let lower: Box<str> = path.to_string_lossy().to_lowercase().into();
                     if meta.is_dir() {
                         let reparse = meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0;
-                        if reparse || (noise && dir_pruned(path, fragments)) {
+                        if reparse || (noise && dir_pruned(path, patterns)) {
                             // 改名进了被剪枝/接合的名字:连子树移除。
                             remove_path(
                                 path,
@@ -1070,7 +1073,7 @@ fn apply_batch(
                             let mut children = Vec::new();
                             walk_into(
                                 path,
-                                fragments,
+                                patterns,
                                 noise,
                                 &mut children,
                                 &mut stats,
@@ -1392,7 +1395,7 @@ pub fn search_entries(
     entries: &[Arc<IndexEntry>],
     query: &str,
     exclude_noise: bool,
-    fragments_lower: &[String],
+    patterns: &ExcludeIndex,
     usage: Option<&UsageReader>,
     limit: usize,
 ) -> Vec<FileEntry> {
@@ -1408,7 +1411,7 @@ pub fn search_entries(
         })
         .collect();
     let query_chars: usize = text_tokens.iter().map(|t| t.chars().count()).sum();
-    let filter = exclude_noise && !query.contains('\\') && !fragments_lower.is_empty();
+    let filter = exclude_noise && !query.contains('\\');
 
     struct Cand<'a> {
         name_hit: bool,
@@ -1435,12 +1438,9 @@ pub fn search_entries(
             }
             // §142:排除名单只在命中项上判定——两个谓词是合取,顺序
             // 不影响结果集,但把 O(条目 × 片段) 降成 O(条目 × token
-            // + 命中 × 片段)。34 万条目 × 20 片段曾是每键 ~170 ms。
-            if filter
-                && fragments_lower
-                    .iter()
-                    .any(|f| e.path_lower.contains(f.as_str()))
-            {
+            // + 命中 × 片段)。34 万条目 × 20 片段曾是每键 ~170 ms；
+            // §152 起匹配本身也降到 O(段数 + 前缀数)。
+            if filter && patterns.matches(&e.path_lower) {
                 return None;
             }
             // name_hit 沿用 §138 语义:text token 命中文件名(含
@@ -1495,6 +1495,11 @@ mod tests {
 
     fn paths(entries: &[FileEntry]) -> Vec<String> {
         entries.iter().map(|e| e.path.to_string()).collect()
+    }
+
+    /// 排除片段 → 编译模式(测试构造糖,§152)。
+    fn patterns(frags: &[&str]) -> ExcludeIndex {
+        ExcludeIndex::new(&frags.iter().map(|s| s.to_string()).collect::<Vec<_>>())
     }
 
     struct FakeUsage(HashMap<String, UsageStat>);
@@ -1643,7 +1648,7 @@ mod tests {
             entry(r"C:\Users\x\Docs\报告 - 副本.docx", false),
             entry(r"C:\Users\x\Docs\报告.docx", false),
         ];
-        let got = search_entries(&entries, "报告", false, &[], None, 4);
+        let got = search_entries(&entries, "报告", false, &patterns(&[]), None, 4);
         // 报告.docx 精确 26;报告.part 26−8;副本 18−6−5;锁 10−8。
         assert!(paths(&got)[0].ends_with("报告.docx"));
         assert!(paths(&got)[1].ends_with("报告.part"));
@@ -1659,11 +1664,11 @@ mod tests {
             entry(r"C:\Users\x\Docs\报告2024.docx", false),
         ];
         // 无 usage:精确名 26 > 前缀 18 − 长度惩罚 4。
-        let got = search_entries(&entries, "报告", false, &[], None, 2);
+        let got = search_entries(&entries, "报告", false, &patterns(&[]), None, 2);
         assert!(paths(&got)[0].ends_with("报告.docx"));
         // 常用文件 +50(次数封顶 + 24h 内):浮到第一。
         let usage = usage_with(&[r"C:\Users\x\Docs\报告2024.docx"]);
-        let got = search_entries(&entries, "报告", false, &[], Some(&usage), 2);
+        let got = search_entries(&entries, "报告", false, &patterns(&[]), Some(&usage), 2);
         assert!(paths(&got)[0].ends_with("报告2024.docx"));
     }
 
@@ -1676,7 +1681,7 @@ mod tests {
             entry(r"C:\报告库\readme.docx", false),
         ];
         let usage = usage_with(&[r"C:\报告库\readme.docx"]);
-        let got = search_entries(&entries, "报告", false, &[], Some(&usage), 2);
+        let got = search_entries(&entries, "报告", false, &patterns(&[]), Some(&usage), 2);
         assert!(paths(&got)[0].contains(r"Docs\报告.docx"));
         assert!(paths(&got)[1].contains("报告库"));
     }
@@ -1705,7 +1710,7 @@ mod tests {
             entry(r"C:\Users\x\Documents\reports", true),
         ];
         // AND + 大小写
-        let got = search_entries(&entries, "report", false, &[], None, 8);
+        let got = search_entries(&entries, "report", false, &patterns(&[]), None, 8);
         assert_eq!(got.len(), 3);
         // 三者都 name_hit,按 §150 评分:report.pdf(精确名 26)>
         // reports(前缀 18 − 长度惩罚 1)> Report-Final.pdf
@@ -1714,16 +1719,16 @@ mod tests {
         assert!(paths(&got)[1].contains("reports"));
         assert!(paths(&got)[2].contains("Report-Final"));
         // ext: 子集
-        let got = search_entries(&entries, "ext:pdf", false, &[], None, 8);
+        let got = search_entries(&entries, "ext:pdf", false, &patterns(&[]), None, 8);
         assert_eq!(got.len(), 2);
-        let got = search_entries(&entries, "report ext:pdf", false, &[], None, 8);
+        let got = search_entries(&entries, "report ext:pdf", false, &patterns(&[]), None, 8);
         assert_eq!(got.len(), 2);
         // 路径片段命中(非文件名)
-        let got = search_entries(&entries, "downloads", false, &[], None, 8);
+        let got = search_entries(&entries, "downloads", false, &patterns(&[]), None, 8);
         assert_eq!(got.len(), 1);
         assert!(paths(&got)[0].contains("Downloads"));
         // limit
-        let got = search_entries(&entries, "report", false, &[], None, 1);
+        let got = search_entries(&entries, "report", false, &patterns(&[]), None, 1);
         assert_eq!(got.len(), 1);
     }
 
@@ -1734,7 +1739,7 @@ mod tests {
             entry(r"C:\Users\x\node_modules\pkg\index.js", false),
             entry(r"C:\Users\x\dev\pkg\index.js", false),
         ];
-        let frags = vec![r"\node_modules\".to_string()];
+        let frags = patterns(&[r"\node_modules\"]);
         let got = search_entries(&entries, "index.js", true, &frags, None, 8);
         assert_eq!(got.len(), 1);
         assert!(paths(&got)[0].contains("dev"));
@@ -1744,23 +1749,51 @@ mod tests {
         // 逃生口:显式路径不过滤
         let got = search_entries(&entries, r"x\node_modules", true, &frags, None, 8);
         assert_eq!(got.len(), 1);
+        // 目录锚定片段不误伤同名文件(§152 末段语义:最后一个路径段
+        // 是文件名,不参与目录段匹配)——名为 target 的文件保留,
+        // target 目录内的文件被过滤。
+        let entries = vec![
+            entry(r"C:\dev\notes\target", false),
+            entry(r"C:\dev\notes\target\build.rs", false),
+        ];
+        let frags = patterns(&[r"\target\"]);
+        let got = search_entries(&entries, "target", true, &frags, None, 8);
+        assert_eq!(paths(&got), vec![r"C:\dev\notes\target".to_string()]);
     }
 
-    /// 目录剪枝判定:片段按带尾 \ 的小写全路径子串匹配。
+    /// 目录剪枝判定(§152:编译模式——段名查表/前缀/子串兜底)。
     #[test]
     fn dir_pruning() {
-        let frags = vec![r"\appdata\".to_string()];
+        let frags = patterns(&[r"\appdata\"]);
         assert!(dir_pruned(Path::new(r"C:\Users\x\AppData"), &frags));
         assert!(dir_pruned(Path::new(r"C:\Users\x\appdata\Local"), &frags));
         assert!(!dir_pruned(Path::new(r"C:\Users\x\Documents"), &frags));
         // §151:构建产物目录
-        let frags = vec![r"\target\".to_string(), r"\obj\".to_string()];
+        let frags = patterns(&[r"\target\", r"\obj\"]);
         assert!(dir_pruned(
             Path::new(r"C:\dev\cue\target\debug\incremental"),
             &frags
         ));
         assert!(dir_pruned(Path::new(r"C:\dev\app\obj\Release"), &frags));
         assert!(!dir_pruned(Path::new(r"C:\Users\x\Desktop\app"), &frags));
+        // §152:框架缓存/依赖目录(带点,项目内任意层级)
+        let frags = patterns(&[r"\.next\", r"\.terraform\", r"\venv\", r"\.cache\"]);
+        assert!(dir_pruned(
+            Path::new(r"C:\dev\web\.next\cache\images"),
+            &frags
+        ));
+        assert!(dir_pruned(
+            Path::new(r"C:\dev\infra\.terraform\modules"),
+            &frags
+        ));
+        assert!(dir_pruned(Path::new(r"C:\dev\py\venv\Lib"), &frags));
+        assert!(dir_pruned(Path::new(r"C:\dev\tool\.cache\v2"), &frags));
+        // 刻意不排的通用词不误伤
+        assert!(!dir_pruned(Path::new(r"C:\Users\x\build"), &frags));
+        assert!(!dir_pruned(
+            Path::new(r"C:\Users\x\Documents\vendor"),
+            &frags
+        ));
     }
 
     /// §151 用户场景回归:搜 "geek" 时,自己项目 target 下的 Rust
@@ -1777,7 +1810,7 @@ mod tests {
             ),
             entry(r"C:\Users\x\Downloads\geeknotes.txt", false),
         ];
-        let frags = vec![r"\target\".to_string()];
+        let frags = patterns(&[r"\target\"]);
         let got = search_entries(&entries, "geek", true, &frags, None, 8);
         let paths = paths(&got);
         assert_eq!(
@@ -1808,7 +1841,7 @@ mod tests {
             std::fs::write(root.join(name), b"x").unwrap();
         }
         let logger: ModuleLogger = Arc::new(TestLog);
-        let frags: Vec<String> = Vec::new();
+        let frags = patterns(&[]);
         let entries = crawl(
             std::slice::from_ref(&root),
             &frags,
@@ -1831,6 +1864,77 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// §152 性能栅栏(需显式运行,合成负载):
+    /// `cargo test -p sakana-module-file -- --ignored --nocapture wide_query_latency`
+    /// 20 万条目上跑宽泛查询,对比 §151 版名单与本版(43 通用片段 +
+    /// 9 条用户目录展开)的查询级过滤成本——§142 的教训是"命中 ×
+    /// 片段",片段翻倍不能让宽泛查询突破 §78 预算(P95 < 15 ms)。
+    #[test]
+    #[ignore]
+    fn wide_query_latency_under_fragment_growth() {
+        let entries: Vec<Arc<IndexEntry>> = (0..200_000)
+            .map(|i| {
+                let path = format!(
+                    r"C:\Users\x\projects\repo{}\src\module{}\file_{}.rs",
+                    i % 500,
+                    i % 50,
+                    i
+                );
+                IndexEntry::new(make_entry(path, false, None, None))
+            })
+            .collect();
+        let old_list = crate::normalize_fragments(&crate::v151_default_fragments());
+        let new_list = crate::normalize_fragments(&crate::default_fragments());
+        let old_frags = ExcludeIndex::new(&old_list);
+        let new_frags = ExcludeIndex::new(&new_list);
+        println!(
+            "patterns: old(§151, {}) vs new(§152, {}) compiled",
+            old_list.len(),
+            new_list.len()
+        );
+        for (label, frags) in [
+            (format!("old(§151, {})", old_list.len()), &old_frags),
+            (format!("new(§152, {})", new_list.len()), &new_frags),
+        ] {
+            // 预热
+            let _ = search_entries(&entries, "file_1", true, frags, None, 30);
+            let n = 30;
+            let t = std::time::Instant::now();
+            for _ in 0..n {
+                let got = search_entries(&entries, "file_1", true, frags, None, 30);
+                assert!(!got.is_empty());
+            }
+            println!("{label}: {:?}/query", t.elapsed() / n);
+        }
+        // §152 动因对照:旧实现语义(逐片段 substring)在同一名单上的
+        // 纯匹配成本——编译索引把片段增长的成本压成 O(段数 + 前缀数),
+        // 差距随片段数放大,这组数字是"为什么改"的证据。
+        let sample: Vec<&str> = entries.iter().map(|e| e.path_lower.as_ref()).collect();
+        let naive = |p: &str| new_list.iter().any(|f| p.contains(f.as_str()));
+        let passes = 20;
+        let t = std::time::Instant::now();
+        let mut hits = 0;
+        for _ in 0..passes {
+            hits = sample.iter().filter(|p| naive(p)).count();
+        }
+        println!(
+            "matcher naive({} substr) on {} paths: {:?}/pass (hits {hits})",
+            new_list.len(),
+            sample.len(),
+            t.elapsed() / passes
+        );
+        let t = std::time::Instant::now();
+        for _ in 0..passes {
+            hits = sample.iter().filter(|p| new_frags.matches(p)).count();
+        }
+        println!(
+            "matcher compiled({}) on {} paths: {:?}/pass (hits {hits})",
+            new_list.len(),
+            sample.len(),
+            t.elapsed() / passes
+        );
+    }
+
     /// 真实首爬冒烟(需显式运行,涉真实系统副作用):
     /// `cargo test -p sakana-module-file -- --ignored crawl_real_profile_smoke`
     /// 对真实 %USERPROFILE% 走一遍生产首爬路径,断言不 panic 且产出
@@ -1841,7 +1945,7 @@ mod tests {
         let roots = dedup_roots(default_roots());
         assert!(!roots.is_empty(), "no default roots resolved");
         let logger: ModuleLogger = Arc::new(TestLog);
-        let frags = crate::normalize_fragments(&crate::default_fragments());
+        let frags = ExcludeIndex::new(&crate::normalize_fragments(&crate::default_fragments()));
         let entries = crawl(
             &roots,
             &frags,
@@ -1869,7 +1973,7 @@ mod tests {
         std::fs::write(root.join("sub\\b.txt"), b"xx").unwrap();
         std::fs::write(root.join("node_modules\\pkg\\c.js"), b"x").unwrap();
 
-        let frags = vec![r"\node_modules\".to_string()];
+        let frags = patterns(&[r"\node_modules\"]);
         let logger: ModuleLogger = Arc::new(TestLog);
         let entries = crawl(
             std::slice::from_ref(&root),
@@ -1935,12 +2039,9 @@ mod tests {
         }
     }
     fn exclusion(path: Option<PathBuf>) -> Arc<Mutex<ExcludeState>> {
-        Arc::new(Mutex::new(ExcludeState {
-            path,
-            mtime: None,
-            fragments: vec![r"\node_modules\".into()],
-            logger: None,
-        }))
+        let mut st = ExcludeState::new(vec![r"\node_modules\".into()]);
+        st.path = path;
+        Arc::new(Mutex::new(st))
     }
     fn wait_for(mut predicate: impl FnMut() -> bool) {
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
@@ -1971,7 +2072,7 @@ mod tests {
         std::fs::create_dir_all(fixture.0.join("node_modules")).unwrap();
         let hidden = fixture.0.join("node_modules\\hidden.txt");
         std::fs::write(&hidden, "fixture").unwrap();
-        let fragments = vec![r"\node_modules\".into()];
+        let fragments = patterns(&[r"\node_modules\"]);
         let logger: ModuleLogger = Arc::new(TestLog);
         let stop = AtomicBool::new(false);
         let old = Arc::new(crawl(
@@ -2032,7 +2133,7 @@ mod tests {
         std::fs::write(&config, "excluded = []\n").unwrap();
         exclude.lock().unwrap().path = Some(config);
         let _ = refreshed_fragments(&exclude);
-        assert!(!refreshed_fragments(&exclude).1);
+        assert!(!refreshed_fragments(&exclude).2);
         index
             .rescan_tx
             .send(WatchEvent::Change {

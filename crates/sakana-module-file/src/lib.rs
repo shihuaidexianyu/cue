@@ -29,6 +29,7 @@ mod index;
 
 use index::{FileEntry, FileIndex};
 use sakana_protocol::*;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -55,54 +56,114 @@ mod glyph_cp {
     pub const FILE: u32 = 0xE8A5;
 }
 
-/// 默认名单片段(§125、§151):系统目录(含 ProgramData)+ 目录锚定的
-/// 通用 `\AppData\`(任意用户配置,含多配置/沙箱配置)+ 依赖目录
-/// (口径对齐 VS Code search.exclude 默认)+ 构建中间产物目录
-/// (`target` / `obj`:Cargo 与 MSBuild 的强约定,与 node_modules
-/// 同类的"工具内脏";v0.7.2 起排除——Rust 项目 target 下数万
-/// 中间产物既淹没结果又白占索引)+ 按 USERPROFILE 展开
-/// 的工具缓存(项目级同名目录多是配置而非缓存,不按通用排除)。
-/// 片段都以 `\` 结尾,锚定"目录"而非名字碰巧包含它的文件。
-/// 刻意不排 dist / build / out / bin:这些名字太通用(用户可能
-/// 放真实资料),误伤面大于收益。
+/// 默认名单片段(§125、§151、§152):按类分组——写进 TOML 时以
+/// 注释标题呈现,便于人读与人改。片段规则不变:小写全路径子串,
+/// 尾 `\` 锚定目录。
+///
+/// 收录判据:**带点的工具目录几乎零误伤**(没人给资料夹起名
+/// `.next` / `.cache`),以及语言专属的强约定目录(node_modules、
+/// __pycache__、target、obj)。刻意不排 build / dist / out / bin /
+/// vendor / env / coverage / packages / lib —— 都是通用英文词,
+/// 用户可能放真实资料,误伤面大于收益(§151 起的判断)。
+const DEFAULT_FRAGMENT_GROUPS: &[(&str, &[&str])] = &[
+    (
+        "系统目录",
+        &[
+            r"C:\Windows\",
+            r"C:\Program Files\",
+            r"C:\Program Files (x86)\",
+            r"C:\ProgramData\",
+            r"\$Recycle.Bin\",
+            r"\AppData\",
+        ],
+    ),
+    ("版本控制", &[r"\.git\", r"\.svn\", r"\.hg\"]),
+    (
+        "依赖与虚拟环境",
+        &[
+            r"\node_modules\",
+            r"\bower_components\",
+            r"\__pycache__\",
+            r"\.venv\",
+            r"\venv\",
+            r"\virtualenv\",
+            r"\.yarn\",
+            r"\.pnpm-store\",
+        ],
+    ),
+    (
+        "构建产物",
+        &[
+            r"\target\",
+            r"\obj\",
+            r"\.next\",
+            r"\.nuxt\",
+            r"\.svelte-kit\",
+            r"\.angular\",
+            r"\.output\",
+            r"\.turbo\",
+            r"\.parcel-cache\",
+            r"\.vite\",
+            r"\.docusaurus\",
+            r"\.terraform\",
+            r"\.serverless\",
+        ],
+    ),
+    (
+        "工具缓存与测试产物",
+        &[
+            r"\.cache\",
+            r"\.sass-cache\",
+            r"\.pytest_cache\",
+            r"\.mypy_cache\",
+            r"\.ruff_cache\",
+            r"\.tox\",
+            r"\.nox\",
+            r"\.hypothesis\",
+            r"\.nyc_output\",
+            r"\.gradle\",
+            r"\.expo\",
+        ],
+    ),
+    ("IDE 配置", &[r"\.idea\", r"\.vs\"]),
+];
+
+/// 按 USERPROFILE 展开的片段(§125):工具数据在用户目录下,其他
+/// 位置的同名目录多是项目配置而非缓存,不按通用排除。
+const HOME_FRAGMENTS: &[&str] = &[
+    ".vscode", ".cursor", ".cargo", ".rustup", ".m2", ".npm", ".nuget", ".docker", ".android",
+];
+
 fn default_fragments() -> Vec<String> {
-    let mut frags: Vec<String> = [
-        r"C:\Windows\",
-        r"C:\Program Files\",
-        r"C:\Program Files (x86)\",
-        r"C:\ProgramData\",
-        r"\$Recycle.Bin\",
-        r"\AppData\",
-        r"\node_modules\",
-        r"\.git\",
-        r"\.svn\",
-        r"\.hg\",
-        r"\__pycache__\",
-        r"\.venv\",
-        r"\bower_components\",
-        r"\target\",
-        r"\obj\",
-    ]
-    .iter()
-    .map(|s| s.to_string())
-    .collect();
-    if let Some(home) = std::env::var_os("USERPROFILE") {
-        let home = PathBuf::from(home);
-        for d in [
-            ".vscode", ".cursor", ".cargo", ".rustup", ".gradle", ".m2", ".npm", ".nuget",
-            ".docker", ".android",
-        ] {
-            frags.push(format!("{}\\", home.join(d).to_string_lossy()));
-        }
-    }
+    let mut frags: Vec<String> = DEFAULT_FRAGMENT_GROUPS
+        .iter()
+        .flat_map(|(_, fs)| fs.iter().map(|s| s.to_string()))
+        .collect();
+    frags.extend(home_fragments());
     frags
+}
+
+/// USERPROFILE 展开组(路径依赖,单独成函数)。
+fn home_fragments() -> Vec<String> {
+    let Some(home) = std::env::var_os("USERPROFILE") else {
+        return Vec::new();
+    };
+    let home = PathBuf::from(home);
+    HOME_FRAGMENTS
+        .iter()
+        .map(|d| format!("{}\\", home.join(d).to_string_lossy()))
+        .collect()
 }
 
 /// 历史默认名单快照(仅用于 §125 存量升级判定):用户名单精确等于
 /// 某个历史版本(一个片段都没改过)时才重写为当前默认。快照独立
 /// 硬编码,不跟随当前逻辑;每次改默认名单,把被替换的版本追加进来。
-fn legacy_default_fragment_versions() -> [Vec<String>; 2] {
-    [v121_default_fragments(), v125_default_fragments()]
+fn legacy_default_fragment_versions() -> [Vec<String>; 3] {
+    [
+        v121_default_fragments(),
+        v125_default_fragments(),
+        v151_default_fragments(),
+    ]
 }
 
 /// §121 版默认:AppData 与工具缓存都按 USERPROFILE 展开,其他配置
@@ -168,6 +229,41 @@ fn v125_default_fragments() -> Vec<String> {
     frags
 }
 
+/// §151 版默认(v0.7.2):依赖组之后加 `target` / `obj`;`.gradle`
+/// 此时仍在 USERPROFILE 展开组。
+fn v151_default_fragments() -> Vec<String> {
+    let mut frags: Vec<String> = [
+        r"C:\Windows\",
+        r"C:\Program Files\",
+        r"C:\Program Files (x86)\",
+        r"C:\ProgramData\",
+        r"\$Recycle.Bin\",
+        r"\AppData\",
+        r"\node_modules\",
+        r"\.git\",
+        r"\.svn\",
+        r"\.hg\",
+        r"\__pycache__\",
+        r"\.venv\",
+        r"\bower_components\",
+        r"\target\",
+        r"\obj\",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+    if let Some(home) = std::env::var_os("USERPROFILE") {
+        let home = PathBuf::from(home);
+        for d in [
+            ".vscode", ".cursor", ".cargo", ".rustup", ".gradle", ".m2", ".npm", ".nuget",
+            ".docker", ".android",
+        ] {
+            frags.push(format!("{}\\", home.join(d).to_string_lossy()));
+        }
+    }
+    frags
+}
+
 /// 存量一次性升级(§125):文件内容恰为某个历史版本默认名单(用户
 /// 一个片段都没动过)时重写为新默认;用户增删过任何片段即不触碰。
 /// 读取/解析失败、写入失败都不致命(沿用现状)。返回是否升级。
@@ -184,9 +280,10 @@ fn upgrade_seed_if_legacy(path: &Path) -> bool {
     seed_exclude_file(path).is_ok()
 }
 
-/// 首启播种:注释头(格式与逃生口说明)+ 默认片段。片段都是
+/// 首启播种:注释头(格式与逃生口说明)+ 分组默认片段。片段都是
 /// Windows 路径——TOML literal string(单引号)内容逐字,
-/// 反斜杠免转义,是这类名单的天然容器。
+/// 反斜杠免转义,是这类名单的天然容器。分组标题是普通 TOML
+/// 注释,数组元素间的注释不影响解析(§152)。
 fn seed_exclude_file(path: &Path) -> std::io::Result<()> {
     let mut text = String::from(
         "# sakana 文件搜索排除名单\n\
@@ -194,12 +291,24 @@ fn seed_exclude_file(path: &Path) -> std::io::Result<()> {
          # 保存后下一次查询生效;清空数组 = 不排除任何路径。\n\
          # 查询含 \\ 时本名单整体不生效(显式路径逃生口)。\n\
          # 路径用单引号 literal string:反斜杠逐字,无需转义。\n\
+         #\n\
+         # 想恢复某个目录(如要搜项目里的 .next):删掉对应行即可。\n\
          \n\
          excluded = [\n",
     );
-    for f in default_fragments() {
-        // 默认片段均不含单引号/换行(literal string 的两个禁区)。
-        text.push_str(&format!("  '{f}',\n"));
+    for (group, frags) in DEFAULT_FRAGMENT_GROUPS {
+        text.push_str(&format!("  # {group}\n"));
+        for f in *frags {
+            // 默认片段均不含单引号/换行(literal string 的两个禁区)。
+            text.push_str(&format!("  '{f}',\n"));
+        }
+    }
+    let home = home_fragments();
+    if !home.is_empty() {
+        text.push_str("  # 用户目录下的工具数据\n");
+        for f in home {
+            text.push_str(&format!("  '{f}',\n"));
+        }
     }
     text.push_str("]\n");
     std::fs::write(path, text)
@@ -252,6 +361,78 @@ fn build_fragments(content: &str) -> Result<Vec<String>, String> {
     parse_fragments(content).map(|f| normalize_fragments(&f))
 }
 
+/// 编译后的排除模式(§152):目录锚定片段转成 O(段数) 的段名查表
+/// 与盘符前缀列表,非锚定片段保留子串扫描兜底。
+///
+/// 动机:片段从 15 膨胀到 50+ 后,逐片段 `contains` 让查询级过滤
+/// 成本随片段数线性膨胀,触碰 §78 预算。实测(20 万路径,release):
+/// 逐片段子串 77.2 ms/pass → 段名查表 34.4 ms/pass;名单 25 → 52
+/// 片段,整查询 33.3 → 34.1 ms 持平。语义与旧子串锚定判定严格等价
+/// (见 `matches` 的末段说明),只换成本口径。
+pub(crate) struct ExcludeIndex {
+    /// 单段目录名(`\node_modules\` → `node_modules`):按路径段查。
+    seg_names: HashSet<String>,
+    /// 盘符前缀(`c:\windows\`、`c:\users\x\.vscode\`):按路径开头匹配。
+    prefixes: Vec<String>,
+    /// 非锚定片段(用户自定义,如 `cache`):子串兜底。
+    free: Vec<String>,
+}
+
+impl ExcludeIndex {
+    /// 入参是归一化(小写)片段。
+    pub(crate) fn new(fragments_lower: &[String]) -> Self {
+        let mut seg_names = HashSet::new();
+        let mut prefixes = Vec::new();
+        let mut free = Vec::new();
+        for f in fragments_lower {
+            let inner = f.trim_matches('\\');
+            if inner.is_empty() {
+                continue; // 纯分隔符片段无意义
+            }
+            if f.starts_with('\\') && f.ends_with('\\') && !inner.contains('\\') {
+                seg_names.insert(inner.to_string());
+            } else if !f.starts_with('\\') && f.ends_with('\\') {
+                prefixes.push(f.clone());
+            } else {
+                free.push(f.clone());
+            }
+        }
+        Self {
+            seg_names,
+            prefixes,
+            free,
+        }
+    }
+
+    /// 小写全路径是否命中任一排除模式。末段语义:`\` 结尾(目录路径,
+    /// dir_pruned 补尾)时全部段参与;否则末段是文件名,不参与——
+    /// 片段是目录锚定,名为 `target`/`.cache` 的文件不是工具目录
+    /// (与旧子串语义严格等价,只把成本换成 O(段数))。
+    pub(crate) fn matches(&self, path_lower: &str) -> bool {
+        if self
+            .prefixes
+            .iter()
+            .any(|p| path_lower.starts_with(p.as_str()))
+        {
+            return true;
+        }
+        if self.free.iter().any(|f| path_lower.contains(f.as_str())) {
+            return true;
+        }
+        if self.seg_names.is_empty() {
+            return false;
+        }
+        let dir_part = match path_lower.strip_suffix('\\') {
+            Some(rest) => rest,
+            None => match path_lower.rfind('\\') {
+                Some(i) => &path_lower[..i],
+                None => return false,
+            },
+        };
+        dir_part.split('\\').any(|seg| self.seg_names.contains(seg))
+    }
+}
+
 /// 名单的共享视图:query future 在后台线程做 mtime 指纹检查,
 /// 变了才重读(UI 线程零 IO,查询创建预算不破)。
 pub(crate) struct ExcludeState {
@@ -262,15 +443,32 @@ pub(crate) struct ExcludeState {
     mtime: Option<SystemTime>,
     /// 当前生效的归一化片段(小写)。
     fragments: Vec<String>,
+    /// fragments 的编译视图;片段变更时同步重建(§152)。
+    patterns: Arc<ExcludeIndex>,
     /// 解析失败告警(load 后才有)。
     logger: Option<ModuleLogger>,
 }
 
+impl ExcludeState {
+    pub(crate) fn new(fragments: Vec<String>) -> Self {
+        Self {
+            path: None,
+            mtime: None,
+            patterns: Arc::new(ExcludeIndex::new(&fragments)),
+            fragments,
+            logger: None,
+        }
+    }
+}
+
 /// 后台线程侧:mtime 变了才重读文件;stat/读失败或 TOML 语法错误
 /// 保留旧名单(编辑器里的半保存状态不该打烂搜索)。后台读取串行化,
-/// 防止旧读取覆盖新版本;UI 不读取本锁。返回 (片段, 本次是否变更)——
-/// 变更时调用方应触发索引全量重爬(§138:名单的爬取剪枝口径变了)。
-pub(crate) fn refreshed_fragments(state: &Mutex<ExcludeState>) -> (Vec<String>, bool) {
+/// 防止旧读取覆盖新版本;UI 不读取本锁。返回 (编译模式, 原始片段,
+/// 本次是否变更)——变更时调用方应触发索引全量重爬(§138:名单的
+/// 爬取剪枝口径变了);原始片段供策略比较(编译模式不可比)。
+pub(crate) fn refreshed_fragments(
+    state: &Mutex<ExcludeState>,
+) -> (Arc<ExcludeIndex>, Vec<String>, bool) {
     let mut g = state.lock().unwrap();
     let (path, known_mtime) = (g.path.clone(), g.mtime);
     let mut changed = false;
@@ -283,6 +481,9 @@ pub(crate) fn refreshed_fragments(state: &Mutex<ExcludeState>) -> (Vec<String>, 
             match build_fragments(&content) {
                 Ok(fragments) => {
                     changed = g.fragments != fragments;
+                    if changed {
+                        g.patterns = Arc::new(ExcludeIndex::new(&fragments));
+                    }
                     g.fragments = fragments;
                 }
                 Err(e) => {
@@ -297,7 +498,7 @@ pub(crate) fn refreshed_fragments(state: &Mutex<ExcludeState>) -> (Vec<String>, 
             g.mtime = mtime;
         }
     }
-    (g.fragments.clone(), changed)
+    (Arc::clone(&g.patterns), g.fragments.clone(), changed)
 }
 
 /// FileModule,trigger `/`。
@@ -336,12 +537,9 @@ impl FileModule {
             icon_worker: None,
             last_items: Arc::new(Mutex::new(Vec::new())),
             exclude_noise: Arc::new(AtomicBool::new(true)),
-            exclude: Arc::new(Mutex::new(ExcludeState {
-                path: None,
-                mtime: None,
-                fragments: normalize_fragments(&default_fragments()),
-                logger: None,
-            })),
+            exclude: Arc::new(Mutex::new(ExcludeState::new(normalize_fragments(
+                &default_fragments(),
+            )))),
             usage: None,
         }
     }
@@ -573,7 +771,7 @@ impl LauncherModule for FileModule {
         let last_items = Arc::clone(&self.last_items);
         Box::pin(async move {
             let snapshot = index.wait_snapshot().await;
-            let (fragments, changed) = refreshed_fragments(&exclude);
+            let (patterns, _fragments, changed) = refreshed_fragments(&exclude);
             if changed {
                 // 名单变了:查询级过滤立即用新名单,索引级剪枝
                 // 由这次重爬跟上。
@@ -581,7 +779,7 @@ impl LauncherModule for FileModule {
             }
             let noise = exclude_noise.load(Ordering::Relaxed);
             let items: Vec<ModuleItem> =
-                index::search_entries(&snapshot, &search, noise, &fragments, usage.as_ref(), limit)
+                index::search_entries(&snapshot, &search, noise, &patterns, usage.as_ref(), limit)
                     .into_iter()
                     .map(|e| ModuleItem::new(ItemId(e.item_id()), e))
                     .collect();
@@ -824,7 +1022,39 @@ mod tests {
         assert!(frags.contains(&r"c:\programdata\".to_string()));
         assert!(frags.contains(&r"\target\".to_string()));
         assert!(frags.contains(&r"\obj\".to_string()));
+        // §152 新增片段与分组标题
+        assert!(frags.contains(&r"\.next\".to_string()));
+        assert!(frags.contains(&r"\.cache\".to_string()));
+        assert!(frags.contains(&r"\.terraform\".to_string()));
+        assert!(frags.contains(&r"\venv\".to_string()));
+        assert!(content.contains("# 构建产物"));
+        assert!(content.contains("# 依赖与虚拟环境"));
+        // 刻意不排的通用词(§151/§152 判断):这些片段绝不在默认里,
+        // 否则用户放真实资料的同名目录会被静默剪枝。
+        for risky in [
+            r"\build\",
+            r"\dist\",
+            r"\out\",
+            r"\bin\",
+            r"\vendor\",
+            r"\env\",
+            r"\coverage\",
+            r"\packages\",
+            r"\lib\",
+        ] {
+            assert!(
+                !frags.contains(&risky.to_string()),
+                "risky fragment must not be excluded by default: {risky}"
+            );
+        }
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// 测试糖:带名单文件路径的 ExcludeState。
+    fn state_with(path: PathBuf, fragments: Vec<String>) -> Mutex<ExcludeState> {
+        let mut st = ExcludeState::new(fragments);
+        st.path = Some(path);
+        Mutex::new(st)
     }
 
     /// 存量升级(§125):内容恰为任一历史版本默认 → 重写为新默认
@@ -872,19 +1102,13 @@ mod tests {
         let file = dir.join("list.toml");
         std::fs::write(&file, "excluded = ['\\alpha\\']\n").unwrap();
 
-        let state = Mutex::new(ExcludeState {
-            path: Some(file.clone()),
-            mtime: None,
-            fragments: vec!["old".into()],
-            logger: None,
-        });
+        let state = state_with(file.clone(), vec!["old".into()]);
         // mtime None ≠ Some → 首读,标记 changed
-        assert_eq!(
-            refreshed_fragments(&state),
-            (vec![r"\alpha\".to_string()], true)
-        );
+        let (_, frags, changed) = refreshed_fragments(&state);
+        assert_eq!(frags, vec![r"\alpha\".to_string()]);
+        assert!(changed);
         // 同一版本再查:不重读,changed = false
-        assert!(!refreshed_fragments(&state).1);
+        assert!(!refreshed_fragments(&state).2);
         let first_mtime = state.lock().unwrap().mtime.unwrap();
 
         // 内容变了但 mtime 没变(写后强制回拨)→ 不重读
@@ -895,7 +1119,7 @@ mod tests {
             .unwrap()
             .set_modified(first_mtime)
             .unwrap();
-        assert_eq!(refreshed_fragments(&state).0, vec![r"\alpha\".to_string()]);
+        assert_eq!(refreshed_fragments(&state).1, vec![r"\alpha\".to_string()]);
 
         // 推进 mtime → 重读
         std::fs::File::options()
@@ -904,14 +1128,13 @@ mod tests {
             .unwrap()
             .set_modified(first_mtime + std::time::Duration::from_secs(10))
             .unwrap();
-        assert_eq!(
-            refreshed_fragments(&state),
-            (vec![r"\beta\".to_string()], true)
-        );
+        let (_, frags, changed) = refreshed_fragments(&state);
+        assert_eq!(frags, vec![r"\beta\".to_string()]);
+        assert!(changed);
 
         // 文件消失 → 保留旧名单,不 panic
         std::fs::remove_file(&file).unwrap();
-        assert_eq!(refreshed_fragments(&state).0, vec![r"\beta\".to_string()]);
+        assert_eq!(refreshed_fragments(&state).1, vec![r"\beta\".to_string()]);
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -924,13 +1147,8 @@ mod tests {
         let file = dir.join("list.toml");
         std::fs::write(&file, "excluded = ['\\alpha\\']\n").unwrap();
 
-        let state = Mutex::new(ExcludeState {
-            path: Some(file.clone()),
-            mtime: None,
-            fragments: vec!["old".into()],
-            logger: None,
-        });
-        assert_eq!(refreshed_fragments(&state).0, vec![r"\alpha\".to_string()]);
+        let state = state_with(file.clone(), vec!["old".into()]);
+        assert_eq!(refreshed_fragments(&state).1, vec![r"\alpha\".to_string()]);
         let bump = |secs: u64| {
             let t = state.lock().unwrap().mtime.unwrap() + std::time::Duration::from_secs(secs);
             std::fs::File::options()
@@ -944,7 +1162,7 @@ mod tests {
         // 写坏 + 推进 mtime → 名单不动,mtime 已记
         std::fs::write(&file, "excluded = ['oops\n").unwrap();
         bump(10);
-        assert_eq!(refreshed_fragments(&state).0, vec![r"\alpha\".to_string()]);
+        assert_eq!(refreshed_fragments(&state).1, vec![r"\alpha\".to_string()]);
         let seen = state.lock().unwrap().mtime.unwrap();
 
         // 同一坏版本再查:不重读(把文件改回 alpha 但回拨 mtime,名单不变)
@@ -955,12 +1173,12 @@ mod tests {
             .unwrap()
             .set_modified(seen)
             .unwrap();
-        assert_eq!(refreshed_fragments(&state).0, vec![r"\alpha\".to_string()]);
+        assert_eq!(refreshed_fragments(&state).1, vec![r"\alpha\".to_string()]);
 
         // 改对 + 推进 → 生效
         std::fs::write(&file, "excluded = ['\\beta\\']\n").unwrap();
         bump(10);
-        assert_eq!(refreshed_fragments(&state).0, vec![r"\beta\".to_string()]);
+        assert_eq!(refreshed_fragments(&state).1, vec![r"\beta\".to_string()]);
         std::fs::remove_dir_all(&dir).ok();
     }
 
