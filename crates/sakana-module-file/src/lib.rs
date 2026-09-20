@@ -8,8 +8,9 @@
 //! 文件与文件夹同一模态;FileEntry 只在模块内部,Core 只见 ItemId。
 //!
 //! 空查询返回空:UsageRead 只能按键查、不能枚举,给不出 Top Files,
-//! 不显示任何推荐内容。排序 = 文件名命中优先,平手名字升序;
-//! V1 不做 usage 重排。
+//! 不显示任何推荐内容。排序(§150):name_hit > 总分(匹配分 +
+//! usage_bonus − 噪声分)> 名字字典序;副本/下载碎片/锁文件沉底,
+//! 用户打开过的文件浮起。
 //!
 //! 噪声目录默认排除:工作文件几乎从不在系统目录、AppData、包缓存、
 //! 编辑器扩展目录里,但它们会以"工具内脏"的形式淹没结果。名单是
@@ -272,6 +273,8 @@ pub struct FileModule {
     exclude_noise: Arc<AtomicBool>,
     /// 排除名单(模块数据文件 + mtime 指纹;future 后台重读)。
     exclude: Arc<Mutex<ExcludeState>>,
+    /// §150:usage 读取器(load 时绑定);排序第 2 层信号。
+    usage: Option<UsageReader>,
 }
 
 impl FileModule {
@@ -293,6 +296,7 @@ impl FileModule {
                 fragments: normalize_fragments(&default_fragments()),
                 logger: None,
             })),
+            usage: None,
         }
     }
 }
@@ -396,6 +400,9 @@ impl Module for FileModule {
             g.path = Some(file);
             g.logger = Some(ctx.logger.clone());
         }
+        // §150:排序第 2 层(usage_bonus)的读取器,与 app/bookmark
+        // 同一模式(load 时绑定,query 只读)。
+        self.usage = Some(ctx.usage.clone());
         // §138:默认根(%USERPROFILE% + 桌面/文档/下载)∪ 用户声明
         // 的额外根;去重去嵌套由 index 内部完成。
         let mut roots = index::default_roots();
@@ -426,6 +433,7 @@ impl Module for FileModule {
             index.shutdown();
         }
         self.icon_worker = None;
+        self.usage = None;
     }
 
     fn settings_schema(&self) -> SettingsSchema {
@@ -514,6 +522,7 @@ impl LauncherModule for FileModule {
         };
         let exclude = Arc::clone(&self.exclude);
         let exclude_noise = Arc::clone(&self.exclude_noise);
+        let usage = self.usage.clone();
         let limit = ctx.result_limit;
         let last_items = Arc::clone(&self.last_items);
         Box::pin(async move {
@@ -526,7 +535,7 @@ impl LauncherModule for FileModule {
             }
             let noise = exclude_noise.load(Ordering::Relaxed);
             let items: Vec<ModuleItem> =
-                index::search_entries(&snapshot, &search, noise, &fragments, limit)
+                index::search_entries(&snapshot, &search, noise, &fragments, usage.as_ref(), limit)
                     .into_iter()
                     .map(|e| ModuleItem::new(ItemId(e.item_id()), e))
                     .collect();

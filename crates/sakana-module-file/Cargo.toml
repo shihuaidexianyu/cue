@@ -5,6 +5,7 @@ edition.workspace = true
 
 [dependencies]
 sakana-protocol.workspace = true
+sakana-util-common.workspace = true
 sakana-util-win.workspace = true
 futures.workspace = true
 toml.workspace = true
