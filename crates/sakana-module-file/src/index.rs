@@ -1225,10 +1225,13 @@ fn has_date_like(s: &str) -> bool {
     false
 }
 
-/// 垃圾扩展名(§150):临时/碎片/下载残留,几乎不可能是有意打开
-/// 的目标。刻意做成黑名单而非常见后缀白名单:白名单必然偏科,
-/// "该用户常开什么"由 usage_bonus 动态回答。
-const JUNK_EXTS: [&str; 9] = [
+/// 垃圾扩展名(§150、§151):临时/下载残留 + 编译中间产物——两类
+/// 都是"用户不会有意打开"的确定集合。刻意做成黑名单而非常见后缀
+/// 白名单:白名单必然偏科,"该用户常开什么"由 usage_bonus 动态回答。
+/// 编译产物后缀是 §151 增补(target/obj 目录已整体排除,这里是
+/// 目录之外的散落场景:拷来的 .o、SDK 里的 .pdb 等)。
+const JUNK_EXTS: [&str; 17] = [
+    // 临时/下载残留
     "tmp",
     "temp",
     "log",
@@ -1238,6 +1241,16 @@ const JUNK_EXTS: [&str; 9] = [
     "crdownload",
     "partial",
     "download",
+    // 编译中间产物(o/obj 目标文件、rlib/rmeta Rust 库元数据、pdb 调试符号、
+    // ilk/exp MSVC 链接中间物、pyc Python 字节码)
+    "o",
+    "obj",
+    "rlib",
+    "rmeta",
+    "pdb",
+    "ilk",
+    "exp",
+    "pyc",
 ];
 
 /// 副本标记(小写 stem 上 contains):Windows/浏览器的防覆盖命名。
@@ -1521,6 +1534,12 @@ mod tests {
         // 垃圾后缀
         assert_eq!(name_noise("报告.tmp", false), 8);
         assert_eq!(name_noise("setup.crdownload", false), 8);
+        // 编译中间产物后缀(§151):Rust .o / .rlib、MSVC .pdb、Python .pyc
+        // (hash 名 d9geek… 另有字母数字交替的多段惩罚 +6,共 14)
+        assert_eq!(name_noise("d9geek2ejjyizsadif00c89z9.o", false), 14);
+        assert_eq!(name_noise("libsakana_core.rlib", false), 8);
+        assert_eq!(name_noise("sakana.pdb", false), 8);
+        assert_eq!(name_noise("module.cpython-312.pyc", false), 8);
         // 机器默认名 + 日期戳
         assert_eq!(name_noise("IMG_20210901.jpg", false), 7);
         // 版本堆砌(v 前是 CJK,词界成立)
@@ -1734,6 +1753,40 @@ mod tests {
         assert!(dir_pruned(Path::new(r"C:\Users\x\AppData"), &frags));
         assert!(dir_pruned(Path::new(r"C:\Users\x\appdata\Local"), &frags));
         assert!(!dir_pruned(Path::new(r"C:\Users\x\Documents"), &frags));
+        // §151:构建产物目录
+        let frags = vec![r"\target\".to_string(), r"\obj\".to_string()];
+        assert!(dir_pruned(
+            Path::new(r"C:\dev\cue\target\debug\incremental"),
+            &frags
+        ));
+        assert!(dir_pruned(Path::new(r"C:\dev\app\obj\Release"), &frags));
+        assert!(!dir_pruned(Path::new(r"C:\Users\x\Desktop\app"), &frags));
+    }
+
+    /// §151 用户场景回归:搜 "geek" 时,自己项目 target 下的 Rust
+    /// 增量编译中间产物(d9geek2ejjyizsadif00c89z9.o,名字里恰好
+    /// 含 geek)不得出现在结果里——目录片段剪枝 + 查询级过滤
+    /// 双段生效。
+    #[test]
+    fn build_artifacts_do_not_pollute_results() {
+        let entries = vec![
+            entry(r"C:\Users\x\Desktop\app\geek.exe", false),
+            entry(
+                r"C:\Users\x\Desktop\collection\myproject\cue\target\debug\incremental\sakana_module_file-abc\d9geek2ejjyizsadif00c89z9.o",
+                false,
+            ),
+            entry(r"C:\Users\x\Downloads\geeknotes.txt", false),
+        ];
+        let frags = vec![r"\target\".to_string()];
+        let got = search_entries(&entries, "geek", true, &frags, None, 8);
+        let paths = paths(&got);
+        assert_eq!(
+            paths,
+            vec![
+                r"C:\Users\x\Desktop\app\geek.exe".to_string(),
+                r"C:\Users\x\Downloads\geeknotes.txt".to_string(),
+            ]
+        );
     }
 
     /// v0.7.1 事故的端到端回归:真实爬取含纯数字名(相机/截图产物)。
