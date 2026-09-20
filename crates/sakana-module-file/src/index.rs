@@ -260,16 +260,35 @@ impl FileIndex {
         let worker_inner = Arc::clone(&inner);
         let worker_tx = tx.clone();
         let worker = std::thread::spawn(move || {
-            index_thread_main(
-                worker_inner,
-                roots,
-                exclude,
-                exclude_noise,
-                worker_tx,
-                rx,
-                logger,
-                worker_stop,
-            )
+            // v0.7.1:索引线程处理的是外部数据(任意文件名/路径),
+            // 一个未预料的 panic 不得让它静默死亡——记录日志并
+            // 解开首爬等待者(见 publish_empty_if_first_crawl_pending)。
+            let panic_inner = Arc::clone(&worker_inner);
+            let panic_logger = logger.clone();
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+                index_thread_main(
+                    worker_inner,
+                    roots,
+                    exclude,
+                    exclude_noise,
+                    worker_tx,
+                    rx,
+                    logger,
+                    worker_stop,
+                )
+            }));
+            if let Err(payload) = result {
+                let msg = payload
+                    .downcast_ref::<&str>()
+                    .map(|s| (*s).to_string())
+                    .or_else(|| payload.downcast_ref::<String>().cloned())
+                    .unwrap_or_else(|| "unknown panic".to_string());
+                panic_logger.log(
+                    LogLevel::Error,
+                    &format!("file: 索引线程 panic 退出({msg}),文件搜索已停止更新;请上报此日志"),
+                );
+                publish_empty_if_first_crawl_pending(&panic_inner);
+            }
         });
         Self {
             inner: Arc::clone(&inner),
@@ -314,6 +333,25 @@ fn publish(inner: &Mutex<Inner>, entries: Vec<Arc<IndexEntry>>) {
     let wakers = {
         let mut st = inner.lock().unwrap();
         st.snapshot = Some(Arc::new(entries));
+        std::mem::take(&mut st.wakers)
+    };
+    for w in wakers {
+        w.wake();
+    }
+}
+
+/// panic 兜底(v0.7.1 事故修复):索引线程是唯一生产者,若它在首爬
+/// 里 panic,快照永不发布、`wait_snapshot` 永久 pending——文件搜索
+/// 永久空白且零反馈(v0.7.0 生产事故形态)。捕获后发布空快照,
+/// 让查询降级为"无结果"而不是永久挂起;锁毒化也照常取回内容
+/// (panic 可能发生在持锁临界区)。
+fn publish_empty_if_first_crawl_pending(inner: &Mutex<Inner>) {
+    let wakers = {
+        let mut st = inner.lock().unwrap_or_else(|e| e.into_inner());
+        if st.snapshot.is_some() {
+            return; // 已有快照:冻结在旧内容,好过清空
+        }
+        st.snapshot = Some(Arc::new(Vec::new()));
         std::mem::take(&mut st.wakers)
     };
     for w in wakers {
@@ -1139,10 +1177,13 @@ fn ends_with_paren_number(s: &str) -> bool {
 }
 
 /// stem 尾部 `v数字`(v 前非字母数字):版本堆砌("报告v2"、"doc_v2");
-/// "inv2" 里 v 是词的一部分,不算。
+/// "inv2" 里 v 是词的一部分,不算。纯数字 stem("20240901" 这类相机/
+/// 截图产物)没有 v 结构——digits == s.len() 时不得再取 v 位,
+/// 否则 `s.len() - digits - 1` 下溢(v0.7.1 生产事故根因:索引线程
+/// 在首爬中 panic 静默死亡,快照永不发布,文件搜索永久空白)。
 fn ends_with_version(s: &str) -> bool {
     let digits = s.len() - s.trim_end_matches(|c: char| c.is_ascii_digit()).len();
-    if digits == 0 {
+    if digits == 0 || digits == s.len() {
         return false;
     }
     let v_pos = s.len() - digits - 1;
@@ -1500,6 +1541,66 @@ mod tests {
         assert_eq!(name_noise("~$报告 副本 final 2021-09-01 v2.tmp", false), 20);
     }
 
+    /// 病态输入不得 panic(v0.7.1 事故:纯数字 stem 在
+    /// `ends_with_version` 里下溢 panic,索引线程静默死亡,
+    /// 文件搜索永久空白)。这组名字是"索引路径永不 panic"的
+    /// 栅栏——任何断言失败或 panic 都是回归。
+    #[test]
+    fn noise_and_score_never_panic_on_pathological_names() {
+        let long_a = "x".repeat(300);
+        let long_b = format!("{}.tmp", "数".repeat(200));
+        let names = [
+            "20240901",     // 纯数字:事故触发名
+            "20240901.jpg", // 纯数字 stem + 扩展名
+            "123.txt",
+            "0",
+            "007",
+            "v2", // 只有版本形
+            "v",
+            "V2",
+            "报告v",  // 多字节尾 + v
+            "报告v2", // 正常版本形
+            "-",
+            "...",
+            ".",
+            "..",
+            "(1)",
+            "()",
+            ")",
+            "(",
+            "~$",
+            "~$a",
+            " ",
+            "\t",
+            "起来",
+            "🎉🎉.png",
+            "报告🎉v2",
+            "🄰🄱",
+            "a",
+            long_a.as_str(),
+            long_b.as_str(),
+            "2021-09-01",
+            "2021-9-1",
+            "9999-99-99",
+            "1-2",
+            "------------------------",
+            "a(1)(2)(3)",
+            "no_ext_binary",
+        ];
+        for n in names {
+            let _ = name_noise(n, false);
+            let _ = name_noise(n, true);
+            let lower = n.to_lowercase();
+            let _ = token_score(&lower, &lower);
+            let _ = split_stem_ext(n);
+            let _ = token_count(n);
+        }
+        // 纯数字:无 vN 结构,不计版本噪声(照片名只有日期戳 +3)
+        assert_eq!(name_noise("20240901.jpg", false), 3);
+        // 纯数字无扩展名:+2(无 ext)
+        assert_eq!(name_noise("20240901", false), 5);
+    }
+
     /// §150 匹配分键序:精确 26 > 前缀 18 > 词首 14 > 中间 10。
     #[test]
     fn token_score_hierarchy() {
@@ -1633,6 +1734,75 @@ mod tests {
         assert!(dir_pruned(Path::new(r"C:\Users\x\AppData"), &frags));
         assert!(dir_pruned(Path::new(r"C:\Users\x\appdata\Local"), &frags));
         assert!(!dir_pruned(Path::new(r"C:\Users\x\Documents"), &frags));
+    }
+
+    /// v0.7.1 事故的端到端回归:真实爬取含纯数字名(相机/截图产物)。
+    /// 修复前 `20240901.jpg` 让 name_noise 下溢 panic,索引线程
+    /// 在首爬中死亡,快照永不发布 —— 文件搜索永久空白。
+    #[test]
+    fn crawl_survives_numeric_and_pathological_names() {
+        let root = std::env::temp_dir().join(format!("sakana-file-numeric-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        for name in [
+            "20240901.jpg",
+            "123",
+            "007.txt",
+            "v2.docx",
+            "报告v2.docx",
+            "截图2021-09-01.png",
+        ] {
+            std::fs::write(root.join(name), b"x").unwrap();
+        }
+        let logger: ModuleLogger = Arc::new(TestLog);
+        let frags: Vec<String> = Vec::new();
+        let entries = crawl(
+            std::slice::from_ref(&root),
+            &frags,
+            true,
+            &logger,
+            &AtomicBool::new(false),
+            &mut || {},
+        );
+        let names: Vec<&str> = entries.iter().map(|e| e.entry.name.as_ref()).collect();
+        for name in [
+            "20240901.jpg",
+            "123",
+            "007.txt",
+            "v2.docx",
+            "报告v2.docx",
+            "截图2021-09-01.png",
+        ] {
+            assert!(names.contains(&name), "missing {name}");
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 真实首爬冒烟(需显式运行,涉真实系统副作用):
+    /// `cargo test -p sakana-module-file -- --ignored crawl_real_profile_smoke`
+    /// 对真实 %USERPROFILE% 走一遍生产首爬路径,断言不 panic 且产出
+    /// 非空索引——v0.7.1 事故的手动验证入口。
+    #[test]
+    #[ignore]
+    fn crawl_real_profile_smoke() {
+        let roots = dedup_roots(default_roots());
+        assert!(!roots.is_empty(), "no default roots resolved");
+        let logger: ModuleLogger = Arc::new(TestLog);
+        let frags = crate::normalize_fragments(&crate::default_fragments());
+        let entries = crawl(
+            &roots,
+            &frags,
+            true,
+            &logger,
+            &AtomicBool::new(false),
+            &mut || {},
+        );
+        assert!(!entries.is_empty(), "first crawl produced no entries");
+        println!(
+            "real crawl: {} roots -> {} entries",
+            roots.len(),
+            entries.len()
+        );
     }
 
     /// 临时目录树爬取:文件与目录都进索引;命中片段的子树不进。
