@@ -110,13 +110,51 @@ lib.rs    FileModule 存 ctx.usage(load 时),query 传入;
 不下沉 app/bookmark 的 matcher.rs(子序列 vs 子串位置,语义
 不同,Rule of Three 未触发)。
 
+## 事故与修复(v0.7.1,2026-09-20)
+
+**v0.7.0 生产事故**:安装后文件搜索永久空白(不是"结果不对",
+是"什么都不显示")。
+
+根因:`ends_with_version` 对纯数字 stem(`20240901.jpg`、`123.txt`
+这类相机/截图产物)执行 `s.len() - digits - 1`:`digits == s.len()`
+时下溢 → debug 构建 panic("attempt to subtract with overflow"),
+release 构建 wrap 成 `usize::MAX` 后切片越界 panic。索引线程是裸
+`std::thread::spawn`,panic 即静默死亡(§132 日志无 panic hook,
+release 无 stderr)→ 快照永不发布 → `wait_snapshot()` 永久
+pending → 文件搜索永久空白。**用户目录里几乎必然存在纯数字
+文件名**,所以是必现事故。
+
+教训:噪声分计算在索引线程的**外部数据**(任意文件名)路径上,
+行级边界必须穷举;v0.7.0 的测试只覆盖了"正常名字"(报告.docx
+等),没有纯数字名。
+
+修复三层:
+
+```text
+1. 根因    ends_with_version 增加 digits == s.len() 提前返回
+2. 栅栏    病态名测试(纯数字/全符号/emoji/超长/多字节边界/
+          单字符/无扩展名 等 37 个名字)+ 端到端 crawl 回归
+          (临时目录放纯数字名,走真实首爬路径)
+3. 兜底    索引线程顶层 catch_unwind(§150 增补):捕获后写
+          Error 日志(索引线程处理外部数据,一个未预料的
+          panic 不得静默),且首爬未完成时发布空快照——
+          查询降级为"无结果"而非永久挂起。已有快照时保持
+          冻结(旧内容好过清空)。
+```
+
+真实目录验证(修复后,debug 构建):
+`cargo test -p sakana-module-file -- --ignored crawl_real_profile_smoke`
+→ **440,891 条目,17.25 s,零 panic**(修复前该路径必死于
+第一个纯数字文件)。
+
 ## 验证
 
 ```text
 单元 = noise 逐模式打分、匹配分键序(精确>前缀>词首>中间)、
      usage 平局打破、垃圾后缀/锁文件沉底、目录豁免、
+     病态名永不 panic(37 个)、端到端 crawl 含纯数字名、
      search_semantics 断言更新(字典序 → 评分序)
+真实 = crawl_real_profile_smoke(#[ignore],440,891 条目零 panic)
 回归 = fmt / clippy -D warnings / cargo test --workspace /
      check-arch 四门禁全绿
-手动 = 真实语料对比发布前后常见查询的 top-10(记录者:发布时)
 ```
