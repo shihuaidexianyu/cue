@@ -3881,6 +3881,7 @@ version = "0.6.3"
 dependencies = [
  "futures",
  "sakana-protocol",
+ "sakana-util-common",
  "sakana-util-win",
  "toml 1.1.4+spec-1.1.0",
  "windows 0.62.2",

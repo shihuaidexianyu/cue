@@ -18,7 +18,8 @@
 //! 等待(§115:不闪"无结果")。watcher 首次读取投递后才首爬,爬取窗口
 //! 的变更积在队列里随后合批补上——不丢变更。
 
-use sakana_protocol::{LogLevel, ModuleLogger};
+use sakana_protocol::{LogLevel, ModuleLogger, UsageReader};
+use sakana_util_common::usage_bonus;
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
@@ -147,22 +148,27 @@ pub(crate) fn test_entry(path: &str, is_dir: bool, size: Option<u64>) -> FileEnt
 
 // ---- 索引条目与快照 ----
 
-/// 查询热数据:预计算的小写串(匹配零分配)。条目不可变,快照
-/// 是 `Arc<Vec<Arc<IndexEntry>>>`——增量重建只付 Arc 克隆。
+/// 查询热数据:预计算的小写串(匹配零分配)与噪声分(§150)。
+/// 条目不可变,快照是 `Arc<Vec<Arc<IndexEntry>>>`——增量重建只付 Arc 克隆。
 pub struct IndexEntry {
     entry: FileEntry,
     path_lower: Box<str>,
     name_lower: Box<str>,
+    /// §150 名字噪声分(0=干净,封顶 20):建索引时算一次,
+    /// 查询路径只读字段,零成本。
+    noise: u8,
 }
 
 impl IndexEntry {
     fn new(entry: FileEntry) -> Arc<Self> {
         let path_lower = entry.path.to_lowercase().into();
         let name_lower = entry.name.to_lowercase().into();
+        let noise = name_noise(&entry.name, entry.is_dir);
         Arc::new(Self {
             entry,
             path_lower,
             name_lower,
+            noise,
         })
     }
 }
@@ -1067,7 +1073,238 @@ fn apply_batch(
     publish(inner, next);
 }
 
-// ---- 查询 ----
+// ---- 查询:§150 评分(名字噪声 + 匹配分 + usage 两阶段) ----
+
+/// 名字切 (stem, ext):按最后一个 '.';点开头的整名(如
+/// `.gitignore`)或空段视为无扩展名。
+fn split_stem_ext(name: &str) -> (&str, &str) {
+    match name.rsplit_once('.') {
+        Some((stem, ext)) if !stem.is_empty() && !ext.is_empty() => (stem, ext),
+        _ => (name, ""),
+    }
+}
+
+/// 分隔字符(词边界的一种):空白与常见标点。中文标点不列——
+/// "报告、纪要" 在用户语义里仍是一个短语。
+fn is_sep_char(c: char) -> bool {
+    c.is_whitespace() || matches!(c, '_' | '-' | '.' | '(' | ')' | '[' | ']' | '+' | '&' | '#')
+}
+
+/// CJK 及邻近表意文字(噪声/词界判定用,粗粒度即可)。
+fn is_cjk(c: char) -> bool {
+    (c as u32) >= 0x2E80
+}
+
+/// 分隔段数:按分隔符与 CJK↔ASCII 切换点分段("报告v2"=2 段)。
+fn token_count(s: &str) -> usize {
+    #[derive(PartialEq, Clone, Copy)]
+    enum C {
+        Sep,
+        Cjk,
+        Alpha,
+        Digit,
+    }
+    let cls = |c: char| {
+        if is_sep_char(c) {
+            C::Sep
+        } else if is_cjk(c) {
+            C::Cjk
+        } else if c.is_ascii_alphabetic() {
+            C::Alpha
+        } else {
+            C::Digit
+        }
+    };
+    let mut count = 0;
+    let mut prev = C::Sep;
+    for c in s.chars() {
+        let cur = cls(c);
+        if cur != C::Sep && (prev == C::Sep || prev != cur) {
+            count += 1;
+        }
+        prev = cur;
+    }
+    count
+}
+
+/// stem 尾部 `(数字)`:Windows 复制/下载防覆盖追加。
+fn ends_with_paren_number(s: &str) -> bool {
+    if !s.ends_with(')') {
+        return false;
+    }
+    s.rfind('(').is_some_and(|open| {
+        let inner = &s[open + 1..s.len() - 1];
+        !inner.is_empty() && inner.chars().all(|c| c.is_ascii_digit())
+    })
+}
+
+/// stem 尾部 `v数字`(v 前非字母数字):版本堆砌("报告v2"、"doc_v2");
+/// "inv2" 里 v 是词的一部分,不算。
+fn ends_with_version(s: &str) -> bool {
+    let digits = s.len() - s.trim_end_matches(|c: char| c.is_ascii_digit()).len();
+    if digits == 0 {
+        return false;
+    }
+    let v_pos = s.len() - digits - 1;
+    let rest = &s[..=v_pos];
+    let Some('v') = rest.chars().next_back() else {
+        return false;
+    };
+    rest[..v_pos]
+        .chars()
+        .next_back()
+        .is_none_or(|prev| !(prev.is_ascii_alphanumeric() && !is_cjk(prev)))
+}
+
+/// 日期形:8 连数字(20210901)或 dddd-dd-dd(2021-09-01);
+/// "yyyy-mm" 单段不认(误伤面大于收益)。
+fn has_date_like(s: &str) -> bool {
+    let chars: Vec<char> = s.chars().collect();
+    let mut run = 0;
+    for &c in &chars {
+        run = if c.is_ascii_digit() { run + 1 } else { 0 };
+        if run >= 8 {
+            return true;
+        }
+    }
+    if chars.len() >= 10 {
+        for i in 4..chars.len() - 5 {
+            if chars[i] == '-'
+                && chars[i + 3] == '-'
+                && chars[i - 4..i]
+                    .iter()
+                    .chain(&chars[i + 1..i + 3])
+                    .chain(&chars[i + 4..i + 6])
+                    .all(|c| c.is_ascii_digit())
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// 垃圾扩展名(§150):临时/碎片/下载残留,几乎不可能是有意打开
+/// 的目标。刻意做成黑名单而非常见后缀白名单:白名单必然偏科,
+/// "该用户常开什么"由 usage_bonus 动态回答。
+const JUNK_EXTS: [&str; 9] = [
+    "tmp",
+    "temp",
+    "log",
+    "bak",
+    "old",
+    "part",
+    "crdownload",
+    "partial",
+    "download",
+];
+
+/// 副本标记(小写 stem 上 contains):Windows/浏览器的防覆盖命名。
+const DUP_MARKERS: [&str; 7] = [
+    "- copy", "-copy", "_copy", " copy", "- 副本", "-副本", "副本",
+];
+
+/// 版本堆砌词:文档草稿期的自我迭代痕迹。
+const VERSION_WORDS: [&str; 5] = ["final", "最终", "修改", "草稿", "draft"];
+
+/// 机器默认名前缀:相机/微信/截图工具/资源管理器新文件。
+const MACHINE_PREFIXES: [&str; 9] = [
+    "img_",
+    "dsc",
+    "mmexport",
+    "wx_camera",
+    "screenshot",
+    "截图",
+    "屏幕截图",
+    "未命名",
+    "新建",
+];
+
+/// §150 名字噪声分(0=干净,封顶 20):"这个名字(含后缀)像不像
+/// 用户会有意打开的东西"。区分系统/应用为防覆盖自动添加的命名
+/// 与用户有意命名;目录是高频打开对象,豁免后缀项。建索引时算。
+fn name_noise(name: &str, is_dir: bool) -> u8 {
+    let lower = name.to_lowercase();
+    let (stem, ext) = split_stem_ext(&lower);
+    let mut n: u32 = 0;
+    if stem.starts_with("~$") {
+        n += 8; // Office 锁文件(名字还是截断原名前两字符的)
+    }
+    if !is_dir {
+        if ext.is_empty() {
+            n += 2; // 无扩展名:疑似数据/脚本碎片
+        } else if JUNK_EXTS.contains(&ext) {
+            n += 8; // 临时/下载残留
+        }
+    }
+    if ends_with_paren_number(stem) {
+        n += 6;
+    }
+    if DUP_MARKERS.iter().any(|m| stem.contains(m)) {
+        n += 6;
+    }
+    if VERSION_WORDS.iter().any(|w| stem.contains(w)) {
+        n += 3;
+    }
+    if ends_with_version(stem) {
+        n += 3;
+    }
+    if MACHINE_PREFIXES.iter().any(|p| stem.starts_with(p)) {
+        n += 4;
+    }
+    if has_date_like(stem) {
+        n += 3;
+    }
+    let tokens = token_count(stem);
+    if tokens > 3 {
+        n += (((tokens - 3) as u32) * 2).min(6);
+    }
+    if stem.chars().count() > 40 {
+        n += 2;
+    }
+    n.min(20) as u8
+}
+
+/// 词首判定:命中位置左邻是分隔符或 CJK↔ASCII 切换点
+/// ("报告v2" 的 v 是词首)。
+fn is_word_start(stem: &str, pos: usize) -> bool {
+    let Some(prev) = stem[..pos].chars().next_back() else {
+        return false;
+    };
+    if is_sep_char(prev) {
+        return true;
+    }
+    let Some(next) = stem[pos..].chars().next() else {
+        return false;
+    };
+    (is_cjk(prev) && next.is_ascii_alphanumeric()) || (prev.is_ascii_alphanumeric() && is_cjk(next))
+}
+
+/// §150 匹配分:text token 对文件名 stem 的**最佳**命中位置
+/// (遍历所有出现,非首个)。命中扩展名段不算——那由 name_lower
+/// 的 contains 判定 name_hit,位置分无效。小写对齐(调用方保证)。
+fn token_score(token: &str, stem: &str) -> Option<i32> {
+    if token.is_empty() {
+        return Some(0);
+    }
+    let mut best: Option<i32> = None;
+    let mut from = 0;
+    while let Some(rel) = stem[from..].find(token) {
+        let pos = from + rel;
+        let mut s = 10;
+        if pos == 0 {
+            s += 8; // 前缀
+        } else if is_word_start(stem, pos) {
+            s += 4; // 词首
+        }
+        if pos == 0 && token.len() == stem.len() {
+            s += 8; // 精确名:26
+        }
+        best = Some(best.map_or(s, |b: i32| b.max(s)));
+        from = pos + token.len().max(1);
+    }
+    best
+}
 
 enum Token {
     /// 小写子串,对全路径匹配。
@@ -1090,23 +1327,49 @@ fn parse_tokens(query: &str) -> Vec<Token> {
         .collect()
 }
 
-/// 纯函数查询:token 空白 AND;text token 子串匹配小写全路径;
-/// `ext:` 匹配文件名后缀。排序 = 文件名命中(全部 text token 落在
-/// 文件名内)> 路径命中,平手按名字升序。排除名单在查询级过滤
-/// (爬取剪枝之外的文件级片段);查询含 `\` 时不过滤(逃生口)。
+/// §150 三层评分查询:token 空白 AND;text token 子串匹配小写全路径
+/// (语义与 §138 一字不差);排序 = name_hit(所有 text token 落在
+/// 文件名内)> 总分(匹配分 + usage_bonus − 噪声分)降序 > 名字
+/// 字典序。usage 查找带锁(命中集最坏数万条,§142 教训),走两阶段:
+/// 廉价分(匹配 − 噪声,纯内存)排序取 top 2×limit,小集合上补
+/// usage 重排后截断。排除名单在查询级过滤(爬取剪枝之外的文件级
+/// 片段);查询含 `\` 时不过滤(逃生口)。
 pub fn search_entries(
     entries: &[Arc<IndexEntry>],
     query: &str,
     exclude_noise: bool,
     fragments_lower: &[String],
+    usage: Option<&UsageReader>,
     limit: usize,
 ) -> Vec<FileEntry> {
     let tokens = parse_tokens(query);
     if tokens.is_empty() || limit == 0 {
         return Vec::new();
     }
+    let text_tokens: Vec<&str> = tokens
+        .iter()
+        .filter_map(|t| match t {
+            Token::Text(s) => Some(s.as_str()),
+            Token::ExtSuffix(_) => None,
+        })
+        .collect();
+    let query_chars: usize = text_tokens.iter().map(|t| t.chars().count()).sum();
     let filter = exclude_noise && !query.contains('\\') && !fragments_lower.is_empty();
-    let mut scored: Vec<(bool, &Arc<IndexEntry>)> = entries
+
+    struct Cand<'a> {
+        name_hit: bool,
+        score: i32,
+        e: &'a Arc<IndexEntry>,
+    }
+    let rank = |a: &Cand, b: &Cand| {
+        b.name_hit
+            .cmp(&a.name_hit)
+            .then_with(|| b.score.cmp(&a.score))
+            .then_with(|| a.e.name_lower.cmp(&b.e.name_lower))
+            .then_with(|| a.e.path_lower.cmp(&b.e.path_lower))
+    };
+
+    let mut cands: Vec<Cand> = entries
         .iter()
         .filter_map(|e| {
             let hit = tokens.iter().all(|t| match t {
@@ -1126,25 +1389,51 @@ pub fn search_entries(
             {
                 return None;
             }
-            let name_hit = tokens.iter().all(|t| match t {
-                Token::Text(s) => e.name_lower.contains(s.as_str()),
-                Token::ExtSuffix(_) => true,
-            });
-            Some((name_hit, e))
+            // name_hit 沿用 §138 语义:text token 命中文件名(含
+            // 扩展名段)即算;匹配分只对 stem 计——命中扩展名段的
+            // token 无位置分,但有 name_hit 资格。
+            let (stem, _ext) = split_stem_ext(&e.name_lower);
+            let mut score = -(e.noise as i32);
+            let mut name_hit = true;
+            for t in &text_tokens {
+                match token_score(t, stem) {
+                    Some(s) => score += s,
+                    None => {
+                        if !e.name_lower.contains(t) {
+                            name_hit = false;
+                        }
+                    }
+                }
+            }
+            if name_hit {
+                // 长度惩罚(有界):长名字离散内容排在短名字干净命中之后。
+                score -= (stem.chars().count() as i32 - query_chars as i32).clamp(0, 20);
+            }
+            Some(Cand { name_hit, score, e })
         })
         .collect();
-    scored.sort_by(|a, b| {
-        b.0.cmp(&a.0)
-            .then_with(|| a.1.name_lower.cmp(&b.1.name_lower))
-            .then_with(|| a.1.path_lower.cmp(&b.1.path_lower))
-    });
-    scored.truncate(limit);
-    scored.into_iter().map(|(_, e)| e.entry.clone()).collect()
+
+    cands.sort_unstable_by(rank);
+    cands.truncate(limit.saturating_mul(2));
+
+    // 阶段 2:小集合上补 usage(§145 上限 +50:能拉开同档名次,
+    // 压不过多命中一个 token 的 +10)。
+    if let Some(u) = usage {
+        for c in &mut cands {
+            c.score += usage_bonus(Some(u), &c.e.entry.path);
+        }
+        cands.sort_unstable_by(rank);
+    }
+    cands.truncate(limit);
+    cands.into_iter().map(|c| c.e.entry.clone()).collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sakana_protocol::{ActionId, UsageRead, UsageStat};
+    use std::collections::HashMap;
+    use std::time::SystemTime;
 
     fn entry(path: &str, is_dir: bool) -> Arc<IndexEntry> {
         IndexEntry::new(make_entry(path.to_string(), is_dir, None, None))
@@ -1152,6 +1441,124 @@ mod tests {
 
     fn paths(entries: &[FileEntry]) -> Vec<String> {
         entries.iter().map(|e| e.path.to_string()).collect()
+    }
+
+    struct FakeUsage(HashMap<String, UsageStat>);
+
+    impl UsageRead for FakeUsage {
+        fn stat(&self, item_key: &str, _action: ActionId) -> Option<UsageStat> {
+            self.0.get(item_key).copied()
+        }
+    }
+
+    fn usage_with(keys: &[&str]) -> UsageReader {
+        let map = keys
+            .iter()
+            .map(|k| {
+                (
+                    k.to_string(),
+                    UsageStat {
+                        count: 30,
+                        last_used: SystemTime::now(),
+                    },
+                )
+            })
+            .collect();
+        Arc::new(FakeUsage(map))
+    }
+
+    /// §150 噪声分逐模式打分。
+    #[test]
+    fn noise_scoring_table() {
+        // 干净名
+        assert_eq!(name_noise("报告.docx", false), 0);
+        // 副本/防覆盖后缀
+        assert_eq!(name_noise("报告 - 副本.docx", false), 6);
+        assert_eq!(name_noise("报告(3).docx", false), 6);
+        // Office 锁文件
+        assert_eq!(name_noise("~$告.docx", false), 8);
+        // 垃圾后缀
+        assert_eq!(name_noise("报告.tmp", false), 8);
+        assert_eq!(name_noise("setup.crdownload", false), 8);
+        // 机器默认名 + 日期戳
+        assert_eq!(name_noise("IMG_20210901.jpg", false), 7);
+        // 版本堆砌(v 前是 CJK,词界成立)
+        assert_eq!(name_noise("报告v2.docx", false), 3);
+        // 版本词混在词里不算("inv2" 的 v 是词的一部分)
+        assert_eq!(name_noise("inv2.docx", false), 0);
+        // 无扩展名文件
+        assert_eq!(name_noise("notes", false), 2);
+        // 目录豁免后缀项(机器名仍计)
+        assert_eq!(name_noise("新建文件夹", true), 4);
+        assert_eq!(name_noise("notes", true), 0);
+        // 分隔段数 >3:+2/段,封顶 6
+        assert_eq!(name_noise("a-b-c-d-e.docx", false), 4);
+        assert_eq!(name_noise("a-b-c-d-e-f-g-h.docx", false), 6);
+        // 日期形 dddd-dd-dd(+3)+ 分隔段数 4 段(+2)
+        assert_eq!(name_noise("预算2021-09-01.docx", false), 5);
+        // 总分封顶 20
+        assert_eq!(name_noise("~$报告 副本 final 2021-09-01 v2.tmp", false), 20);
+    }
+
+    /// §150 匹配分键序:精确 26 > 前缀 18 > 词首 14 > 中间 10。
+    #[test]
+    fn token_score_hierarchy() {
+        assert_eq!(token_score("report", "report"), Some(26));
+        assert_eq!(token_score("re", "report"), Some(18));
+        assert_eq!(token_score("port", "report"), Some(10));
+        // 词首:分隔符后
+        assert_eq!(token_score("re", "xx-re"), Some(14));
+        // 词首:中英文切换点
+        assert_eq!(token_score("v2", "报告v2"), Some(14));
+        // 未命中 stem
+        assert_eq!(token_score("zz", "report"), None);
+    }
+
+    /// §150 排序集成:精确名 > 垃圾后缀 > 副本堆砌 > Office 锁。
+    #[test]
+    fn ranking_sinks_noise_and_junk() {
+        let entries = vec![
+            entry(r"C:\Users\x\Docs\报告.part", false),
+            entry(r"C:\Users\x\Docs\~$报告.docx", false),
+            entry(r"C:\Users\x\Docs\报告 - 副本.docx", false),
+            entry(r"C:\Users\x\Docs\报告.docx", false),
+        ];
+        let got = search_entries(&entries, "报告", false, &[], None, 4);
+        // 报告.docx 精确 26;报告.part 26−8;副本 18−6−5;锁 10−8。
+        assert!(paths(&got)[0].ends_with("报告.docx"));
+        assert!(paths(&got)[1].ends_with("报告.part"));
+        assert!(paths(&got)[2].contains("副本"));
+        assert!(paths(&got)[3].starts_with(r"C:\Users\x\Docs\~$"));
+    }
+
+    /// §150 第 2 层:usage_bonus(+50 上限)在同档内浮起常用文件。
+    #[test]
+    fn usage_bonus_floats_familiar_file() {
+        let entries = vec![
+            entry(r"C:\Users\x\Docs\报告.docx", false),
+            entry(r"C:\Users\x\Docs\报告2024.docx", false),
+        ];
+        // 无 usage:精确名 26 > 前缀 18 − 长度惩罚 4。
+        let got = search_entries(&entries, "报告", false, &[], None, 2);
+        assert!(paths(&got)[0].ends_with("报告.docx"));
+        // 常用文件 +50(次数封顶 + 24h 内):浮到第一。
+        let usage = usage_with(&[r"C:\Users\x\Docs\报告2024.docx"]);
+        let got = search_entries(&entries, "报告", false, &[], Some(&usage), 2);
+        assert!(paths(&got)[0].ends_with("报告2024.docx"));
+    }
+
+    /// §150 name_hit 仍是第一主键:纯路径命中档的文件即使拿到
+    /// usage +50,也不越到名字命中档前面。
+    #[test]
+    fn usage_cannot_cross_name_hit_tier() {
+        let entries = vec![
+            entry(r"C:\Users\x\Docs\报告.docx", false),
+            entry(r"C:\报告库\readme.docx", false),
+        ];
+        let usage = usage_with(&[r"C:\报告库\readme.docx"]);
+        let got = search_entries(&entries, "报告", false, &[], Some(&usage), 2);
+        assert!(paths(&got)[0].contains(r"Docs\报告.docx"));
+        assert!(paths(&got)[1].contains("报告库"));
     }
 
     /// 根去重:大小写/尾斜杠归一;嵌套根丢弃。
@@ -1169,7 +1576,7 @@ mod tests {
         assert!(got.contains(&PathBuf::from(r"D:\dev")));
     }
 
-    /// 查询语义:AND、大小写不敏感、ext: 子集、文件名命中优先。
+    /// 查询语义:AND、大小写不敏感、ext: 子集、§150 评分排序。
     #[test]
     fn search_semantics() {
         let entries = vec![
@@ -1178,22 +1585,25 @@ mod tests {
             entry(r"C:\Users\x\Documents\reports", true),
         ];
         // AND + 大小写
-        let got = search_entries(&entries, "report", false, &[], 8);
+        let got = search_entries(&entries, "report", false, &[], None, 8);
         assert_eq!(got.len(), 3);
-        // 三者都 name_hit,平手按小写名字升序:"report-final.pdf"
-        // ('-' 0x2d < '.' 0x2e)最先。
-        assert!(paths(&got)[0].contains("Report-Final"));
+        // 三者都 name_hit,按 §150 评分:report.pdf(精确名 26)>
+        // reports(前缀 18 − 长度惩罚 1)> Report-Final.pdf
+        // (前缀 18 − final 噪声 3 − 长度惩罚 5)。
+        assert!(paths(&got)[0].contains(r"Documents\report.pdf"));
+        assert!(paths(&got)[1].contains("reports"));
+        assert!(paths(&got)[2].contains("Report-Final"));
         // ext: 子集
-        let got = search_entries(&entries, "ext:pdf", false, &[], 8);
+        let got = search_entries(&entries, "ext:pdf", false, &[], None, 8);
         assert_eq!(got.len(), 2);
-        let got = search_entries(&entries, "report ext:pdf", false, &[], 8);
+        let got = search_entries(&entries, "report ext:pdf", false, &[], None, 8);
         assert_eq!(got.len(), 2);
         // 路径片段命中(非文件名)
-        let got = search_entries(&entries, "downloads", false, &[], 8);
+        let got = search_entries(&entries, "downloads", false, &[], None, 8);
         assert_eq!(got.len(), 1);
         assert!(paths(&got)[0].contains("Downloads"));
         // limit
-        let got = search_entries(&entries, "report", false, &[], 1);
+        let got = search_entries(&entries, "report", false, &[], None, 1);
         assert_eq!(got.len(), 1);
     }
 
@@ -1205,14 +1615,14 @@ mod tests {
             entry(r"C:\Users\x\dev\pkg\index.js", false),
         ];
         let frags = vec![r"\node_modules\".to_string()];
-        let got = search_entries(&entries, "index.js", true, &frags, 8);
+        let got = search_entries(&entries, "index.js", true, &frags, None, 8);
         assert_eq!(got.len(), 1);
         assert!(paths(&got)[0].contains("dev"));
         // 关掉开关 → 不过滤
-        let got = search_entries(&entries, "index.js", false, &frags, 8);
+        let got = search_entries(&entries, "index.js", false, &frags, None, 8);
         assert_eq!(got.len(), 2);
         // 逃生口:显式路径不过滤
-        let got = search_entries(&entries, r"x\node_modules", true, &frags, 8);
+        let got = search_entries(&entries, r"x\node_modules", true, &frags, None, 8);
         assert_eq!(got.len(), 1);
     }
 
