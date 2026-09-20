@@ -3827,7 +3827,7 @@ checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
 
 [[package]]
 name = "sakana"
-version = "0.6.3"
+version = "0.7.0"
 dependencies = [
  "embed-resource",
  "futures",
@@ -3845,7 +3845,7 @@ dependencies = [
 
 [[package]]
 name = "sakana-core"
-version = "0.6.3"
+version = "0.7.0"
 dependencies = [
  "futures",
  "sakana-protocol",
@@ -3853,7 +3853,7 @@ dependencies = [
 
 [[package]]
 name = "sakana-module-app"
-version = "0.6.3"
+version = "0.7.0"
 dependencies = [
  "futures",
  "image",
@@ -3866,7 +3866,7 @@ dependencies = [
 
 [[package]]
 name = "sakana-module-bookmark"
-version = "0.6.3"
+version = "0.7.0"
 dependencies = [
  "pinyin",
  "sakana-protocol",
@@ -3877,7 +3877,7 @@ dependencies = [
 
 [[package]]
 name = "sakana-module-file"
-version = "0.6.3"
+version = "0.7.0"
 dependencies = [
  "futures",
  "sakana-protocol",
@@ -3889,7 +3889,7 @@ dependencies = [
 
 [[package]]
 name = "sakana-module-system"
-version = "0.6.3"
+version = "0.7.0"
 dependencies = [
  "sakana-protocol",
  "sakana-util-win",
@@ -3898,7 +3898,7 @@ dependencies = [
 
 [[package]]
 name = "sakana-module-web"
-version = "0.6.3"
+version = "0.7.0"
 dependencies = [
  "sakana-protocol",
  "sakana-util-common",
@@ -3907,11 +3907,11 @@ dependencies = [
 
 [[package]]
 name = "sakana-protocol"
-version = "0.6.3"
+version = "0.7.0"
 
 [[package]]
 name = "sakana-ui"
-version = "0.6.3"
+version = "0.7.0"
 dependencies = [
  "futures",
  "gpui",
@@ -3923,14 +3923,14 @@ dependencies = [
 
 [[package]]
 name = "sakana-util-common"
-version = "0.6.3"
+version = "0.7.0"
 dependencies = [
  "sakana-protocol",
 ]
 
 [[package]]
 name = "sakana-util-win"
-version = "0.6.3"
+version = "0.7.0"
 dependencies = [
  "image",
  "sakana-protocol",
@@ -3939,7 +3939,7 @@ dependencies = [
 
 [[package]]
 name = "sakana-windows"
-version = "0.6.3"
+version = "0.7.0"
 dependencies = [
  "sakana-protocol",
  "windows 0.62.2",
