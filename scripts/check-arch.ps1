@@ -1,6 +1,11 @@
-﻿# 架构护栏(§70–73、§110–111):Cargo 依赖图 + 源码平台纯净度。
+﻿# 架构护栏(§70–73、§110–111、§153):Cargo 依赖图 + 源码平台纯净度。
 # §141:依赖方向改用 Cargo 图,源码继续扫描;任何违规退出码非零。
-# 用法:powershell -File scripts/check-arch.ps1(建议 pre-push 跑一次;仓库尚无 CI)
+# §153:平台纯净从 windows 系扩为双平台绑定族(Windows + macOS/ObjC),
+#   守卫范围扩到 util-common(共享 util 平台中立,§72–73 首次机器化);
+#   ui 不受约束——GPUI 后端允许合法持有 cfg(target_os) 渲染差异代码。
+# 用法:Windows 上 powershell -File scripts/check-arch.ps1;
+#       macOS/Linux 上 pwsh scripts/check-arch.ps1(源码扫描经 rg 或
+#       git grep 回退,两者跨平台)。CI 在 windows 与 macos runner 各跑一次。
 $ErrorActionPreference = "Stop"
 $script:fail = 0
 function Bad([string]$msg) { Write-Host "FAIL: $msg" -ForegroundColor Red; $script:fail = 1 }
@@ -19,19 +24,29 @@ function Scan([string]$pattern, [string[]]$paths) {
     return @()
 }
 
-# --- 1) 平台纯净度(§110–111):sakana-core / sakana-protocol 不得有平台代码 ---
-$hits = Scan 'std::os::windows|windows::Win32|use windows|windows_sys' @('crates/sakana-core/src', 'crates/sakana-protocol/src')
-if ($hits) { $hits | ForEach-Object { Write-Host "  $_" }; Bad "sakana-core/sakana-protocol 出现平台代码(§110)" }
-foreach ($toml in "crates/sakana-core/Cargo.toml", "crates/sakana-protocol/Cargo.toml") {
-    if (Select-String -Path $toml -Pattern "^\[dependencies\.windows\]|^windows(-sys)?[.\s=]" -Quiet) {
-        Bad "$toml 依赖 windows crate(§110)"
+# --- 1) 平台纯净度(§110–111、§153):core / protocol / util-common 不得有平台代码 ---
+# 双平台绑定族:Windows 侧沿用,新增 macOS/ObjC 侧(§153)。git grep -E
+# 回退是 POSIX ERE,模式只用字面交替,不用 \b。raw extern FFI 不查——
+# 与 windows 侧同水位:护栏是 tripwire,不是证明。
+$hits = Scan 'std::os::windows|std::os::unix|windows::Win32|use windows|windows_sys|objc2|cocoa|core_foundation|core_graphics|core_text|use objc|objc::' @('crates/sakana-core/src', 'crates/sakana-protocol/src', 'crates/sakana-util-common/src')
+if ($hits) { $hits | ForEach-Object { Write-Host "  $_" }; Bad "sakana-core/sakana-protocol/sakana-util-common 出现平台代码(§110/§153)" }
+# Cargo.toml 锚定行首 crate 名 + [.\s=-](workspace 等普通词不带这些
+# 前缀,不吃子串误伤);objc2 家族 crate(objc2-app-kit 等)由 objc2 前缀覆盖。
+foreach ($toml in "crates/sakana-core/Cargo.toml", "crates/sakana-protocol/Cargo.toml", "crates/sakana-util-common/Cargo.toml") {
+    if (Select-String -Path $toml -Pattern '^\[dependencies\.(windows|windows-sys|objc|objc2|cocoa|core-foundation|core-graphics|core-text|metal)\]|^\s*(windows|windows-sys|objc|objc2|cocoa|core-foundation|core-graphics|core-text|metal)[.\s=-]' -Quiet) {
+        Bad "$toml 依赖平台绑定 crate(§110/§153)"
     }
 }
 
 # --- 2) Cargo 解析后的依赖图:覆盖完整模块名、workspace、别名与表格写法 ---
 function Allowed([string]$owner, [string]$dependency) {
     if ($owner -eq 'sakana') { return $true }
-    if ($owner -in @('sakana-core', 'sakana-protocol') -and $dependency -in @('windows', 'windows-sys')) { return $false }
+    # 平台绑定族(§153):前缀匹配覆盖家族成员(objc2-app-kit、
+    # core-foundation-sys 等),不逐一枚举。
+    if ($owner -in @('sakana-core', 'sakana-protocol', 'sakana-util-common') -and (
+            $dependency -like 'windows*' -or $dependency -like 'objc*' -or $dependency -like 'cocoa*' -or
+            $dependency -like 'core-foundation*' -or $dependency -like 'core-graphics*' -or
+            $dependency -like 'core-text*' -or $dependency -eq 'metal')) { return $false }
     if ($dependency -notlike 'sakana-*') { return $true }
     switch -Wildcard ($owner) {
         'sakana-protocol' { return $false }
@@ -53,6 +68,9 @@ if (!(Allowed 'sakana-util-common' 'sakana-protocol')) { throw 'guard regression
 if (Allowed 'sakana-util-common' 'sakana-core') { throw 'guard regression: util-common direction' }
 if (!(Allowed 'sakana-module-app' 'sakana-util-common')) { throw 'guard regression: module -> util-common' }
 if (Allowed 'sakana-core' 'windows') { throw "guard regression: platform dependency" }
+if (Allowed 'sakana-core' 'objc2') { throw "guard regression: platform dependency (macOS)" }
+if (Allowed 'sakana-util-common' 'core-foundation') { throw "guard regression: util-common platform" }
+if (Allowed 'sakana-protocol' 'cocoa') { throw "guard regression: protocol platform (macOS)" }
 $metadataText = cargo metadata --format-version 1 --no-deps --locked
 if ($LASTEXITCODE -ne 0) { throw 'cargo metadata failed' }
 $metadata = ($metadataText -join "`n") | ConvertFrom-Json

@@ -1,6 +1,8 @@
 # CI 门禁(§147):四步全绿才放行。架构不变量(依赖方向 /
 # 平台纯净度 / composition root)此前只有 pre-push 自觉,现在进门禁。
 # windows-latest:workspace 依赖 Win32,测试要在真 Windows 上跑。
+# §153:双平台——macos job 对平台中性层(core/protocol/util-common/ui)
+# 跑同一套门禁,让主干保持双平台可编译;白名单随适配推进逐 crate 扩容。
 name: ci
 
 on:
@@ -35,4 +37,36 @@ jobs:
 
       # rg 缺席时脚本退回 git grep(§142);runner 两者皆有。
       - name: arch guard
+        shell: pwsh
+        run: ./scripts/check-arch.ps1
+
+  # macOS 适配前置(§153):平台中性层在 darwin 上保持可编译、可测试、
+  # 守卫全绿。验证集是显式 -p 白名单——加入名单是适配推进的显式动作,
+  # 不是自动获得;宿主层(sakana-windows)与 Windows 耦合模块暂不在列
+  # (§110:平台代码隔离在宿主 crate 与模块内部,待各自平台化后再加)。
+  # gpui 0.2.2 的 windows-manifest 是空 feature,macOS 上无副作用。
+  # macos runner 默认 shell 是 bash,跑 .ps1 必须显式 shell: pwsh。
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: fmt
+        run: cargo fmt --all -- --check
+
+      - name: clippy (platform-neutral subset)
+        run: cargo clippy --all-targets -p sakana-core -p sakana-protocol -p sakana-util-common -p sakana-ui -- -D warnings
+
+      - name: test (platform-neutral subset)
+        run: cargo test -p sakana-core -p sakana-protocol -p sakana-util-common -p sakana-ui
+
+      # rg 缺席时脚本退回 git grep(§142);macos runner 两者皆有。
+      - name: arch guard
+        shell: pwsh
         run: ./scripts/check-arch.ps1
